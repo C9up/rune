@@ -136,7 +136,7 @@ describe('rune > security & edge cases', () => {
   })
 
   it('message() throws if no rule exists', () => {
-    expect(() => rules.any().message('test')).toThrow('RUNE_NO_RULE')
+    expect(() => rules.any().message('test')).toThrow('message() must be called after a rule')
   })
 
   it('custom rule default message', () => {
