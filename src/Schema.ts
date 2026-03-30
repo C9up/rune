@@ -4,6 +4,8 @@
  * @implements FR38, FR39, FR41
  */
 
+import { RuneError } from './errors.js'
+
 export interface ValidationError {
   field: string
   rule: string
@@ -137,7 +139,7 @@ export class RuleChain {
   /** Set custom error message for the last rule. */
   message(msg: string): this {
     if (this._rules.length === 0) {
-      throw new Error('[RUNE_NO_RULE] message() must be called after a rule')
+      throw new RuneError('NO_RULE', 'message() must be called after a rule')
     }
     this._rules[this._rules.length - 1].message = msg
     return this

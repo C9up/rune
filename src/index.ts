@@ -6,3 +6,4 @@
 
 export { rules, schema } from './Schema.js'
 export type { RuleChain, ValidationError, ValidationResult, ValidationSchema } from './Schema.js'
+export { RuneError } from './errors.js'
