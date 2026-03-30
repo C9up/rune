@@ -1,0 +1,11 @@
+{
+  "name": "@c9up/rune",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rune — Validation engine for the Ream framework",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": { "build": "tsc", "test": "vitest run" },
+  "devDependencies": { "typescript": "^5.7", "vitest": "^3" }
+}
