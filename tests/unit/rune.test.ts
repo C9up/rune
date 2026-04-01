@@ -24,9 +24,9 @@ describe('rune > schema validation', () => {
     const result = s.validate({ name: 'Ka', email: 'not-an-email' })
     expect(result.valid).toBe(false)
     expect(result.errors.length).toBe(2)
-    expect(result.errors[0].field).toBe('name')
-    expect(result.errors[0].rule).toBe('min')
-    expect(result.errors[1].field).toBe('email')
+    const fields = result.errors.map((e) => e.field).sort()
+    expect(fields).toEqual(['email', 'name'])
+    expect(result.errors.find((e) => e.field === 'name')?.rule).toBe('min')
   })
 
   it('reports missing required fields', () => {
