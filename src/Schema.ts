@@ -1,10 +1,11 @@
 /**
  * Rune Validation Schema — fluent validation rules.
  *
- * @implements FR38, FR39, FR41
+ * @implements FR38, FR39, FR40, FR41
  */
 
 import { RuneError } from './errors.js'
+import { validateNative, isNativeAvailable } from './native.js'
 
 export interface ValidationError {
   field: string
@@ -28,7 +29,23 @@ export function schema(fields: Record<string, RuleChain>): ValidationSchema {
   return {
     fields,
     validate(data: Record<string, unknown>): ValidationResult {
-      // Guard against null/undefined/non-object input
+      // Try Rust validation engine if available and no custom rules
+      // Check for features Rust can't handle: custom rules, custom messages, custom transforms
+      const STANDARD_RULES = new Set(['string', 'number', 'boolean', 'min', 'max', 'email', 'positive'])
+      const STANDARD_MSGS: Record<string, string> = { string: 'Must be a string', number: 'Must be a number', boolean: 'Must be a boolean', email: 'Must be a valid email', positive: 'Must be positive' }
+      const hasCustomRules = Object.values(fields).some((chain) => {
+        const chainRules = chain['_rules'] as Array<{ name: string; message: string }>
+        return chainRules.some((r) => {
+          if (!STANDARD_RULES.has(r.name)) return true // custom rule
+          if (STANDARD_MSGS[r.name] && r.message !== STANDARD_MSGS[r.name]) return true // custom message
+          return false
+        })
+      })
+      if (isNativeAvailable() && !hasCustomRules && data !== null && data !== undefined && typeof data === 'object' && !Array.isArray(data)) {
+        return validateWithRust(fields, data as Record<string, unknown>)
+      }
+
+      // Fallback: TypeScript validation
       if (data === null || data === undefined || typeof data !== 'object' || Array.isArray(data)) {
         return { valid: false, errors: [{ field: '_root', rule: 'type', message: 'Input must be an object' }] }
       }
@@ -185,4 +202,33 @@ export const rules = {
   number: () => new RuleChain().number(),
   boolean: () => new RuleChain().boolean(),
   any: () => new RuleChain(),
+}
+
+/** Serialize schema + data and validate via Rust NAPI. */
+function validateWithRust(fields: Record<string, RuleChain>, data: Record<string, unknown>): ValidationResult {
+  const schemaDesc: Record<string, { rules: Array<{ name: string; params: unknown }>; optional: boolean; transforms: string[] }> = {}
+
+  for (const [field, chain] of Object.entries(fields)) {
+    const rules = chain['_rules'].map((r: { name: string }) => ({
+      name: r.name,
+      params: r.name === 'min' ? { min: extractParam(chain, 'min') } :
+              r.name === 'max' ? { max: extractParam(chain, 'max') } : null,
+    }))
+    schemaDesc[field] = {
+      rules,
+      optional: chain['_optional'],
+      transforms: chain['_transforms'].length > 0 ? ['trim'] : [],
+    }
+  }
+
+  const request = JSON.stringify({ schema: schemaDesc, data })
+  return validateNative(request)
+}
+
+function extractParam(chain: RuleChain, ruleName: string): number | undefined {
+  const rule = chain['_rules'].find((r: { name: string; validate: (v: unknown) => boolean }) => r.name === ruleName)
+  if (!rule) return undefined
+  // Extract the number from the rule's message (e.g., "Minimum 3" → 3)
+  const match = rule.message.match(/\d+/)
+  return match ? Number(match[0]) : undefined
 }
