@@ -14,20 +14,22 @@ const __dirname2 = dirname(fileURLToPath(import.meta.url))
 
 const platformMap: Record<string, string> = {
   'linux-x64': 'linux-x64-gnu',
+  'linux-arm64': 'linux-arm64-gnu',
   'darwin-x64': 'darwin-x64',
   'darwin-arm64': 'darwin-arm64',
   'win32-x64': 'win32-x64-msvc',
 }
 
 let native: { validate: (json: string) => string } | undefined
+let loadError: unknown
 
 try {
   const suffix = platformMap[`${platform}-${arch}`]
   if (suffix) {
     native = require2(join(__dirname2, `../index.${suffix}.node`))
   }
-} catch {
-  // NAPI binary not available
+} catch (e) {
+  loadError = e
 }
 
 /**
@@ -35,7 +37,7 @@ try {
  */
 export function validateNative(requestJson: string): { valid: boolean; errors: Array<{ field: string; rule: string; message: string }>; data?: Record<string, unknown> } {
   if (!native) {
-    throw new Error('[RUNE_NAPI_NOT_FOUND] Rust validation engine not available.')
+    throw new Error(`[RUNE_NAPI_NOT_FOUND] Rust validation engine not available: ${loadError ?? 'binary not found'}`)
   }
   return JSON.parse(native.validate(requestJson))
 }
