@@ -16,23 +16,15 @@ permissions:
   contents: read
 
 concurrency:
-  # Differentiated by event_name so a workflow_dispatch publish run is not
-  # cancelled by a subsequent push to main mid-flight.
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
-  # 5-platform NAPI matrix (Story 52.1). rune's `tests/unit/rune.test.ts`
-  # constructs `new Rosetta(...)` which requires both `@c9up/rosetta` (TS
-  # imports) and rosetta's NAPI binary (Rosetta's runtime requires the Rust
-  # ICU engine). rune's `package.json` declares `@c9up/rosetta: workspace:*`
-  # in devDependencies; a standalone `pnpm install` in rune's submodule repo
-  # crashes on the workspace protocol because there's no parent workspace
-  # and `@c9up/*` aren't on npm yet. Mitigation (mirrors warden 40.4
-  # cross-package smoke gate): synthesize a minimal pnpm workspace stub on
-  # the runner with rune + rosetta as workspace members so the protocol
-  # resolves, then build rosetta's NAPI binary inside the stub before
-  # running rune's tests.
+  # 5-platform NAPI matrix. rune is fully self-contained: its runtime and test
+  # suite have zero @c9up dependencies (`bindRosetta` accepts any duck-typed
+  # `{ t() }` translator — i18n consumes rune, not the reverse). It builds and
+  # tests standalone, no workspace stub. darwin-x64 is cross-compiled on an
+  # arm64 runner (macos-13 Intel runners are scarce/deprecated); build-only.
   build-and-test:
     name: Build & test (${{ matrix.suffix }})
     runs-on: ${{ matrix.os }}
@@ -40,78 +32,48 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,    suffix: linux-x64-gnu }
-          - { os: ubuntu-24.04-arm, suffix: linux-arm64-gnu }
-          - { os: macos-13,         suffix: darwin-x64 }
-          - { os: macos-14,         suffix: darwin-arm64 }
-          - { os: windows-latest,   suffix: win32-x64-msvc }
-    defaults:
-      run:
-        working-directory: ws
+          - { os: ubuntu-latest,    suffix: linux-x64-gnu,   target: x86_64-unknown-linux-gnu,  test: true }
+          - { os: ubuntu-24.04-arm, suffix: linux-arm64-gnu, target: aarch64-unknown-linux-gnu, test: true }
+          - { os: macos-14,         suffix: darwin-x64,      target: x86_64-apple-darwin,       test: false }
+          - { os: macos-14,         suffix: darwin-arm64,    target: aarch64-apple-darwin,      test: true }
+          - { os: windows-latest,   suffix: win32-x64-msvc,  target: x86_64-pc-windows-msvc,    test: true }
     steps:
-      - name: Checkout rune into workspace stub
-        uses: actions/checkout@v4
-        with:
-          path: ws/packages/rune
-
-      # Sibling clone of rosetta's standalone repo. If rosetta is private,
-      # provision a PAT scoped to C9up/rosetta read access.
-      - name: Checkout rosetta into workspace stub
-        uses: actions/checkout@v4
-        with:
-          repository: C9up/rosetta
-          path: ws/packages/rosetta
-          ref: main
-
-      # Synthesize a pnpm-workspace.yaml so `workspace:*` resolves locally.
-      - name: Synthesize workspace root
-        shell: bash
-        run: |
-          cat > pnpm-workspace.yaml <<'EOF'
-          packages:
-            - "packages/*"
-          EOF
-          cat > package.json <<'EOF'
-          { "name": "ream-dev-ci-stub", "private": true }
-          EOF
-
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
         with: { version: 9 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
 
-      # rune's `tests/unit/rune.test.ts` constructs `new Rosetta(...)` which
-      # requires rosetta's NAPI binary loadable. Build it in the workspace stub
-      # before running rune's tests. The cost is one extra cargo build per
-      # platform cell (acceptable since rosetta-engine-napi is small).
-      - name: Build rosetta NAPI binary (cross-package test dep)
-        run: pnpm --filter @c9up/rosetta build:napi
+      - name: Build NAPI binary (${{ matrix.target }})
+        run: pnpm build:napi
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
 
-      - name: Build NAPI binary
-        run: pnpm --filter @c9up/rune build:napi
-
-      - name: Vitest
-        run: pnpm --filter @c9up/rune test --reporter=json --outputFile=test-results.json
+      - name: Vitest (JSON reporter)
+        if: matrix.test
+        run: pnpm exec vitest run --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)
-        if: runner.os != 'Windows'
+        if: matrix.test && runner.os != 'Windows'
         run: |
-          if [ ! -f packages/rune/test-results.json ]; then
+          if [ ! -f test-results.json ]; then
             echo "::error::test-results.json not produced — pnpm test failed before writing"
             exit 1
           fi
-          total=$(jq '[.testResults[].assertionResults[]] | length' packages/rune/test-results.json)
+          total=$(jq '[.testResults[].assertionResults[]] | length' test-results.json)
           if [ "$total" -eq 0 ]; then
             echo "::error::0 tests ran — test discovery is broken (check vitest include glob)"
             exit 1
           fi
-          skipped=$(jq '[.testResults[].assertionResults[] | select(.status=="skipped")] | length' packages/rune/test-results.json)
+          skipped=$(jq '[.testResults[].assertionResults[] | select(.status=="skipped")] | length' test-results.json)
           if [ "$skipped" -ne 0 ]; then
             echo "::error::$skipped tests skipped — check NAPI binary load path"
             exit 1
@@ -119,9 +81,9 @@ jobs:
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.test && runner.os == 'Windows'
         run: |
-          $path = "packages/rune/test-results.json"
+          $path = "test-results.json"
           if (-not (Test-Path $path)) {
             Write-Error "test-results.json not produced — pnpm test failed before writing"
             exit 1
@@ -139,17 +101,17 @@ jobs:
         shell: pwsh
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rune-napi-${{ matrix.suffix }}
-          path: ws/packages/rune/index.${{ matrix.suffix }}.node
+          path: index.${{ matrix.suffix }}.node
           if-no-files-found: error
 
   cargo-tests:
     name: Cargo tests (linux-x64-gnu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
@@ -164,12 +126,12 @@ jobs:
     needs: [build-and-test, cargo-tests]
     if: github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with: { version: 9 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -252,8 +214,8 @@ jobs:
             echo "Drift gate passed: local $local_v > registry $npm_v"
           fi
 
-      - run: pnpm install
-      - uses: actions/download-artifact@v4
+      - run: pnpm install --no-frozen-lockfile
+      - uses: actions/download-artifact@v7
         with:
           pattern: rune-napi-*
           merge-multiple: true

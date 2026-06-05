@@ -1,4 +1,3 @@
-import { Rosetta } from "@c9up/rosetta";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	bindRosetta,
@@ -6,6 +5,22 @@ import {
 	schema,
 	setValidationTranslator,
 } from "../../src/index.js";
+
+/**
+ * Minimal stand-in for a translator (e.g. `@c9up/rosetta`). `bindRosetta`
+ * accepts any object exposing `t(key, params)`, so rune stays agnostic and is
+ * tested in isolation — the real i18n pairing lives in the kitchen-sink app.
+ */
+function fakeTranslator(messages: Record<string, string>) {
+	return {
+		t(key: string, params?: Record<string, unknown>): string {
+			const tmpl = messages[key] ?? key;
+			return tmpl.replace(/\{(\w+)\}/g, (_m, k) =>
+				String(params?.[k] ?? `{${k}}`),
+			);
+		},
+	};
+}
 
 afterEach(() => {
 	setValidationTranslator(undefined);
@@ -196,17 +211,12 @@ describe("rune > security & edge cases", () => {
 	});
 });
 
-describe("rune > rosetta integration", () => {
-	it("uses Rosetta translations for default rule messages", () => {
-		const i18n = new Rosetta({ defaultLocale: "fr", fallbackLocale: "en" })
-			.loadMessages("fr", {
-				"validation.required": "{field} est requis",
-				"validation.email": "Email invalide",
-			})
-			.loadMessages("en", {
-				"validation.required": "{field} is required",
-				"validation.email": "Must be a valid email",
-			});
+describe("rune > translator integration", () => {
+	it("uses the bound translator for default rule messages", () => {
+		const i18n = fakeTranslator({
+			"validation.required": "{field} est requis",
+			"validation.email": "Email invalide",
+		});
 
 		bindRosetta(i18n);
 
@@ -219,7 +229,7 @@ describe("rune > rosetta integration", () => {
 	});
 
 	it("keeps explicit custom messages over translations", () => {
-		const i18n = new Rosetta({ defaultLocale: "fr" }).loadMessages("fr", {
+		const i18n = fakeTranslator({
 			"validation.min": "Trop petit",
 		});
 		bindRosetta(i18n);
