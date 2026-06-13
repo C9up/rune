@@ -109,6 +109,12 @@ describe("rune > rule types", () => {
 		const s = schema({ x: rules.string().email() });
 		expect(s.validate({ x: "a@b.com" }).valid).toBe(true);
 		expect(s.validate({ x: "nope" }).valid).toBe(false);
+		// Audit 2026-06-13: reject interior whitespace to match the Rust engine —
+		// the old TS rule rejected only \r\n, silently accepting spaces/tabs so the
+		// same schema validated differently with vs without the native binary.
+		expect(s.validate({ x: "a b@c.com" }).valid).toBe(false);
+		expect(s.validate({ x: "a@b .com" }).valid).toBe(false);
+		expect(s.validate({ x: "a@b.com\t" }).valid).toBe(false);
 	});
 
 	it("custom rule", () => {

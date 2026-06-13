@@ -322,15 +322,12 @@ export class RuleChain {
 	email(): this {
 		this.#rules.push({
 			name: "email",
-			validate: (v) => {
-				if (typeof v !== "string") return false;
-				if (/[\r\n]/.test(v)) return false;
-				const at = v.indexOf("@");
-				if (at <= 0 || at !== v.lastIndexOf("@")) return false;
-				const domain = v.slice(at + 1);
-				const dot = domain.lastIndexOf(".");
-				return dot > 0 && dot < domain.length - 1;
-			},
+			// Mirror the Rust engine's regex exactly (crates/rune-engine/src/engine.rs)
+			// so the SAME schema validates identically whether or not the native
+			// binary loaded: no whitespace anywhere (the old TS rule rejected only
+			// \r\n, silently accepting interior spaces), a single @, dotted domain.
+			validate: (v) =>
+				typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v),
 			message: "Must be a valid email",
 		});
 		return this;
