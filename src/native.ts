@@ -57,3 +57,29 @@ export function validateNative(requestJson: string): {
 export function isNativeAvailable(): boolean {
 	return native !== undefined;
 }
+
+let warnedFallback = false;
+
+/**
+ * Surface — exactly once per process — that the native engine is unavailable so
+ * the schema is falling back to the TypeScript validator. The two paths can
+ * differ subtly, so a silent fallback makes validation results depend on whether
+ * the prebuilt binary loaded (platform-dependent). Callers invoke this only when
+ * they WOULD have used the native engine (no custom rules / translator).
+ */
+export function warnNativeUnavailableOnce(): void {
+	if (warnedFallback) return;
+	warnedFallback = true;
+	const target = `${platform}-${arch}`;
+	const reason =
+		loadError !== undefined
+			? `failed to load (${loadError instanceof Error ? loadError.message : String(loadError)})`
+			: platformMap[target] !== undefined
+				? "binary not found"
+				: `no prebuilt binary for ${target}`;
+	console.warn(
+		`[rune] native validation engine unavailable — ${reason}. Falling back to the ` +
+			"TypeScript validator, whose results can differ subtly from the Rust engine — " +
+			"validation is platform-dependent for this process.",
+	);
+}

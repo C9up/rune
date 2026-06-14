@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	bindRosetta,
 	rules,
 	schema,
 	setValidationTranslator,
 } from "../../src/index.js";
+import { warnNativeUnavailableOnce } from "../../src/native.js";
 
 /**
  * Minimal stand-in for a translator (e.g. `@c9up/rosetta`). `bindRosetta`
@@ -246,5 +247,23 @@ describe("rune > translator integration", () => {
 
 		const result = s.validate({ name: "abc" });
 		expect(result.errors[0].message).toBe("Custom min message");
+	});
+});
+
+describe("rune > native fallback visibility (audit 2026-06-13)", () => {
+	it("warns at most once when the native engine is unavailable (no silent fallback)", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			warnNativeUnavailableOnce();
+			warnNativeUnavailableOnce();
+			// A silent fallback made validation platform-dependent; surfacing it
+			// exactly once is the contract — not zero, not per-validate spam.
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn).toHaveBeenCalledWith(
+				expect.stringContaining("platform-dependent"),
+			);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });

@@ -5,7 +5,11 @@
  */
 
 import { RuneError } from "./errors.js";
-import { isNativeAvailable, validateNative } from "./native.js";
+import {
+	isNativeAvailable,
+	validateNative,
+	warnNativeUnavailableOnce,
+} from "./native.js";
 
 export type ValidationMessageParams = Record<string, string | number | boolean>;
 export type ValidationTranslator = (
@@ -161,8 +165,15 @@ export function schema<T = Record<string, unknown>>(
 				};
 			}
 
-			if (isNativeAvailable() && !hasCustomRules && !validationTranslator) {
-				return validateWithRust<T>(fields, data);
+			if (!hasCustomRules && !validationTranslator) {
+				if (isNativeAvailable()) {
+					return validateWithRust<T>(fields, data);
+				}
+				// This schema would have used the native engine, but it isn't
+				// loaded — surface the platform-dependent TS fallback once instead
+				// of diverging silently. (Schemas with custom rules / a translator
+				// always run on TS by design and don't warn.)
+				warnNativeUnavailableOnce();
 			}
 
 			const errors: ValidationError[] = [];
