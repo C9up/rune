@@ -531,11 +531,14 @@ function validateWithRust<T>(
 	for (const [field, chain] of Object.entries(fields)) {
 		const rules = chain.rules.map((r) => ({
 			name: r.name,
+			// Serialize THIS rule's own param. Previously a find-first lookup by
+			// rule name returned the first matching rule's param, so min(3).min(5)
+			// sent both Rust entries as min=3, dropping the 5 bound (audit 2026-06-13).
 			params:
 				r.name === "min"
-					? { min: extractParam(chain, "min") }
+					? { min: r.param }
 					: r.name === "max"
-						? { max: extractParam(chain, "max") }
+						? { max: r.param }
 						: null,
 		}));
 		schemaDesc[field] = {
@@ -551,11 +554,4 @@ function validateWithRust<T>(
 		return { valid: true, errors: native.errors, data: native.data as T };
 	}
 	return { valid: false, errors: native.errors };
-}
-
-function extractParam(chain: RuleChain, ruleName: string): number | undefined {
-	const rule = chain.rules.find((r) => r.name === ruleName);
-	if (!rule) return undefined;
-	// Use stored param directly (no longer parsed from message text)
-	return rule.param;
 }

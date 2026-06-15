@@ -59,6 +59,14 @@ describe("rune > schema validation", () => {
 		expect(result.errors.find((e) => e.field === "name")?.rule).toBe("min");
 	});
 
+	it("duplicate min() rules each serialize their own bound (no find-first collapse)", () => {
+		// min(3).min(5): a length-4 string passes the 3 bound but must fail the 5.
+		// Before the fix both Rust entries got min=3, dropping the 5 (audit 2026-06-13).
+		const s = schema({ name: rules.string().min(3).min(5) });
+		expect(s.validate({ name: "abcd" }).valid).toBe(false); // len 4 < 5
+		expect(s.validate({ name: "abcde" }).valid).toBe(true); // len 5 ok
+	});
+
 	it("reports missing required fields", () => {
 		const s = schema({ name: rules.string() });
 		const result = s.validate({});
