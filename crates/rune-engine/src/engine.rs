@@ -169,7 +169,13 @@ fn validate_rule(
                 // Rust engine and the TS fallback (which counts UTF-16 code
                 // units via [...str].length) disagree on multi-byte strings
                 // for the SAME schema. Code-point count makes them agree.
-                if (s.chars().count() as f64) < min {
+                //
+                // Bound the walk to `ceil(min)` code points — that's enough to
+                // decide `< min`, so a pathologically long string can't force a
+                // full O(n) scan. Defense-in-depth: Ream already caps body size
+                // upstream, but this keeps rune cheap when used standalone.
+                let cap = min.ceil().max(0.0) as usize;
+                if (s.chars().take(cap).count() as f64) < min {
                     return Some(err(field, "min", &format!("Minimum {}", min)));
                 }
             } else if let Some(n) = value.as_f64() {
@@ -190,8 +196,11 @@ fn validate_rule(
                 None => return Some(err(field, "max", "Invalid max rule: missing parameter")),
             };
             if let Some(s) = value.as_str() {
-                // Code-point count to match the TS fallback (see `min`).
-                if (s.chars().count() as f64) > max {
+                // Code-point count to match the TS fallback (see `min`). Bound
+                // the walk to `floor(max) + 1` points — enough to detect `> max`
+                // without scanning a pathologically long string in full.
+                let cap = (max.floor().max(0.0) as usize).saturating_add(1);
+                if (s.chars().take(cap).count() as f64) > max {
                     return Some(err(field, "max", &format!("Maximum {}", max)));
                 }
             } else if let Some(n) = value.as_f64() {
