@@ -5,7 +5,10 @@ import {
 	schema,
 	setValidationTranslator,
 } from "../../src/index.js";
-import { warnNativeUnavailableOnce } from "../../src/native.js";
+import {
+	isNativeAvailable,
+	warnNativeUnavailableOnce,
+} from "../../src/native.js";
 
 /**
  * Minimal stand-in for a translator (e.g. `@c9up/rosetta`). `bindRosetta`
@@ -274,4 +277,110 @@ describe("rune > native fallback visibility (audit 2026-06-13)", () => {
 			warn.mockRestore();
 		}
 	});
+});
+
+describe("rune > Rust↔TS parity (conformance)", () => {
+	// The Rust engine and the TS fallback MUST reach the same pass/fail decision
+	// for the same schema + input — that parity is the real maintainability
+	// guarantee (results must not depend on whether the native binary loaded).
+	// We force the TS path with a translator (its only behavioural switch is
+	// message text, which we ignore) and compare DECISIONS: `valid` + the set of
+	// `field:rule` failures. This is the cheap, semantic check a codegen registry
+	// can't provide (it would only align signatures, not the per-language logic
+	// where divergence actually lives — e.g. code-point vs UTF-16 counting).
+	const decision = (r: {
+		valid: boolean;
+		errors: Array<{ field: string; rule: string }>;
+	}) => ({
+		valid: r.valid,
+		failures: r.errors.map((e) => `${e.field}:${e.rule}`).sort(),
+	});
+
+	function bothEngines(
+		s: {
+			validate(d: unknown): {
+				valid: boolean;
+				errors: Array<{ field: string; rule: string }>;
+			};
+		},
+		data: unknown,
+	) {
+		setValidationTranslator(undefined); // → native engine (when available)
+		const native = s.validate(data);
+		setValidationTranslator((key) => key); // → TS fallback path
+		const ts = s.validate(data);
+		setValidationTranslator(undefined);
+		return { native, ts };
+	}
+
+	const cases = [
+		{
+			label: "emoji below min — code-point count, not UTF-16 units",
+			fields: { tag: rules.string().min(4) },
+			data: { tag: "👍👍👍" }, // 3 code points / 6 UTF-16 units
+		},
+		{
+			label: "emoji within max — code-point count",
+			fields: { tag: rules.string().max(3) },
+			data: { tag: "👍👍👍" },
+		},
+		{
+			label: "accented string within bounds",
+			fields: { tag: rules.string().min(2).max(4) },
+			data: { tag: "café" },
+		},
+		{
+			label: "number at the min boundary passes",
+			fields: { n: rules.number().min(10).max(20) },
+			data: { n: 10 },
+		},
+		{
+			label: "number below min fails",
+			fields: { n: rules.number().min(10) },
+			data: { n: 9 },
+		},
+		{
+			label: "positive rejects a negative",
+			fields: { n: rules.number().positive() },
+			data: { n: -1 },
+		},
+		{
+			label: "valid email passes",
+			fields: { e: rules.string().email() },
+			data: { e: "a@b.co" },
+		},
+		{
+			label: "email with a newline is rejected",
+			fields: { e: rules.string().email() },
+			data: { e: "a@b\n.co" },
+		},
+		{
+			label: "missing required field fails",
+			fields: { name: rules.string() },
+			data: {},
+		},
+		{
+			label: "optional missing field passes",
+			fields: { name: rules.string().optional() },
+			data: {},
+		},
+		{
+			label: "explicit null on optional passes",
+			fields: { name: rules.string().optional() },
+			data: { name: null },
+		},
+		{
+			label: "type mismatch (number rule, string value) fails",
+			fields: { n: rules.number() },
+			data: { n: "abc" },
+		},
+	];
+
+	for (const c of cases) {
+		it.skipIf(!isNativeAvailable())(`Rust == TS — ${c.label}`, () => {
+			const s = schema(c.fields);
+			const { native, ts } = bothEngines(s, c.data);
+			expect(decision(ts)).toEqual(decision(native));
+		});
+	}
 });
