@@ -6,7 +6,11 @@
 
 export { RuneError } from "./errors.js";
 export type {
+	CompiledRule,
+	FieldContext,
 	RuleChain,
+	RuleValidator,
+	ValidateOptions,
 	ValidationError,
 	ValidationMessageParams,
 	ValidationResult,
@@ -15,6 +19,7 @@ export type {
 } from "./Schema.js";
 export {
 	bindRosetta,
+	createRule,
 	rules,
 	schema,
 	setValidationTranslator,

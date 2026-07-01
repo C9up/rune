@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	bindRosetta,
+	type RuleChain,
 	rules,
 	schema,
 	setValidationTranslator,
@@ -313,7 +314,11 @@ describe("rune > Rust↔TS parity (conformance)", () => {
 		return { native, ts };
 	}
 
-	const cases = [
+	const cases: Array<{
+		label: string;
+		fields: Record<string, RuleChain>;
+		data: unknown;
+	}> = [
 		{
 			label: "emoji below min — code-point count, not UTF-16 units",
 			fields: { tag: rules.string().min(4) },

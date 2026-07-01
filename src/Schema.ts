@@ -24,6 +24,77 @@ export interface ValidationError {
 }
 
 /**
+ * Field context handed to `.use()` rules — mirrors VineJS's field context. It
+ * exposes the value plus the surrounding data so a rule can validate across
+ * fields (e.g. `password === passwordConfirmation`), and a `report()` sink to
+ * raise errors (VineJS reports instead of returning a boolean).
+ */
+export interface FieldContext {
+	/** The current field value (post-transform). */
+	value: unknown;
+	/** The root object being validated. Shared across fields — do NOT mutate. */
+	data: Record<string, unknown>;
+	/** The immediate parent container of this field (object or array). */
+	parent: Record<string, unknown> | unknown[];
+	/** Dotted path to the field, e.g. `address.city` or `tags.0`. */
+	field: string;
+	/** Runtime metadata passed to `validate(data, { meta })`. */
+	meta: Record<string, unknown>;
+	/** `true` while no error has been reported for this field yet. */
+	isValid: boolean;
+	/** Report a validation failure for this field. */
+	report(message: string, rule: string): void;
+}
+
+/**
+ * A `.use()` rule validator — VineJS shape `(value, options, field)`. Report
+ * failures via `field.report(...)`; the return value is ignored.
+ */
+export type RuleValidator<Options = undefined> = (
+	value: unknown,
+	options: Options,
+	field: FieldContext,
+) => void;
+
+/** A compiled `.use()` rule produced by {@link createRule}. */
+export interface CompiledRule {
+	readonly __rune: "rule";
+	run(value: unknown, field: FieldContext): void;
+}
+
+/**
+ * Turn a validator function into a reusable `.use()` rule — VineJS's
+ * `createRule`. Returns a factory: call it with the rule's options to get a
+ * `CompiledRule`, then attach it with `chain.use(rule(options))`.
+ *
+ *     const sameAs = createRule<string>((value, other, field) => {
+ *       if (value !== field.data[other]) {
+ *         field.report(`Must match ${other}`, 'sameAs')
+ *       }
+ *     })
+ *     schema({
+ *       password: rules.string().min(8),
+ *       passwordConfirmation: rules.string().use(sameAs('password')),
+ *     })
+ */
+export function createRule(
+	validator: RuleValidator<undefined>,
+): () => CompiledRule;
+export function createRule<Options>(
+	validator: RuleValidator<Options>,
+): (options: Options) => CompiledRule;
+export function createRule<Options>(
+	validator: RuleValidator<Options>,
+): (options: Options) => CompiledRule {
+	return (options: Options): CompiledRule => ({
+		__rune: "rule",
+		run(value: unknown, field: FieldContext): void {
+			validator(value, options, field);
+		},
+	});
+}
+
+/**
  * Validation result — discriminated union that narrows `data` to the schema's
  * `T` when `valid` is `true`, removing the need for callers to cast or guard
  * `data` separately.
@@ -32,10 +103,26 @@ export type ValidationResult<T = Record<string, unknown>> =
 	| { valid: true; errors: ValidationError[]; data: T }
 	| { valid: false; errors: ValidationError[]; data?: undefined };
 
+/** Options for {@link ValidationSchema.validate}. */
+export interface ValidateOptions {
+	/** Runtime metadata exposed to `.use()` rules via `field.meta` (VineJS parity). */
+	meta?: Record<string, unknown>;
+}
+
 export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
-	validate(data: unknown): ValidationResult<T>;
+	validate(data: unknown, options?: ValidateOptions): ValidationResult<T>;
 }
+
+/** Context threaded through validation so field rules can reach root/parent/meta. */
+interface RunContext {
+	data: Record<string, unknown>;
+	parent: Record<string, unknown> | unknown[];
+	meta: Record<string, unknown>;
+}
+
+/** Default context for internal callers that don't supply one (no root available). */
+const EMPTY_RUN_CONTEXT: RunContext = { data: {}, parent: {}, meta: {} };
 
 /** Type guard: narrows `unknown` to a plain object (non-null, non-array, typeof 'object'). */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -119,6 +206,7 @@ function resolveRuleMessage(field: string, rule: RuleDef): string {
 /** Compute once: does any field rule prevent dispatching to Rust? */
 function detectHasCustomRules(fields: Record<string, RuleChain>): boolean {
 	return Object.values(fields).some((chain) => {
+		if (chain.useRules.length > 0) return true; // .use() rule — TS-only (Rust can't run JS)
 		return chain.rules.some((r) => {
 			if (!STANDARD_RULES.has(r.name)) return true; // custom rule
 			if (!hasDefaultMessage(r)) return true; // custom message
@@ -151,7 +239,7 @@ export function schema<T = Record<string, unknown>>(
 
 	return {
 		fields,
-		validate(data: unknown): ValidationResult<T> {
+		validate(data: unknown, options?: ValidateOptions): ValidationResult<T> {
 			if (!isPlainObject(data)) {
 				return {
 					valid: false,
@@ -178,10 +266,17 @@ export function schema<T = Record<string, unknown>>(
 
 			const errors: ValidationError[] = [];
 			const validated: Record<string, unknown> = {};
+			// Root context: `data` is the root, `parent` of a top-level field is the
+			// root too; nested/array recursion narrows `parent` as it descends.
+			const rootCtx: RunContext = {
+				data,
+				parent: data,
+				meta: options?.meta ?? {},
+			};
 
 			for (const [field, chain] of Object.entries(fields)) {
 				const value = data[field];
-				const result = chain._validateWithTransform(field, value);
+				const result = chain._validateWithTransform(field, value, rootCtx);
 				errors.push(...result.errors);
 				if (result.errors.length === 0 && value !== undefined) {
 					validated[field] = result.transformed;
@@ -223,6 +318,7 @@ export class RuleChain {
 	#transforms: Array<{ name: string; fn: (value: unknown) => unknown }> = [];
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
+	#useRules: CompiledRule[] = [];
 
 	/** Public read access to rules (for OpenAPI generation, Rust bridge). */
 	get rules(): readonly RuleDef[] {
@@ -236,6 +332,10 @@ export class RuleChain {
 		fn: (value: unknown) => unknown;
 	}> {
 		return this.#transforms;
+	}
+	/** Public read access to `.use()` rules (used to keep such schemas off the native path). */
+	get useRules(): readonly CompiledRule[] {
+		return this.#useRules;
 	}
 
 	/** Mark field as optional. */
@@ -377,6 +477,23 @@ export class RuleChain {
 		return this;
 	}
 
+	/**
+	 * Attach a `.use()` rule (from {@link createRule}). Unlike `custom`, the rule
+	 * receives a {@link FieldContext} with the root `data` and `parent`, so it can
+	 * validate across fields. Runs after this field's type/value rules.
+	 */
+	use(rule: CompiledRule): this {
+		if (rule?.__rune !== "rule" || typeof rule.run !== "function") {
+			throw new RuneError(
+				"INVALID_RULE",
+				"use() expects a compiled rule — call the factory first",
+				{ hint: "use(myRule()) or use(myRule(options)), not use(myRule)" },
+			);
+		}
+		this.#useRules.push(rule);
+		return this;
+	}
+
 	/** Set custom error message for the last rule. */
 	message(msg: string): this {
 		if (this.#rules.length === 0) {
@@ -390,6 +507,7 @@ export class RuleChain {
 	_validateWithTransform(
 		field: string,
 		value: unknown,
+		ctx: RunContext = EMPTY_RUN_CONTEXT,
 	): { errors: ValidationError[]; transformed: unknown } {
 		if (value === undefined || value === null) {
 			if (this.#isOptional) return { errors: [], transformed: value };
@@ -404,46 +522,72 @@ export class RuleChain {
 		let transformed = this.#applyTransformsTo(value);
 		const errors = this.#runValueRules(field, transformed);
 
+		// 3. Vine-style .use() rules — run with a FieldContext exposing the root
+		//    `data` and `parent`, so a rule can validate across fields.
+		if (this.#useRules.length > 0) {
+			this.#runUseRules(field, transformed, ctx, errors);
+		}
+
 		// 4. Nested object validation (only if type check passed — not arrays)
-		if (
-			this.#nestedSchema &&
-			typeof transformed === "object" &&
-			transformed !== null &&
-			!Array.isArray(transformed)
-		) {
-			transformed = { ...(transformed as Record<string, unknown>) };
+		if (this.#nestedSchema && isPlainObject(transformed)) {
+			const obj: Record<string, unknown> = { ...transformed };
+			transformed = obj;
 			for (const [nestedField, chain] of Object.entries(this.#nestedSchema)) {
-				const nestedValue = (transformed as Record<string, unknown>)[
-					nestedField
-				];
 				const nestedResult = chain._validateWithTransform(
 					`${field}.${nestedField}`,
-					nestedValue,
+					obj[nestedField],
+					{ data: ctx.data, parent: obj, meta: ctx.meta },
 				);
 				errors.push(...nestedResult.errors);
 				if (nestedResult.transformed !== undefined) {
-					(transformed as Record<string, unknown>)[nestedField] =
-						nestedResult.transformed;
+					obj[nestedField] = nestedResult.transformed;
 				}
 			}
 		}
 
 		// 5. Array item validation
 		if (this.#arrayItemChain && Array.isArray(transformed)) {
-			transformed = [...transformed];
-			for (let i = 0; i < (transformed as unknown[]).length; i++) {
+			const arr: unknown[] = [...transformed];
+			transformed = arr;
+			for (let i = 0; i < arr.length; i++) {
 				const itemResult = this.#arrayItemChain._validateWithTransform(
 					`${field}.${i}`,
-					(transformed as unknown[])[i],
+					arr[i],
+					{ data: ctx.data, parent: arr, meta: ctx.meta },
 				);
 				errors.push(...itemResult.errors);
 				if (itemResult.transformed !== undefined) {
-					(transformed as unknown[])[i] = itemResult.transformed;
+					arr[i] = itemResult.transformed;
 				}
 			}
 		}
 
 		return { errors, transformed };
+	}
+
+	/** Run `.use()` rules on the transformed value with a fresh FieldContext. */
+	#runUseRules(
+		field: string,
+		transformed: unknown,
+		ctx: RunContext,
+		errors: ValidationError[],
+	): void {
+		const fieldCtx: FieldContext = {
+			value: transformed,
+			data: ctx.data,
+			parent: ctx.parent,
+			field,
+			meta: ctx.meta,
+			isValid: errors.length === 0,
+			report(message: string, rule: string): void {
+				errors.push({ field, rule, message });
+			},
+		};
+		for (const rule of this.#useRules) {
+			// Refresh isValid so a rule can early-return once the field has failed.
+			fieldCtx.isValid = errors.length === 0;
+			rule.run(transformed, fieldCtx);
+		}
 	}
 
 	#requiredError(field: string): ValidationError {
