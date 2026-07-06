@@ -389,3 +389,35 @@ describe("rune > Rust↔TS parity (conformance)", () => {
 		});
 	}
 });
+
+describe("STANDARD_RULES native-routing safety (bug-3262)", () => {
+	it("enforces TS-only rules even when the native engine is available (no silent bypass)", () => {
+		// minLength/uuid look 'standard' but live only in the TS validator. Before
+		// the fix they were wrongly listed in STANDARD_RULES, so an all-'standard'
+		// schema routed to the Rust engine, whose `_ => {}` arm skips unknown rules
+		// → invalid input passed. The rules themselves were never removed; they now
+		// route to the TS path that actually runs their `validate`.
+		expect(isNativeAvailable()).toBe(true);
+		const s = schema({
+			handle: rules.string().minLength(5),
+			id: rules.string().uuid(),
+		});
+		const result = s.validate({ handle: "abc", id: "not-a-uuid" });
+		expect(result.valid).toBe(false);
+		const failed = result.errors.map((e) => e.rule);
+		expect(failed).toContain("minLength");
+		expect(failed).toContain("uuid");
+	});
+
+	it("still accepts valid input for the same TS-only rules", () => {
+		const s = schema({
+			handle: rules.string().minLength(5),
+			id: rules.string().uuid(),
+		});
+		const result = s.validate({
+			handle: "abcdef",
+			id: "123e4567-e89b-12d3-a456-426614174000",
+		});
+		expect(result.valid).toBe(true);
+	});
+});

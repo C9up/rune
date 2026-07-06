@@ -12,3 +12,51 @@ export class RuneError extends Error {
 		this.hint = options?.hint;
 	}
 }
+
+/**
+ * A single validation failure in a {@link RuneValidationError} — mirrors the
+ * VineJS `SimpleErrorReporter` node shape `{ message, rule, field, index?, meta? }`.
+ */
+export interface RuneErrorNode {
+	/** Human-readable (already interpolated) error message. */
+	message: string;
+	/** The rule that failed, e.g. `required`, `minLength`, `email`. */
+	rule: string;
+	/** Dotted field path, e.g. `user.email` or `tags.0`. */
+	field: string;
+	/** Array index when the field is an array item (VineJS parity). */
+	index?: number;
+	/** Rule metadata carried for reporters/i18n (e.g. `{ min: 3 }`). */
+	meta?: Record<string, unknown>;
+}
+
+/**
+ * Thrown by {@link ValidationSchema.validateOrThrow} — VineJS's
+ * `E_VALIDATION_ERROR`. Carries the structured `messages` array and an HTTP
+ * `status` (422) so web layers can render it directly, matching AdonisJS/VineJS.
+ */
+export class RuneValidationError extends Error {
+	/** Internal error code for programmatic handling (VineJS parity). */
+	readonly code = "E_VALIDATION_ERROR";
+	/** HTTP status for the failure (422 Unprocessable Entity). */
+	readonly status = 422;
+	/** Structured, per-field validation messages. */
+	readonly messages: RuneErrorNode[];
+
+	constructor(messages: RuneErrorNode[], options?: ErrorOptions) {
+		super("Validation failure", options);
+		this.name = "RuneValidationError";
+		this.messages = messages;
+		if ("captureStackTrace" in Error) {
+			Error.captureStackTrace(this, RuneValidationError);
+		}
+	}
+
+	get [Symbol.toStringTag](): string {
+		return this.name;
+	}
+
+	override toString(): string {
+		return `${this.name} [${this.code}]: ${this.message}`;
+	}
+}

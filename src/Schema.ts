@@ -4,7 +4,9 @@
  * @implements FR38, FR39, FR40, FR41
  */
 
-import { RuneError } from "./errors.js";
+import type { RuneErrorNode } from "./errors.js";
+import { RuneError, RuneValidationError } from "./errors.js";
+import type { MessagesProviderContract } from "./MessagesProvider.js";
 import {
 	isNativeAvailable,
 	validateNative,
@@ -21,6 +23,10 @@ export interface ValidationError {
 	field: string;
 	rule: string;
 	message: string;
+	/** Array index when the field is an array item (VineJS parity). */
+	index?: number;
+	/** Rule metadata carried for reporters/i18n (e.g. `{ min: 3 }`). */
+	meta?: Record<string, unknown>;
 }
 
 /**
@@ -107,11 +113,24 @@ export type ValidationResult<T = Record<string, unknown>> =
 export interface ValidateOptions {
 	/** Runtime metadata exposed to `.use()` rules via `field.meta` (VineJS parity). */
 	meta?: Record<string, unknown>;
+	/**
+	 * VineJS-style messages provider. When supplied, default rule messages are
+	 * resolved through it (custom `.message()` overrides still win, and the
+	 * provider takes precedence over a globally bound translator).
+	 */
+	messagesProvider?: MessagesProviderContract;
 }
 
 export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
+	/** Result-based validation (superset) — never throws. */
 	validate(data: unknown, options?: ValidateOptions): ValidationResult<T>;
+	/**
+	 * Throwing validation (VineJS/Adonis parity). Returns the validated data on
+	 * success; throws {@link RuneValidationError} (`E_VALIDATION_ERROR`, HTTP 422)
+	 * with a structured `.messages` array on failure.
+	 */
+	validateOrThrow(data: unknown, options?: ValidateOptions): T;
 }
 
 /** Context threaded through validation so field rules can reach root/parent/meta. */
@@ -119,6 +138,7 @@ interface RunContext {
 	data: Record<string, unknown>;
 	parent: Record<string, unknown> | unknown[];
 	meta: Record<string, unknown>;
+	messagesProvider?: MessagesProviderContract;
 }
 
 /** Default context for internal callers that don't supply one (no root available). */
@@ -129,7 +149,17 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Rules the Rust validation engine can handle natively. */
+/**
+ * Rules the Rust validation engine (`crates/rune-engine/src/engine.rs`)
+ * ACTUALLY implements. A schema built from only these rules can be validated
+ * natively; anything else routes to the TS path (`rule.validate`).
+ *
+ * CRITICAL: a rule name here that the Rust engine does not implement is a
+ * SILENT VALIDATION BYPASS — the engine's `_ => {}` arm skips unknown rules, so
+ * the constraint never runs. Every entry MUST have a matching arm in engine.rs.
+ * The TS chain rules (minLength/uuid/alpha/in/enum/range/…) live only in the TS
+ * validator, so they are deliberately absent here.
+ */
 const STANDARD_RULES: ReadonlySet<string> = new Set([
 	"string",
 	"number",
@@ -140,7 +170,7 @@ const STANDARD_RULES: ReadonlySet<string> = new Set([
 	"positive",
 ]);
 
-/** Default messages for standard rules — used to detect custom-message overrides. */
+/** Default messages for standard rules — used only for translator-key fallback. */
 const STANDARD_MSGS: Readonly<Record<string, string>> = {
 	string: "Must be a string",
 	number: "Must be a number",
@@ -149,6 +179,20 @@ const STANDARD_MSGS: Readonly<Record<string, string>> = {
 	max: "Maximum",
 	email: "Must be a valid email",
 	positive: "Must be positive",
+	minLength: "Too short",
+	maxLength: "Too long",
+	fixedLength: "Wrong length",
+	alpha: "Must contain only letters",
+	alphaNumeric: "Must contain only letters and numbers",
+	startsWith: "Invalid prefix",
+	endsWith: "Invalid suffix",
+	uuid: "Must be a valid UUID",
+	in: "Invalid value",
+	notIn: "Invalid value",
+	enum: "Invalid value",
+	range: "Out of range",
+	negative: "Must be negative",
+	nonNegative: "Must be positive or zero",
 };
 
 const TYPE_RULE_NAMES: ReadonlySet<string> = new Set([
@@ -160,15 +204,8 @@ const TYPE_RULE_NAMES: ReadonlySet<string> = new Set([
 ]);
 let validationTranslator: ValidationTranslator | undefined;
 
-function hasDefaultMessage(rule: RuleDef): boolean {
-	if (rule.name === "min" || rule.name === "max") {
-		if (typeof rule.param !== "number") return false;
-		const expected = `${rule.name === "min" ? "Minimum" : "Maximum"} ${rule.param}`;
-		return rule.message === expected;
-	}
-
-	const defaultMsg = STANDARD_MSGS[rule.name];
-	return defaultMsg !== undefined && rule.message === defaultMsg;
+function hasCustomMessage(rule: RuleDef): boolean {
+	return rule.hasCustomMessage === true;
 }
 
 function resolveValidationMessage(
@@ -183,112 +220,210 @@ function resolveValidationMessage(
 	return fallback;
 }
 
-function resolveRuleMessage(field: string, rule: RuleDef): string {
-	const fallback = rule.message;
-	if (!STANDARD_RULES.has(rule.name)) {
-		return fallback;
+/** Args carried on a rule, exposed to i18n/providers via message interpolation. */
+function ruleArgs(rule: RuleDef): Record<string, unknown> | undefined {
+	return rule.args;
+}
+
+/**
+ * Resolve the final message for a failing rule. Precedence:
+ *   1. explicit `.message()` override (always wins),
+ *   2. a per-call {@link MessagesProviderContract} (VineJS parity),
+ *   3. a globally bound translator (rune's rosetta superset),
+ *   4. the rule's raw default message.
+ */
+function resolveRuleMessage(
+	field: string,
+	rule: RuleDef,
+	ctx: RunContext,
+): string {
+	if (hasCustomMessage(rule)) {
+		return rule.message;
 	}
-	if (!hasDefaultMessage(rule)) {
-		return fallback;
+
+	const args = ruleArgs(rule);
+	if (ctx.messagesProvider) {
+		return ctx.messagesProvider.getMessage(
+			rule.message,
+			rule.name,
+			field,
+			args,
+		);
+	}
+
+	if (!STANDARD_RULES.has(rule.name)) {
+		return rule.message;
 	}
 
 	const params: ValidationMessageParams = { field };
-	if (rule.name === "min" && typeof rule.param === "number") {
-		params.min = rule.param;
+	if (typeof rule.param === "number") {
+		if (rule.name === "min" || rule.name === "minLength")
+			params.min = rule.param;
+		if (rule.name === "max" || rule.name === "maxLength")
+			params.max = rule.param;
 	}
-	if (rule.name === "max" && typeof rule.param === "number") {
-		params.max = rule.param;
-	}
+	return resolveValidationMessage(
+		`validation.${rule.name}`,
+		rule.message,
+		params,
+	);
+}
 
-	return resolveValidationMessage(`validation.${rule.name}`, fallback, params);
+/** Resolve the "required" message through provider → translator → fallback. */
+function resolveRequiredMessage(field: string, ctx: RunContext): string {
+	if (ctx.messagesProvider) {
+		return ctx.messagesProvider.getMessage(
+			`${field} is required`,
+			"required",
+			field,
+		);
+	}
+	return resolveValidationMessage(
+		"validation.required",
+		`${field} is required`,
+		{ field },
+	);
 }
 
 /** Compute once: does any field rule prevent dispatching to Rust? */
 function detectHasCustomRules(fields: Record<string, RuleChain>): boolean {
 	return Object.values(fields).some((chain) => {
 		if (chain.useRules.length > 0) return true; // .use() rule — TS-only (Rust can't run JS)
+		if (chain.hasConditionalRequired) return true; // requiredWhen — TS-only
+		if (chain.preTransforms.length > 0) return true; // .parse() — TS-only
+		if (chain.transforms.length > 0) return true; // .transform() — Rust gets only the NAME, can't run a JS fn
+		if (chain.isNullable) return true; // .nullable() — the flag is not sent to the Rust engine
 		return chain.rules.some((r) => {
 			if (!STANDARD_RULES.has(r.name)) return true; // custom rule
-			if (!hasDefaultMessage(r)) return true; // custom message
+			if (hasCustomMessage(r)) return true; // custom message
 			return false;
 		});
 	});
 }
 
+/** Extract the phantom output type of a chain. */
+type OutputOf<C> = C extends RuleChain<infer O> ? O : never;
+/** Keys whose output includes `undefined` become optional in the inferred shape. */
+type OptionalKeys<S> = {
+	[K in keyof S]: undefined extends OutputOf<S[K]> ? K : never;
+}[keyof S];
+/** Flatten an intersection into a single readable object type. */
+type Prettify<T> = { [K in keyof T]: T[K] } & unknown;
+
+/**
+ * Infer the validated data shape from a schema's field map — the type
+ * `result.data` carries once `result.valid === true`. `rules.string()` →
+ * `string`, `.optional()` → an optional key, `.nullable()` → `T | null`,
+ * `.object(shape)`/`.array(item)` recurse.
+ */
+export type Infer<S> = Prettify<
+	{
+		[K in Exclude<keyof S, OptionalKeys<S>>]: OutputOf<S[K]>;
+	} & {
+		[K in OptionalKeys<S>]?: Exclude<OutputOf<S[K]>, undefined>;
+	}
+>;
+
 /**
  * Create a validation schema.
  *
- * Pass `T` explicitly when the caller wants `result.data` typed as a concrete
- * shape after `result.valid === true` narrows the union — runtime validation
- * is unchanged, the generic only types the success branch.
+ * The field map's rule chains are phantom-typed, so `result.data` is inferred
+ * automatically — `schema({ email: rules.string(), age: rules.number() })`
+ * types `data` as `{ email: string; age: number }` with no manual generic.
  *
- *     const RegisterValidator = schema<{ email: string; password: string }>({
+ *     const RegisterValidator = schema({
  *       email: rules.string().email(),
- *       password: rules.string().min(8),
+ *       age: rules.number().optional(),
  *     });
+ *     // Infer<typeof RegisterValidator> not needed — result.data is typed.
  *
- * The default `Record<string, unknown>` matches the historical untyped surface
- * so existing call sites that read `result.data` field-by-field with their
- * own narrowing continue to compile.
+ * An explicit generic is still accepted for back-compat
+ * (`schema<MyType>({ ... })`), overriding inference.
  */
+export function schema<S extends Record<string, RuleChain>>(
+	fields: S,
+): ValidationSchema<Infer<S>>;
 export function schema<T = Record<string, unknown>>(
 	fields: Record<string, RuleChain>,
-): ValidationSchema<T> {
+): ValidationSchema<T>;
+export function schema(
+	fields: Record<string, RuleChain>,
+): ValidationSchema<Record<string, unknown>> {
 	// Computed once at construction time, not per validate() call.
 	const hasCustomRules = detectHasCustomRules(fields);
 
-	return {
-		fields,
-		validate(data: unknown, options?: ValidateOptions): ValidationResult<T> {
-			if (!isPlainObject(data)) {
-				return {
-					valid: false,
-					errors: [
-						{
-							field: "_root",
-							rule: "type",
-							message: "Input must be an object",
-						},
-					],
-				};
-			}
-
-			if (!hasCustomRules && !validationTranslator) {
-				if (isNativeAvailable()) {
-					return validateWithRust<T>(fields, data);
-				}
-				// This schema would have used the native engine, but it isn't
-				// loaded — surface the platform-dependent TS fallback once instead
-				// of diverging silently. (Schemas with custom rules / a translator
-				// always run on TS by design and don't warn.)
-				warnNativeUnavailableOnce();
-			}
-
-			const errors: ValidationError[] = [];
-			const validated: Record<string, unknown> = {};
-			// Root context: `data` is the root, `parent` of a top-level field is the
-			// root too; nested/array recursion narrows `parent` as it descends.
-			const rootCtx: RunContext = {
-				data,
-				parent: data,
-				meta: options?.meta ?? {},
+	function validate(
+		data: unknown,
+		options?: ValidateOptions,
+	): ValidationResult<Record<string, unknown>> {
+		if (!isPlainObject(data)) {
+			return {
+				valid: false,
+				errors: [
+					{ field: "_root", rule: "type", message: "Input must be an object" },
+				],
 			};
+		}
 
-			for (const [field, chain] of Object.entries(fields)) {
-				const value = data[field];
-				const result = chain._validateWithTransform(field, value, rootCtx);
-				errors.push(...result.errors);
-				if (result.errors.length === 0 && value !== undefined) {
-					validated[field] = result.transformed;
-				}
+		const provider = options?.messagesProvider;
+		if (!hasCustomRules && !validationTranslator && !provider) {
+			if (isNativeAvailable()) {
+				return validateWithRust(fields, data);
 			}
+			// This schema would have used the native engine, but it isn't loaded —
+			// surface the platform-dependent TS fallback once instead of diverging
+			// silently.
+			warnNativeUnavailableOnce();
+		}
 
-			if (errors.length === 0) {
-				return { valid: true, errors, data: validated as T };
+		const errors: ValidationError[] = [];
+		const validated: Record<string, unknown> = {};
+		const rootCtx: RunContext = {
+			data,
+			parent: data,
+			meta: options?.meta ?? {},
+			messagesProvider: provider,
+		};
+
+		for (const [field, chain] of Object.entries(fields)) {
+			const value = data[field];
+			const result = chain._validateWithTransform(field, value, rootCtx);
+			errors.push(...result.errors);
+			if (result.errors.length === 0 && value !== undefined) {
+				validated[field] = result.transformed;
 			}
-			return { valid: false, errors };
-		},
+		}
+
+		if (errors.length === 0) {
+			return { valid: true, errors, data: validated };
+		}
+		return { valid: false, errors };
+	}
+
+	function validateOrThrow(
+		data: unknown,
+		options?: ValidateOptions,
+	): Record<string, unknown> {
+		const result = validate(data, options);
+		if (result.valid) {
+			return result.data;
+		}
+		throw new RuneValidationError(result.errors.map(toErrorNode));
+	}
+
+	return { fields, validate, validateOrThrow };
+}
+
+/** Map an internal {@link ValidationError} to a {@link RuneErrorNode}. */
+function toErrorNode(error: ValidationError): RuneErrorNode {
+	const node: RuneErrorNode = {
+		message: error.message,
+		rule: error.rule,
+		field: error.field,
 	};
+	if (error.index !== undefined) node.index = error.index;
+	if (error.meta !== undefined) node.meta = error.meta;
+	return node;
 }
 
 export function setValidationTranslator(
@@ -307,18 +442,47 @@ export function bindRosetta(rosetta: {
 export interface RuleDef {
 	name: string;
 	param?: number;
+	/** Interpolation args exposed to i18n/messages providers (e.g. `{ min: 3 }`). */
+	args?: Record<string, unknown>;
 	validate: (value: unknown) => boolean;
 	message: string;
+	/** Set when `.message()` overrode this rule's default text. */
+	hasCustomMessage?: boolean;
 }
 
-/** Rule chain — fluent validation builder. */
-export class RuleChain {
+/** A conditional-required condition (VineJS `requiredWhen` family). */
+interface RequiredCondition {
+	kind: "exists" | "missing" | "when";
+	otherField: string;
+	operator?: "=" | "!=" | ">" | "<" | ">=" | "<=" | "in" | "notIn";
+	value?: unknown;
+}
+
+/** Phantom brand carrying the inferred output type (never assigned at runtime). */
+declare const OUTPUT: unique symbol;
+
+/** UUID (any version/variant) — identical to the Rust engine's pattern. */
+const UUID_RE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Rule chain — fluent, phantom-typed validation builder. */
+export class RuleChain<Output = unknown> {
+	/** Phantom output type — drives {@link Infer}; never read at runtime. */
+	declare readonly [OUTPUT]: Output;
+
 	#rules: RuleDef[] = [];
 	#isOptional = false;
-	#transforms: Array<{ name: string; fn: (value: unknown) => unknown }> = [];
+	#isNullable = false;
+	#bail = false;
+	#transforms: Array<{
+		name: string;
+		fn: (value: unknown, field: FieldContext) => unknown;
+	}> = [];
+	#preTransforms: Array<(value: unknown) => unknown> = [];
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
 	#useRules: CompiledRule[] = [];
+	#requiredConditions: RequiredCondition[] = [];
 
 	/** Public read access to rules (for OpenAPI generation, Rust bridge). */
 	get rules(): readonly RuleDef[] {
@@ -327,9 +491,13 @@ export class RuleChain {
 	get isOptionalField(): boolean {
 		return this.#isOptional;
 	}
+	/** Public read access to the `.nullable()` flag (keeps such schemas off the native path). */
+	get isNullable(): boolean {
+		return this.#isNullable;
+	}
 	get transforms(): ReadonlyArray<{
 		name: string;
-		fn: (value: unknown) => unknown;
+		fn: (value: unknown, field: FieldContext) => unknown;
 	}> {
 		return this.#transforms;
 	}
@@ -337,71 +505,147 @@ export class RuleChain {
 	get useRules(): readonly CompiledRule[] {
 		return this.#useRules;
 	}
+	/** Public read access to `.parse()` pre-transforms (kept off the native path). */
+	get preTransforms(): ReadonlyArray<(value: unknown) => unknown> {
+		return this.#preTransforms;
+	}
+	/** Whether this chain carries a `requiredWhen`-family condition. */
+	get hasConditionalRequired(): boolean {
+		return this.#requiredConditions.length > 0;
+	}
 
-	/** Mark field as optional. */
-	optional(): this {
+	/**
+	 * Re-type this chain to a new phantom output while carrying its runtime state
+	 * forward. Cast-free: `new RuleChain<U>()` is genuinely `RuleChain<U>` because
+	 * the brand is `declare`-only. State arrays are copied so the abandoned source
+	 * chain can't be mutated through the new one.
+	 */
+	#retype<U>(): RuleChain<U> {
+		const next = new RuleChain<U>();
+		next.#rules = [...this.#rules];
+		next.#isOptional = this.#isOptional;
+		next.#isNullable = this.#isNullable;
+		next.#bail = this.#bail;
+		next.#transforms = [...this.#transforms];
+		next.#preTransforms = [...this.#preTransforms];
+		next.#nestedSchema = this.#nestedSchema;
+		next.#arrayItemChain = this.#arrayItemChain;
+		next.#useRules = [...this.#useRules];
+		next.#requiredConditions = [...this.#requiredConditions];
+		return next;
+	}
+
+	/** Mark field as optional (absent / `undefined` allowed). */
+	optional(): RuleChain<Output | undefined> {
 		this.#isOptional = true;
 		return this;
 	}
 
-	/** Must be an object matching a nested schema. */
-	object(shape: Record<string, RuleChain>): this {
-		this.#rules.push({
-			name: "object",
-			validate: (v) => typeof v === "object" && v !== null && !Array.isArray(v),
-			message: "Must be an object",
-		});
-		this.#nestedSchema = shape;
+	/** Mark field as nullable (`null` allowed, kept in the output). */
+	nullable(): RuleChain<Output | null> {
+		this.#isNullable = true;
 		return this;
 	}
 
+	/** Mark field as both optional and nullable. */
+	nullish(): RuleChain<Output | null | undefined> {
+		this.#isOptional = true;
+		this.#isNullable = true;
+		return this;
+	}
+
+	/** Stop at the first failing rule for this field (VineJS bail). */
+	bail(enabled = true): this {
+		this.#bail = enabled;
+		return this;
+	}
+
+	/** Must be an object matching a nested schema. */
+	object<Sh extends Record<string, RuleChain>>(
+		shape: Sh,
+	): RuleChain<Infer<Sh>> {
+		this.#rules.push({
+			name: "object",
+			validate: (v) => isPlainObject(v),
+			message: "Must be an object",
+		});
+		this.#nestedSchema = shape;
+		return this.#retype<Infer<Sh>>();
+	}
+
 	/** Must be an array. Items validated by the provided chain. */
-	array(itemChain?: RuleChain): this {
+	array<Item extends RuleChain>(itemChain?: Item): RuleChain<OutputOf<Item>[]> {
 		this.#rules.push({
 			name: "array",
 			validate: (v) => Array.isArray(v),
 			message: "Must be an array",
 		});
 		this.#arrayItemChain = itemChain ?? null;
-		return this;
+		return this.#retype<OutputOf<Item>[]>();
 	}
 
 	/** Must be a string. */
-	string(): this {
+	string(): RuleChain<string> {
 		this.#rules.push({
 			name: "string",
 			validate: (v) => typeof v === "string",
 			message: "Must be a string",
 		});
-		return this;
+		return this.#retype<string>();
 	}
 
 	/** Must be a number. */
-	number(): this {
+	number(): RuleChain<number> {
 		this.#rules.push({
 			name: "number",
 			validate: (v) =>
 				typeof v === "number" && !Number.isNaN(v) && Number.isFinite(v),
 			message: "Must be a number",
 		});
-		return this;
+		return this.#retype<number>();
 	}
 
 	/** Must be a boolean. */
-	boolean(): this {
+	boolean(): RuleChain<boolean> {
 		this.#rules.push({
 			name: "boolean",
 			validate: (v) => typeof v === "boolean",
 			message: "Must be a boolean",
 		});
-		return this;
+		return this.#retype<boolean>();
 	}
 
-	/** Minimum length (string) or minimum value (number). */
+	/** Must equal one of `values` (enum). Narrows the output to the union. */
+	enum<const V extends readonly (string | number | boolean)[]>(
+		values: V,
+	): RuleChain<V[number]> {
+		const allowed = [...values];
+		this.#rules.push({
+			name: "enum",
+			args: { values: allowed },
+			validate: (v) => allowed.includes(asPrimitive(v)),
+			message: "Invalid value",
+		});
+		return this.#retype<V[number]>();
+	}
+
+	/** Must equal a literal value. */
+	literal<V extends string | number | boolean>(value: V): RuleChain<V> {
+		this.#rules.push({
+			name: "literal",
+			args: { expectedValue: value },
+			validate: (v) => v === value,
+			message: `Must be ${String(value)}`,
+		});
+		return this.#retype<V>();
+	}
+
+	/** Minimum length (string) or minimum value (number). Alias of min/minLength. */
 	min(n: number): this {
 		this.#rules.push({
 			name: "min",
 			param: n,
+			args: { min: n },
 			validate: (v) =>
 				typeof v === "string"
 					? [...v].length >= n
@@ -413,11 +657,12 @@ export class RuleChain {
 		return this;
 	}
 
-	/** Maximum length (string) or maximum value (number). */
+	/** Maximum length (string) or maximum value (number). Alias of max/maxLength. */
 	max(n: number): this {
 		this.#rules.push({
 			name: "max",
 			param: n,
+			args: { max: n },
 			validate: (v) =>
 				typeof v === "string"
 					? [...v].length <= n
@@ -429,14 +674,51 @@ export class RuleChain {
 		return this;
 	}
 
+	/** Minimum length for a string or array (VineJS `minLength`). */
+	minLength(n: number): this {
+		this.#rules.push({
+			name: "minLength",
+			param: n,
+			args: { min: n },
+			validate: (v) => sizedLength(v) >= n,
+			message: `Must have at least ${n} characters`,
+		});
+		return this;
+	}
+
+	/** Maximum length for a string or array (VineJS `maxLength`). */
+	maxLength(n: number): this {
+		this.#rules.push({
+			name: "maxLength",
+			param: n,
+			args: { max: n },
+			validate: (v) => {
+				const len = sizedLength(v);
+				return len >= 0 && len <= n;
+			},
+			message: `Must not exceed ${n} characters`,
+		});
+		return this;
+	}
+
+	/** Exact length for a string or array (VineJS `fixedLength`). */
+	fixedLength(n: number): this {
+		this.#rules.push({
+			name: "fixedLength",
+			param: n,
+			args: { size: n },
+			validate: (v) => sizedLength(v) === n,
+			message: `Must be exactly ${n} characters`,
+		});
+		return this;
+	}
+
 	/** Must be a valid email. */
 	email(): this {
 		this.#rules.push({
 			name: "email",
-			// Mirror the Rust engine's regex exactly (crates/rune-engine/src/engine.rs)
-			// so the SAME schema validates identically whether or not the native
-			// binary loaded: no whitespace anywhere (the old TS rule rejected only
-			// \r\n, silently accepting interior spaces), a single @, dotted domain.
+			// Mirror the Rust engine's regex exactly so the SAME schema validates
+			// identically whether or not the native binary loaded.
 			validate: (v) =>
 				typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v),
 			message: "Must be a valid email",
@@ -444,12 +726,213 @@ export class RuleChain {
 		return this;
 	}
 
-	/** Must be positive (> 0) and finite. */
+	/** Must match a regular expression (TS-only — never dispatched to Rust). */
+	regex(pattern: RegExp): this {
+		this.#rules.push({
+			name: "regex",
+			validate: (v) => typeof v === "string" && pattern.test(v),
+			message: "Invalid format",
+		});
+		return this;
+	}
+
+	/** Must be a valid URL (TS-only — uses the WHATWG URL parser). */
+	url(): this {
+		this.#rules.push({
+			name: "url",
+			validate: (v) => typeof v === "string" && isValidUrl(v),
+			message: "Must be a valid URL",
+		});
+		return this;
+	}
+
+	/** Must be a valid UUID. */
+	uuid(): this {
+		this.#rules.push({
+			name: "uuid",
+			validate: (v) => typeof v === "string" && UUID_RE.test(v),
+			message: "Must be a valid UUID",
+		});
+		return this;
+	}
+
+	/** Must contain only ASCII letters. */
+	alpha(): this {
+		this.#rules.push({
+			name: "alpha",
+			validate: (v) =>
+				typeof v === "string" && v.length > 0 && /^[a-zA-Z]+$/.test(v),
+			message: "Must contain only letters",
+		});
+		return this;
+	}
+
+	/** Must contain only ASCII letters and digits. */
+	alphaNumeric(): this {
+		this.#rules.push({
+			name: "alphaNumeric",
+			validate: (v) =>
+				typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9]+$/.test(v),
+			message: "Must contain only letters and numbers",
+		});
+		return this;
+	}
+
+	/** String must start with `substring`. */
+	startsWith(substring: string): this {
+		this.#rules.push({
+			name: "startsWith",
+			args: { substring },
+			validate: (v) => typeof v === "string" && v.startsWith(substring),
+			message: `Must start with ${substring}`,
+		});
+		return this;
+	}
+
+	/** String must end with `substring`. */
+	endsWith(substring: string): this {
+		this.#rules.push({
+			name: "endsWith",
+			args: { substring },
+			validate: (v) => typeof v === "string" && v.endsWith(substring),
+			message: `Must end with ${substring}`,
+		});
+		return this;
+	}
+
+	/** Value must be one of `values`. */
+	in(values: ReadonlyArray<string | number | boolean>): this {
+		const allowed = [...values];
+		this.#rules.push({
+			name: "in",
+			args: { values: allowed },
+			validate: (v) => allowed.includes(asPrimitive(v)),
+			message: "Invalid value",
+		});
+		return this;
+	}
+
+	/** Value must NOT be one of `values`. */
+	notIn(values: ReadonlyArray<string | number | boolean>): this {
+		const denied = [...values];
+		this.#rules.push({
+			name: "notIn",
+			args: { values: denied },
+			validate: (v) => !denied.includes(asPrimitive(v)),
+			message: "Invalid value",
+		});
+		return this;
+	}
+
+	/** Number must be positive (> 0) and finite. */
 	positive(): this {
 		this.#rules.push({
 			name: "positive",
 			validate: (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
 			message: "Must be positive",
+		});
+		return this;
+	}
+
+	/** Number must be negative (< 0) and finite. */
+	negative(): this {
+		this.#rules.push({
+			name: "negative",
+			validate: (v) => typeof v === "number" && Number.isFinite(v) && v < 0,
+			message: "Must be negative",
+		});
+		return this;
+	}
+
+	/** Number must be >= 0 and finite. */
+	nonNegative(): this {
+		this.#rules.push({
+			name: "nonNegative",
+			validate: (v) => typeof v === "number" && Number.isFinite(v) && v >= 0,
+			message: "Must be positive or zero",
+		});
+		return this;
+	}
+
+	/** Number must fall within `[min, max]` (inclusive). */
+	range(min: number, max: number): this {
+		this.#rules.push({
+			name: "range",
+			args: { min, max },
+			validate: (v) =>
+				typeof v === "number" && Number.isFinite(v) && v >= min && v <= max,
+			message: `Must be between ${min} and ${max}`,
+		});
+		return this;
+	}
+
+	/** Number must have at most `digits` decimal places (TS-only). */
+	decimal(digits: number): this {
+		this.#rules.push({
+			name: "decimal",
+			args: { digits },
+			validate: (v) => {
+				if (typeof v !== "number" || !Number.isFinite(v)) return false;
+				const parts = String(v).split(".");
+				return (parts[1]?.length ?? 0) <= digits;
+			},
+			message: `Must have at most ${digits} decimal places`,
+		});
+		return this;
+	}
+
+	/** Must equal a sibling field (VineJS `sameAs`). Cross-field → TS-only. */
+	sameAs(otherField: string): this {
+		this.#useRules.push({
+			__rune: "rule",
+			run: (value, field) => {
+				const other = readSibling(field, otherField);
+				if (value !== other) {
+					field.report(`Must match ${otherField}`, "sameAs");
+				}
+			},
+		});
+		return this;
+	}
+
+	/** Must equal its `<field>_confirmation` sibling (VineJS `confirmed`). */
+	confirmed(options?: { confirmationField?: string }): this {
+		this.#useRules.push({
+			__rune: "rule",
+			run: (value, field) => {
+				const leaf = field.field.split(".").pop() ?? field.field;
+				const other = options?.confirmationField ?? `${leaf}_confirmation`;
+				if (value !== readSibling(field, other)) {
+					field.report("Confirmation does not match", "confirmed");
+				}
+			},
+		});
+		return this;
+	}
+
+	/** Required only when `otherField` is present (non-null) — else optional. */
+	requiredIfExists(otherField: string): this {
+		this.#requiredConditions.push({ kind: "exists", otherField });
+		return this;
+	}
+
+	/** Required only when `otherField` is absent/null — else optional. */
+	requiredIfMissing(otherField: string): this {
+		this.#requiredConditions.push({ kind: "missing", otherField });
+		return this;
+	}
+
+	/** Required only when `otherField <op> value` holds — else optional. */
+	requiredWhen(
+		otherField: string,
+		operator: RequiredCondition["operator"],
+		value: unknown,
+	): this {
+		this.#requiredConditions.push({
+			kind: "when",
+			otherField,
+			operator,
+			value,
 		});
 		return this;
 	}
@@ -460,6 +943,23 @@ export class RuleChain {
 			name: "trim",
 			fn: (v) => (typeof v === "string" ? v.trim() : v),
 		});
+		return this;
+	}
+
+	/**
+	 * Post-validation transform changing the output type (VineJS `transform`).
+	 * `value` is `unknown` — narrow it in the callback (the no-cast rule forbids
+	 * lying about a dynamically-produced value's static type).
+	 */
+	transform<U>(fn: (value: unknown, field: FieldContext) => U): RuleChain<U> {
+		const next = this.#retype<U>();
+		next.#transforms.push({ name: "transform", fn: (v, f) => fn(v, f) });
+		return next;
+	}
+
+	/** Pre-validation transform of the raw input (VineJS `parse`). */
+	parse(fn: (value: unknown) => unknown): this {
+		this.#preTransforms.push(fn);
 		return this;
 	}
 
@@ -499,32 +999,61 @@ export class RuleChain {
 		if (this.#rules.length === 0) {
 			throw new RuneError("NO_RULE", "message() must be called after a rule");
 		}
-		this.#rules[this.#rules.length - 1].message = msg;
+		const last = this.#rules[this.#rules.length - 1];
+		last.message = msg;
+		last.hasCustomMessage = true;
 		return this;
+	}
+
+	/** Whether the field is required given the surrounding data (conditionals). */
+	#isRequired(ctx: RunContext): boolean {
+		if (this.#requiredConditions.length === 0) return true;
+		return this.#requiredConditions.some((cond) =>
+			evalRequiredCondition(cond, ctx),
+		);
 	}
 
 	/** Internal: validate a field value and return errors + transformed value. */
 	_validateWithTransform(
 		field: string,
-		value: unknown,
+		rawValue: unknown,
 		ctx: RunContext = EMPTY_RUN_CONTEXT,
 	): { errors: ValidationError[]; transformed: unknown } {
-		if (value === undefined || value === null) {
-			if (this.#isOptional) return { errors: [], transformed: value };
-			return { errors: [this.#requiredError(field)], transformed: value };
+		// 0. Pre-validation parse() transforms run on the raw value first.
+		let value = rawValue;
+		for (const pre of this.#preTransforms) {
+			value = pre(value);
+		}
+
+		if (value === undefined) {
+			if (this.#isOptional || !this.#isRequired(ctx)) {
+				return { errors: [], transformed: value };
+			}
+			return { errors: [this.#requiredError(field, ctx)], transformed: value };
+		}
+		if (value === null) {
+			// rune treats a `null` value as "absent" for optional/nullable/
+			// non-required fields (a deliberate, cross-engine-conformance-tested
+			// choice — see the Rust↔TS parity suite). `.nullable()` additionally
+			// keeps it in the output. This unifies null/undefined for optional
+			// fields, a documented deviation from VineJS's stricter split.
+			if (this.#isNullable || this.#isOptional || !this.#isRequired(ctx)) {
+				return { errors: [], transformed: value };
+			}
+			return { errors: [this.#requiredError(field, ctx)], transformed: value };
 		}
 
 		// 1. Type rules first on the raw value — bail on type mismatch.
-		const typeError = this.#runTypeRules(field, value);
+		const typeError = this.#runTypeRules(field, value, ctx);
 		if (typeError) return { errors: [typeError], transformed: value };
 
 		// 2. Apply transforms (trim, etc.), then run value rules on the result.
-		let transformed = this.#applyTransformsTo(value);
-		const errors = this.#runValueRules(field, transformed);
+		let transformed = this.#applyTransformsTo(value, field, ctx);
+		const errors = this.#runValueRules(field, transformed, ctx);
 
 		// 3. Vine-style .use() rules — run with a FieldContext exposing the root
 		//    `data` and `parent`, so a rule can validate across fields.
-		if (this.#useRules.length > 0) {
+		if (this.#useRules.length > 0 && !(this.#bail && errors.length > 0)) {
 			this.#runUseRules(field, transformed, ctx, errors);
 		}
 
@@ -536,7 +1065,7 @@ export class RuleChain {
 				const nestedResult = chain._validateWithTransform(
 					`${field}.${nestedField}`,
 					obj[nestedField],
-					{ data: ctx.data, parent: obj, meta: ctx.meta },
+					{ ...ctx, parent: obj },
 				);
 				errors.push(...nestedResult.errors);
 				if (nestedResult.transformed !== undefined) {
@@ -553,8 +1082,11 @@ export class RuleChain {
 				const itemResult = this.#arrayItemChain._validateWithTransform(
 					`${field}.${i}`,
 					arr[i],
-					{ data: ctx.data, parent: arr, meta: ctx.meta },
+					{ ...ctx, parent: arr },
 				);
+				for (const e of itemResult.errors) {
+					if (e.index === undefined) e.index = i;
+				}
 				errors.push(...itemResult.errors);
 				if (itemResult.transformed !== undefined) {
 					arr[i] = itemResult.transformed;
@@ -584,32 +1116,32 @@ export class RuleChain {
 			},
 		};
 		for (const rule of this.#useRules) {
-			// Refresh isValid so a rule can early-return once the field has failed.
 			fieldCtx.isValid = errors.length === 0;
 			rule.run(transformed, fieldCtx);
 		}
 	}
 
-	#requiredError(field: string): ValidationError {
+	#requiredError(field: string, ctx: RunContext): ValidationError {
 		return {
 			field,
 			rule: "required",
-			message: resolveValidationMessage(
-				"validation.required",
-				`${field} is required`,
-				{ field },
-			),
+			message: resolveRequiredMessage(field, ctx),
 		};
 	}
 
 	/** Run the type rules (string/number/…) on the raw value; first failure bails. */
-	#runTypeRules(field: string, value: unknown): ValidationError | null {
+	#runTypeRules(
+		field: string,
+		value: unknown,
+		ctx: RunContext,
+	): ValidationError | null {
 		for (const rule of this.#rules) {
 			if (TYPE_RULE_NAMES.has(rule.name) && !rule.validate(value)) {
 				return {
 					field,
 					rule: rule.name,
-					message: resolveRuleMessage(field, rule),
+					message: resolveRuleMessage(field, rule, ctx),
+					...(ruleArgs(rule) ? { meta: ruleArgs(rule) } : {}),
 				};
 			}
 		}
@@ -617,14 +1149,21 @@ export class RuleChain {
 	}
 
 	/** Run the non-type rules (min/max/email/…) on the transformed value. */
-	#runValueRules(field: string, transformed: unknown): ValidationError[] {
+	#runValueRules(
+		field: string,
+		transformed: unknown,
+		ctx: RunContext,
+	): ValidationError[] {
 		const errors: ValidationError[] = [];
 		for (const rule of this.#rules) {
-			if (!TYPE_RULE_NAMES.has(rule.name) && !rule.validate(transformed)) {
+			if (TYPE_RULE_NAMES.has(rule.name)) continue;
+			if (this.#bail && errors.length > 0) break;
+			if (!rule.validate(transformed)) {
 				errors.push({
 					field,
 					rule: rule.name,
-					message: resolveRuleMessage(field, rule),
+					message: resolveRuleMessage(field, rule, ctx),
+					...(ruleArgs(rule) ? { meta: ruleArgs(rule) } : {}),
 				});
 			}
 		}
@@ -638,31 +1177,148 @@ export class RuleChain {
 
 	/** Internal: apply transforms. */
 	_transform(value: unknown): unknown {
-		return this.#applyTransformsTo(value);
+		return this.#applyTransformsTo(value, "", EMPTY_RUN_CONTEXT);
 	}
 
-	#applyTransformsTo(value: unknown): unknown {
+	#applyTransformsTo(value: unknown, field: string, ctx: RunContext): unknown {
 		let result = value;
 		for (const transform of this.#transforms) {
-			result = transform.fn(result);
+			LAST_FIELD.value = result;
+			LAST_FIELD.data = ctx.data;
+			LAST_FIELD.parent = ctx.parent;
+			LAST_FIELD.field = field;
+			LAST_FIELD.meta = ctx.meta;
+			result = transform.fn(result, LAST_FIELD);
 		}
 		return result;
 	}
 }
 
+/**
+ * Scratch FieldContext reused for `.transform()` callbacks — transforms run
+ * inline in {@link RuleChain.#applyTransformsTo}, which repopulates it before
+ * each call. A shared object avoids per-transform allocation; it is never
+ * retained across calls.
+ */
+const LAST_FIELD: FieldContext = {
+	value: undefined,
+	data: {},
+	parent: {},
+	field: "",
+	meta: {},
+	isValid: true,
+	report(): void {},
+};
+
+/** Coerce a value to a comparable primitive for `in`/`enum` membership. */
+function asPrimitive(value: unknown): string | number | boolean {
+	if (
+		typeof value === "string" ||
+		typeof value === "number" ||
+		typeof value === "boolean"
+	) {
+		return value;
+	}
+	// Non-primitive values can never be a member of a primitive set; return a
+	// sentinel that no allowed entry equals.
+	return Symbol.iterator.toString();
+}
+
+/** Code-point length for a string, element count for an array, else -1. */
+function sizedLength(value: unknown): number {
+	if (typeof value === "string") return [...value].length;
+	if (Array.isArray(value)) return value.length;
+	return -1;
+}
+
+/** WHATWG URL validity — accepts only http/https to avoid `mailto:` etc. */
+function isValidUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return url.protocol === "http:" || url.protocol === "https:";
+	} catch {
+		return false;
+	}
+}
+
+/** Read a sibling field's value from the immediate parent (object only). */
+function readSibling(field: FieldContext, name: string): unknown {
+	const parent = field.parent;
+	if (Array.isArray(parent)) return undefined;
+	return parent[name];
+}
+
+/** Evaluate whether a `requiredWhen`-family condition makes the field required. */
+function evalRequiredCondition(
+	cond: RequiredCondition,
+	ctx: RunContext,
+): boolean {
+	const other = isPlainObject(ctx.parent)
+		? ctx.parent[cond.otherField]
+		: ctx.data[cond.otherField];
+	const present = other !== undefined && other !== null;
+
+	if (cond.kind === "exists") return present;
+	if (cond.kind === "missing") return !present;
+
+	switch (cond.operator) {
+		case "=":
+			return other === cond.value;
+		case "!=":
+			return other !== cond.value;
+		case ">":
+			return typeof other === "number" && typeof cond.value === "number"
+				? other > cond.value
+				: false;
+		case "<":
+			return typeof other === "number" && typeof cond.value === "number"
+				? other < cond.value
+				: false;
+		case ">=":
+			return typeof other === "number" && typeof cond.value === "number"
+				? other >= cond.value
+				: false;
+		case "<=":
+			return typeof other === "number" && typeof cond.value === "number"
+				? other <= cond.value
+				: false;
+		case "in":
+			return Array.isArray(cond.value) && cond.value.includes(other);
+		case "notIn":
+			return Array.isArray(cond.value) && !cond.value.includes(other);
+		default:
+			return false;
+	}
+}
+
+/** No-op alias of {@link schema} — VineJS `vine.compile()` API parity. */
+export function compile<T extends ValidationSchema>(s: T): T {
+	return s;
+}
+
 /** Entry point for building rules. */
 export const rules = {
-	string: () => new RuleChain().string(),
-	number: () => new RuleChain().number(),
-	boolean: () => new RuleChain().boolean(),
-	any: () => new RuleChain(),
+	string: (): RuleChain<string> => new RuleChain().string(),
+	number: (): RuleChain<number> => new RuleChain().number(),
+	boolean: (): RuleChain<boolean> => new RuleChain().boolean(),
+	any: (): RuleChain<unknown> => new RuleChain(),
+	object: <Sh extends Record<string, RuleChain>>(
+		shape: Sh,
+	): RuleChain<Infer<Sh>> => new RuleChain().object(shape),
+	array: <Item extends RuleChain>(item?: Item): RuleChain<OutputOf<Item>[]> =>
+		new RuleChain().array(item),
+	enum: <const V extends readonly (string | number | boolean)[]>(
+		values: V,
+	): RuleChain<V[number]> => new RuleChain().enum(values),
+	literal: <V extends string | number | boolean>(value: V): RuleChain<V> =>
+		new RuleChain().literal(value),
 };
 
 /** Serialize schema + data and validate via Rust NAPI. */
-function validateWithRust<T>(
+function validateWithRust(
 	fields: Record<string, RuleChain>,
 	data: Record<string, unknown>,
-): ValidationResult<T> {
+): ValidationResult<Record<string, unknown>> {
 	const schemaDesc: Record<
 		string,
 		{
@@ -673,20 +1329,14 @@ function validateWithRust<T>(
 	> = {};
 
 	for (const [field, chain] of Object.entries(fields)) {
-		const rules = chain.rules.map((r) => ({
+		const ruleDescs = chain.rules.map((r) => ({
 			name: r.name,
-			// Serialize THIS rule's own param. Previously a find-first lookup by
-			// rule name returned the first matching rule's param, so min(3).min(5)
-			// sent both Rust entries as min=3, dropping the 5 bound (audit 2026-06-13).
-			params:
-				r.name === "min"
-					? { min: r.param }
-					: r.name === "max"
-						? { max: r.param }
-						: null,
+			// Serialize THIS rule's own args (per-rule, so min(3).min(5) keeps both
+			// bounds — a find-first lookup previously collapsed them).
+			params: r.args ?? null,
 		}));
 		schemaDesc[field] = {
-			rules,
+			rules: ruleDescs,
 			optional: chain.isOptionalField,
 			transforms: chain.transforms.map((t) => t.name),
 		};
@@ -695,7 +1345,7 @@ function validateWithRust<T>(
 	const request = JSON.stringify({ schema: schemaDesc, data });
 	const native = validateNative(request);
 	if (native.valid && native.data !== undefined) {
-		return { valid: true, errors: native.errors, data: native.data as T };
+		return { valid: true, errors: native.errors, data: native.data };
 	}
 	return { valid: false, errors: native.errors };
 }
