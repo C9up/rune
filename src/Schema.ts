@@ -168,6 +168,20 @@ const STANDARD_RULES: ReadonlySet<string> = new Set([
 	"max",
 	"email",
 	"positive",
+	"minLength",
+	"maxLength",
+	"fixedLength",
+	"uuid",
+	"alpha",
+	"alphaNumeric",
+	"startsWith",
+	"endsWith",
+	"in",
+	"notIn",
+	"enum",
+	"negative",
+	"nonNegative",
+	"range",
 ]);
 
 /** Default messages for standard rules — used only for translator-key fallback. */

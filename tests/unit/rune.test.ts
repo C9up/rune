@@ -379,6 +379,147 @@ describe("rune > Rust↔TS parity (conformance)", () => {
 			fields: { n: rules.number() },
 			data: { n: "abc" },
 		},
+		// --- ported rules (14) — each with a passing and a failing case ---
+		{
+			label: "minLength below bound fails (code points)",
+			fields: { s: rules.string().minLength(5) },
+			data: { s: "abc" },
+		},
+		{
+			label: "minLength counts emoji code points, passes",
+			fields: { s: rules.string().minLength(3) },
+			data: { s: "👍👍👍" },
+		},
+		{
+			label: "maxLength over bound fails",
+			fields: { s: rules.string().maxLength(3) },
+			data: { s: "abcd" },
+		},
+		{
+			label: "maxLength within bound passes",
+			fields: { s: rules.string().maxLength(3) },
+			data: { s: "abc" },
+		},
+		{
+			label: "fixedLength wrong length fails",
+			fields: { s: rules.string().fixedLength(4) },
+			data: { s: "abc" },
+		},
+		{
+			label: "fixedLength exact length passes",
+			fields: { s: rules.string().fixedLength(4) },
+			data: { s: "abcd" },
+		},
+		{
+			label: "uuid invalid fails",
+			fields: { id: rules.string().uuid() },
+			data: { id: "not-a-uuid" },
+		},
+		{
+			label: "uuid valid (uppercase) passes",
+			fields: { id: rules.string().uuid() },
+			data: { id: "123E4567-E89B-12D3-A456-426614174000" },
+		},
+		{
+			label: "alpha with digit fails",
+			fields: { s: rules.string().alpha() },
+			data: { s: "abc1" },
+		},
+		{
+			label: "alpha letters-only passes",
+			fields: { s: rules.string().alpha() },
+			data: { s: "abc" },
+		},
+		{
+			label: "alphaNumeric with symbol fails",
+			fields: { s: rules.string().alphaNumeric() },
+			data: { s: "abc-1" },
+		},
+		{
+			label: "alphaNumeric letters+digits passes",
+			fields: { s: rules.string().alphaNumeric() },
+			data: { s: "abc1" },
+		},
+		{
+			label: "startsWith wrong prefix fails",
+			fields: { s: rules.string().startsWith("ap") },
+			data: { s: "banana" },
+		},
+		{
+			label: "startsWith correct prefix passes",
+			fields: { s: rules.string().startsWith("ap") },
+			data: { s: "apple" },
+		},
+		{
+			label: "endsWith wrong suffix fails",
+			fields: { s: rules.string().endsWith("le") },
+			data: { s: "banana" },
+		},
+		{
+			label: "endsWith correct suffix passes",
+			fields: { s: rules.string().endsWith("le") },
+			data: { s: "apple" },
+		},
+		{
+			label: "in value outside set fails",
+			fields: { c: rules.string().in(["a", "b"]) },
+			data: { c: "c" },
+		},
+		{
+			label: "in value inside set passes",
+			fields: { c: rules.string().in(["a", "b"]) },
+			data: { c: "a" },
+		},
+		{
+			label: "notIn value inside set fails",
+			fields: { c: rules.string().notIn(["admin", "root"]) },
+			data: { c: "admin" },
+		},
+		{
+			label: "notIn value outside set passes",
+			fields: { c: rules.string().notIn(["admin", "root"]) },
+			data: { c: "guest" },
+		},
+		{
+			label: "enum value outside enum fails",
+			fields: { role: rules.enum(["user", "admin"] as const) },
+			data: { role: "superuser" },
+		},
+		{
+			label: "enum value inside enum passes",
+			fields: { role: rules.enum(["user", "admin"] as const) },
+			data: { role: "admin" },
+		},
+		{
+			label: "negative on zero fails",
+			fields: { n: rules.number().negative() },
+			data: { n: 0 },
+		},
+		{
+			label: "negative on a negative passes",
+			fields: { n: rules.number().negative() },
+			data: { n: -3 },
+		},
+		{
+			label: "nonNegative on a negative fails",
+			fields: { n: rules.number().nonNegative() },
+			data: { n: -1 },
+		},
+		{
+			label: "nonNegative on zero passes",
+			fields: { n: rules.number().nonNegative() },
+			data: { n: 0 },
+		},
+		{
+			label: "range below min fails",
+			fields: { n: rules.number().range(1, 10) },
+			data: { n: 0 },
+		},
+		{
+			label: "range within bounds passes",
+			fields: { n: rules.number().range(1, 10) },
+			data: { n: 5 },
+		},
 	];
 
 	for (const c of cases) {

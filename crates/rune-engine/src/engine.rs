@@ -9,6 +9,49 @@ static EMAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap()
 });
 
+/// UUID regex — case-insensitive, matches the TS `UUID_RE` exactly.
+static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
+});
+
+/// ASCII letters only — mirrors the TS `^[a-zA-Z]+$`.
+static ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z]+$").unwrap());
+
+/// ASCII letters and digits — mirrors the TS `^[a-zA-Z0-9]+$`.
+static ALPHANUMERIC_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9]+$").unwrap());
+
+/// Code-point length for a string, element count for an array, else `-1`.
+/// Mirrors the TS `sizedLength` helper (`[...v].length` counts code points).
+fn sized_length(value: &serde_json::Value) -> i64 {
+    match value {
+        serde_json::Value::String(s) => s.chars().count() as i64,
+        serde_json::Value::Array(a) => a.len() as i64,
+        _ => -1,
+    }
+}
+
+/// Membership test mirroring TS `asPrimitive(v)` + `values.includes(...)`.
+/// Only string/number/boolean values can be members; any non-primitive
+/// (object/array/null) is NEVER a member. Numbers compare by numeric value so
+/// integer/float representations of the same number match (JS SameValueZero).
+fn is_member(value: &serde_json::Value, values: &[serde_json::Value]) -> bool {
+    match value {
+        serde_json::Value::String(_) | serde_json::Value::Bool(_) => {
+            values.iter().any(|x| x == value)
+        }
+        serde_json::Value::Number(_) => {
+            let n = match value.as_f64() {
+                Some(n) => n,
+                None => return false,
+            };
+            values
+                .iter()
+                .any(|x| x.as_f64().map(|v| v == n).unwrap_or(false))
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuleDefinition {
@@ -228,6 +271,96 @@ fn validate_rule(
                 }
             } else {
                 return Some(err(field, "positive", "Must be positive"));
+            }
+        }
+        "minLength" => {
+            let min = match params.get("min").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => return Some(err(field, "minLength", "Invalid minLength rule: missing parameter")),
+            };
+            if (sized_length(value) as f64) < min {
+                return Some(err(field, "minLength", "Too short"));
+            }
+        }
+        "maxLength" => {
+            let max = match params.get("max").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => return Some(err(field, "maxLength", "Invalid maxLength rule: missing parameter")),
+            };
+            let len = sized_length(value);
+            if !(len >= 0 && (len as f64) <= max) {
+                return Some(err(field, "maxLength", "Too long"));
+            }
+        }
+        "fixedLength" => {
+            let size = match params.get("size").and_then(|v| v.as_f64()) {
+                Some(v) => v,
+                None => return Some(err(field, "fixedLength", "Invalid fixedLength rule: missing parameter")),
+            };
+            if (sized_length(value) as f64) != size {
+                return Some(err(field, "fixedLength", "Wrong length"));
+            }
+        }
+        "uuid" => match value.as_str() {
+            Some(s) if UUID_RE.is_match(s) => {}
+            _ => return Some(err(field, "uuid", "Must be a valid UUID")),
+        },
+        "alpha" => match value.as_str() {
+            Some(s) if !s.is_empty() && ALPHA_RE.is_match(s) => {}
+            _ => return Some(err(field, "alpha", "Must contain only letters")),
+        },
+        "alphaNumeric" => match value.as_str() {
+            Some(s) if !s.is_empty() && ALPHANUMERIC_RE.is_match(s) => {}
+            _ => return Some(err(field, "alphaNumeric", "Must contain only letters and numbers")),
+        },
+        "startsWith" => {
+            let substring = params.get("substring").and_then(|v| v.as_str());
+            match (value.as_str(), substring) {
+                (Some(s), Some(sub)) if s.starts_with(sub) => {}
+                _ => return Some(err(field, "startsWith", "Invalid prefix")),
+            }
+        }
+        "endsWith" => {
+            let substring = params.get("substring").and_then(|v| v.as_str());
+            match (value.as_str(), substring) {
+                (Some(s), Some(sub)) if s.ends_with(sub) => {}
+                _ => return Some(err(field, "endsWith", "Invalid suffix")),
+            }
+        }
+        "in" | "enum" => {
+            let values = params.get("values").and_then(|v| v.as_array());
+            let ok = values.map(|vs| is_member(value, vs)).unwrap_or(false);
+            if !ok {
+                return Some(err(field, name, "Invalid value"));
+            }
+        }
+        "notIn" => {
+            let values = match params.get("values").and_then(|v| v.as_array()) {
+                Some(vs) => vs,
+                None => return Some(err(field, "notIn", "Invalid notIn rule: missing parameter")),
+            };
+            if is_member(value, values) {
+                return Some(err(field, "notIn", "Invalid value"));
+            }
+        }
+        "negative" => match value.as_f64() {
+            Some(n) if n.is_finite() && n < 0.0 => {}
+            _ => return Some(err(field, "negative", "Must be negative")),
+        },
+        "nonNegative" => match value.as_f64() {
+            Some(n) if n.is_finite() && n >= 0.0 => {}
+            _ => return Some(err(field, "nonNegative", "Must be positive or zero")),
+        },
+        "range" => {
+            let min = params.get("min").and_then(|v| v.as_f64());
+            let max = params.get("max").and_then(|v| v.as_f64());
+            let (min, max) = match (min, max) {
+                (Some(mn), Some(mx)) => (mn, mx),
+                _ => return Some(err(field, "range", "Invalid range rule: missing parameter")),
+            };
+            match value.as_f64() {
+                Some(n) if n.is_finite() && n >= min && n <= max => {}
+                _ => return Some(err(field, "range", "Out of range")),
             }
         }
         _ => {
