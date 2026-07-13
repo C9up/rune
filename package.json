@@ -15,6 +15,7 @@
     "src"
   ],
   "scripts": {
+    "prebuild": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.build.json",
     "build:rust": "cargo build --release -p rune-engine-napi",
     "build:napi": "pnpm build:rust && node scripts/copy-napi.mjs",
@@ -23,7 +24,7 @@
     "lint": "biome check src/",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "tsc -p tsconfig.build.json"
+    "prepublishOnly": "pnpm build"
   },
   "devDependencies": {
     "@types/node": "^22.19.15",

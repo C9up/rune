@@ -403,7 +403,10 @@ export function schema(
 			const value = data[field];
 			const result = chain._validateWithTransform(field, value, rootCtx);
 			errors.push(...result.errors);
-			if (result.errors.length === 0 && value !== undefined) {
+			// Gate on the TRANSFORMED result, not the raw input: a pre-transform
+			// (`parse(() => 42)`) can produce a value for an absent field, and that
+			// value must land in `data` — testing the raw `value` dropped it.
+			if (result.errors.length === 0 && result.transformed !== undefined) {
 				validated[field] = result.transformed;
 			}
 		}

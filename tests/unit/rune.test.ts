@@ -49,6 +49,16 @@ describe("rune > schema validation", () => {
 		expect(result.data?.name).toBe("Kaen");
 	});
 
+	it("includes a pre-transform's output for an absent field (parse produces the value)", () => {
+		// Regression: `parse(() => 42)` on a missing field validated but the
+		// transformed value was dropped from `data` (the gate tested the raw
+		// input, which was undefined, instead of the transformed result).
+		const s = schema({ n: rules.number().parse(() => 42) });
+		const result = s.validate({});
+		expect(result.valid).toBe(true);
+		expect(result.data).toEqual({ n: 42 });
+	});
+
 	it("rejects invalid data with errors", () => {
 		const s = schema({
 			name: rules.string().min(3),
