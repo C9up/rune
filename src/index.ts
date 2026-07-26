@@ -8,6 +8,8 @@ export { RuneError, RuneValidationError } from "./errors.js";
 export type { MessagesProviderContract } from "./MessagesProvider.js";
 export { SimpleMessagesProvider } from "./MessagesProvider.js";
 export type {
+	AsyncCompiledRule,
+	AsyncRuleValidator,
 	CompiledRule,
 	FieldContext,
 	Infer,
@@ -22,6 +24,7 @@ export type {
 } from "./Schema.js";
 export {
 	bindRosetta,
+	createAsyncRule,
 	createRule,
 	rules,
 	schema,

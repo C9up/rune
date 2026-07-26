@@ -101,6 +101,45 @@ export function createRule<Options>(
 }
 
 /**
+ * An async `.useAsync()` rule validator — same shape as {@link RuleValidator}
+ * but may return a Promise. Runs only under {@link ValidationSchema.validateAsync}.
+ */
+export type AsyncRuleValidator<Options = undefined> = (
+	value: unknown,
+	options: Options,
+	field: FieldContext,
+) => void | Promise<void>;
+
+/** A compiled async rule produced by {@link createAsyncRule}. */
+export interface AsyncCompiledRule {
+	readonly __rune: "asyncRule";
+	run(value: unknown, field: FieldContext): Promise<void>;
+}
+
+/**
+ * Async counterpart of {@link createRule} — for rules that must await (DB lookups
+ * etc.). Attach with `chain.useAsync(rule(options))`; the schema must then be run
+ * with `validateAsync`. This is how DB-backed `unique`/`exists` rules are built
+ * (the validator does the query), keeping rune framework-agnostic.
+ */
+export function createAsyncRule(
+	validator: AsyncRuleValidator<undefined>,
+): () => AsyncCompiledRule;
+export function createAsyncRule<Options>(
+	validator: AsyncRuleValidator<Options>,
+): (options: Options) => AsyncCompiledRule;
+export function createAsyncRule<Options>(
+	validator: AsyncRuleValidator<Options>,
+): (options: Options) => AsyncCompiledRule {
+	return (options: Options): AsyncCompiledRule => ({
+		__rune: "asyncRule",
+		async run(value: unknown, field: FieldContext): Promise<void> {
+			await validator(value, options, field);
+		},
+	});
+}
+
+/**
  * Validation result — discriminated union that narrows `data` to the schema's
  * `T` when `valid` is `true`, removing the need for callers to cast or guard
  * `data` separately.
@@ -131,6 +170,18 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	 * with a structured `.messages` array on failure.
 	 */
 	validateOrThrow(data: unknown, options?: ValidateOptions): T;
+	/**
+	 * Async validation — runs the sync rules, then any `.useAsync()`/`unique`/
+	 * `exists` rules (awaited). Required when the schema carries async rules; the
+	 * sync {@link validate} throws for such a schema rather than silently skipping
+	 * them.
+	 */
+	validateAsync(
+		data: unknown,
+		options?: ValidateOptions,
+	): Promise<ValidationResult<T>>;
+	/** Throwing async validation (see {@link validateAsync} + {@link validateOrThrow}). */
+	validateOrThrowAsync(data: unknown, options?: ValidateOptions): Promise<T>;
 }
 
 /** Context threaded through validation so field rules can reach root/parent/meta. */
@@ -303,6 +354,7 @@ function resolveRequiredMessage(field: string, ctx: RunContext): string {
 function detectHasCustomRules(fields: Record<string, RuleChain>): boolean {
 	return Object.values(fields).some((chain) => {
 		if (chain.useRules.length > 0) return true; // .use() rule — TS-only (Rust can't run JS)
+		if (chain.asyncRules.length > 0) return true; // async rule — TS-only, needs validateAsync
 		if (chain.hasConditionalRequired) return true; // requiredWhen — TS-only
 		if (chain.preTransforms.length > 0) return true; // .parse() — TS-only
 		if (chain.transforms.length > 0) return true; // .transform() — Rust gets only the NAME, can't run a JS fn
@@ -365,11 +417,21 @@ export function schema(
 ): ValidationSchema<Record<string, unknown>> {
 	// Computed once at construction time, not per validate() call.
 	const hasCustomRules = detectHasCustomRules(fields);
+	// Any field carrying async rules (`unique`/`exists`/`useAsync`) forces callers
+	// onto `validateAsync` — the sync path throws rather than silently skipping them.
+	const hasAsyncRules = Object.values(fields).some(
+		(chain) => chain.asyncRules.length > 0,
+	);
 
 	function validate(
 		data: unknown,
 		options?: ValidateOptions,
 	): ValidationResult<Record<string, unknown>> {
+		if (hasAsyncRules) {
+			throw new Error(
+				"rune: this schema has async rules (unique/exists/useAsync) — call validateAsync() instead of validate().",
+			);
+		}
 		if (!isPlainObject(data)) {
 			return {
 				valid: false,
@@ -428,7 +490,76 @@ export function schema(
 		throw new RuneValidationError(result.errors.map(toErrorNode));
 	}
 
-	return { fields, validate, validateOrThrow };
+	async function validateAsync(
+		data: unknown,
+		options?: ValidateOptions,
+	): Promise<ValidationResult<Record<string, unknown>>> {
+		if (!isPlainObject(data)) {
+			return {
+				valid: false,
+				errors: [
+					{ field: "_root", rule: "type", message: "Input must be an object" },
+				],
+			};
+		}
+		const errors: ValidationError[] = [];
+		const validated: Record<string, unknown> = {};
+		const rootCtx: RunContext = {
+			data,
+			parent: data,
+			meta: options?.meta ?? {},
+			messagesProvider: options?.messagesProvider,
+		};
+
+		for (const [field, chain] of Object.entries(fields)) {
+			const result = chain._validateWithTransform(field, data[field], rootCtx);
+			const fieldErrors = [...result.errors];
+			// Async rules run only when the field passed its sync rules AND has a
+			// present value — mirrors Lucid skipping a DB rule on an already-invalid
+			// or absent field.
+			if (
+				fieldErrors.length === 0 &&
+				chain.asyncRules.length > 0 &&
+				result.transformed !== undefined &&
+				result.transformed !== null
+			) {
+				const asyncErrors = await chain._runAsyncRules(
+					field,
+					result.transformed,
+					rootCtx,
+				);
+				fieldErrors.push(...asyncErrors);
+			}
+			errors.push(...fieldErrors);
+			if (fieldErrors.length === 0 && result.transformed !== undefined) {
+				validated[field] = result.transformed;
+			}
+		}
+
+		if (errors.length === 0) {
+			return { valid: true, errors, data: validated };
+		}
+		return { valid: false, errors };
+	}
+
+	async function validateOrThrowAsync(
+		data: unknown,
+		options?: ValidateOptions,
+	): Promise<Record<string, unknown>> {
+		const result = await validateAsync(data, options);
+		if (result.valid) {
+			return result.data;
+		}
+		throw new RuneValidationError(result.errors.map(toErrorNode));
+	}
+
+	return {
+		fields,
+		validate,
+		validateOrThrow,
+		validateAsync,
+		validateOrThrowAsync,
+	};
 }
 
 /** Map an internal {@link ValidationError} to a {@link RuneErrorNode}. */
@@ -499,6 +630,7 @@ export class RuleChain<Output = unknown> {
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
 	#useRules: CompiledRule[] = [];
+	#asyncRules: AsyncCompiledRule[] = [];
 	#requiredConditions: RequiredCondition[] = [];
 
 	/** Public read access to rules (for OpenAPI generation, Rust bridge). */
@@ -521,6 +653,10 @@ export class RuleChain<Output = unknown> {
 	/** Public read access to `.use()` rules (used to keep such schemas off the native path). */
 	get useRules(): readonly CompiledRule[] {
 		return this.#useRules;
+	}
+	/** Public read access to async rules (`unique`/`exists`/`useAsync`) — run by `validateAsync`. */
+	get asyncRules(): readonly AsyncCompiledRule[] {
+		return this.#asyncRules;
 	}
 	/** Public read access to `.parse()` pre-transforms (kept off the native path). */
 	get preTransforms(): ReadonlyArray<(value: unknown) => unknown> {
@@ -548,6 +684,7 @@ export class RuleChain<Output = unknown> {
 		next.#nestedSchema = this.#nestedSchema;
 		next.#arrayItemChain = this.#arrayItemChain;
 		next.#useRules = [...this.#useRules];
+		next.#asyncRules = [...this.#asyncRules];
 		next.#requiredConditions = [...this.#requiredConditions];
 		return next;
 	}
@@ -1011,6 +1148,74 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
+	/**
+	 * Attach an async rule (from {@link createAsyncRule}). The schema must then be
+	 * run with `validateAsync` — sync `validate()` throws for such a schema.
+	 */
+	useAsync(rule: AsyncCompiledRule): this {
+		if (rule?.__rune !== "asyncRule" || typeof rule.run !== "function") {
+			throw new RuneError(
+				"INVALID_RULE",
+				"useAsync() expects a compiled async rule — call the factory first",
+				{ hint: "useAsync(myRule()) or useAsync(myRule(options))" },
+			);
+		}
+		this.#asyncRules.push(rule);
+		return this;
+	}
+
+	/**
+	 * DB-backed uniqueness rule (Adonis Lucid `unique`). `check(value, field)`
+	 * resolves `true` when the value is unique (valid). rune stays agnostic — the
+	 * check does the query (e.g. against atlas). Requires `validateAsync`.
+	 *
+	 *     rules.string().email().unique(async (value) => {
+	 *       const row = await db.from('users').where('email', value).first()
+	 *       return !row
+	 *     })
+	 */
+	unique(
+		check: (value: unknown, field: FieldContext) => boolean | Promise<boolean>,
+		message?: string,
+	): this {
+		this.#asyncRules.push({
+			__rune: "asyncRule",
+			async run(value: unknown, field: FieldContext): Promise<void> {
+				const ok = await check(value, field);
+				if (!ok) {
+					field.report(
+						message ?? `The ${field.field} has already been taken`,
+						"database.unique",
+					);
+				}
+			},
+		});
+		return this;
+	}
+
+	/**
+	 * DB-backed existence rule (Adonis Lucid `exists`). `check(value, field)`
+	 * resolves `true` when a matching row exists (valid). Requires `validateAsync`.
+	 */
+	exists(
+		check: (value: unknown, field: FieldContext) => boolean | Promise<boolean>,
+		message?: string,
+	): this {
+		this.#asyncRules.push({
+			__rune: "asyncRule",
+			async run(value: unknown, field: FieldContext): Promise<void> {
+				const ok = await check(value, field);
+				if (!ok) {
+					field.report(
+						message ?? `The selected ${field.field} is invalid`,
+						"database.exists",
+					);
+				}
+			},
+		});
+		return this;
+	}
+
 	/** Set custom error message for the last rule. */
 	message(msg: string): this {
 		if (this.#rules.length === 0) {
@@ -1136,6 +1341,35 @@ export class RuleChain<Output = unknown> {
 			fieldCtx.isValid = errors.length === 0;
 			rule.run(transformed, fieldCtx);
 		}
+	}
+
+	/**
+	 * Run this chain's async rules on the (already sync-validated) value, awaiting
+	 * each in order. Returns the errors they reported. Used by `validateAsync`.
+	 * @internal
+	 */
+	async _runAsyncRules(
+		field: string,
+		transformed: unknown,
+		ctx: RunContext,
+	): Promise<ValidationError[]> {
+		const errors: ValidationError[] = [];
+		const fieldCtx: FieldContext = {
+			value: transformed,
+			data: ctx.data,
+			parent: ctx.parent,
+			field,
+			meta: ctx.meta,
+			isValid: true,
+			report(message: string, rule: string): void {
+				errors.push({ field, rule, message });
+			},
+		};
+		for (const rule of this.#asyncRules) {
+			fieldCtx.isValid = errors.length === 0;
+			await rule.run(transformed, fieldCtx);
+		}
+		return errors;
 	}
 
 	#requiredError(field: string, ctx: RunContext): ValidationError {
