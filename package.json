@@ -1,6 +1,6 @@
 {
   "name": "@c9up/rune",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Rune — Validation engine for the Ream framework",
   "license": "MIT",
   "type": "module",
