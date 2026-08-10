@@ -151,6 +151,53 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
             }
         }
 
+        // Coerce before validating, mirroring the TS path: VineJS accepts "32"
+        // for a number and "on"/"true" for a boolean unless the rule is strict.
+        // Both engines must agree, otherwise the same schema behaves differently
+        // depending on whether the native binary happened to load.
+        for rule in &schema.rules {
+            let strict = rule
+                .params
+                .get("strict")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if strict {
+                continue;
+            }
+            match rule.name.as_str() {
+                "number" => {
+                    if let Some(text) = val.as_str() {
+                        if let Ok(n) = text.trim().parse::<f64>() {
+                            if let Some(num) = serde_json::Number::from_f64(n) {
+                                val = serde_json::Value::Number(num);
+                            }
+                        }
+                    }
+                }
+                "boolean" => {
+                    let coerced = match &val {
+                        serde_json::Value::String(text) => {
+                            match text.trim().to_ascii_lowercase().as_str() {
+                                "true" | "on" | "1" => Some(true),
+                                "false" | "off" | "0" => Some(false),
+                                _ => None,
+                            }
+                        }
+                        serde_json::Value::Number(n) => match n.as_i64() {
+                            Some(1) => Some(true),
+                            Some(0) => Some(false),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(b) = coerced {
+                        val = serde_json::Value::Bool(b);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // Validate rules
         let mut field_valid = true;
         let mut type_failed = false;

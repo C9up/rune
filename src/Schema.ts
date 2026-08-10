@@ -98,7 +98,7 @@ export interface FieldContext {
 	report(
 		message: string,
 		rule: string,
-		field?: string,
+		field?: string | FieldContext,
 		args?: Record<string, unknown>,
 	): void;
 }
@@ -310,6 +310,24 @@ interface PendingAsync {
  */
 let dateOutputTransform: ((value: Date) => unknown) | null = null;
 
+/**
+ * Process-wide messages provider (VineJS `vine.messagesProvider`). A provider
+ * passed per call still wins — global is the fallback, not an override.
+ */
+let globalMessagesProvider: MessagesProviderContract | null = null;
+
+/** Bind (or clear) the process-wide messages provider. */
+export function setGlobalMessagesProvider(
+	provider: MessagesProviderContract | null,
+): void {
+	globalMessagesProvider = provider;
+}
+
+/** Read the process-wide messages provider. */
+export function getGlobalMessagesProvider(): MessagesProviderContract | null {
+	return globalMessagesProvider;
+}
+
 /** Bind (or clear, with `null`) the global `rules.date()` output mapper. */
 export function setDateTransform(fn: ((value: Date) => unknown) | null): void {
 	dateOutputTransform = fn;
@@ -386,6 +404,25 @@ function toDatabaseCheck(
 		});
 		return kind === "unique" ? !found : found;
 	};
+}
+
+/** VineJS number coercion: a numeric string becomes a number, the rest is untouched. */
+function coerceNumber(value: unknown): unknown {
+	if (typeof value !== "string") return value;
+	const trimmed = value.trim();
+	if (trimmed === "") return value;
+	const n = Number(trimmed);
+	return Number.isFinite(n) ? n : value;
+}
+
+/** VineJS boolean coercion over the usual form-encoded spellings. */
+function coerceBoolean(value: unknown): unknown {
+	if (value === 1 || value === 0) return value === 1;
+	if (typeof value !== "string") return value;
+	const v = value.trim().toLowerCase();
+	if (["true", "on", "1"].includes(v)) return true;
+	if (["false", "off", "0"].includes(v)) return false;
+	return value;
 }
 
 /** The checkbox-style truthies VineJS `accepted` recognises. */
@@ -647,7 +684,10 @@ export function schema(
 			};
 		}
 
-		const provider = options?.messagesProvider;
+		// The global provider counts exactly like a per-call one: the Rust engine
+		// renders default messages, so routing there would silently ignore it.
+		const provider =
+			options?.messagesProvider ?? globalMessagesProvider ?? undefined;
 		if (!hasCustomRules && !validationTranslator && !provider) {
 			if (isNativeAvailable()) {
 				return validateWithRust(fields, data);
@@ -714,7 +754,8 @@ export function schema(
 			data,
 			parent: data,
 			meta: options?.meta ?? {},
-			messagesProvider: options?.messagesProvider,
+			messagesProvider:
+				options?.messagesProvider ?? globalMessagesProvider ?? undefined,
 		};
 
 		for (const [field, chain] of Object.entries(fields)) {
@@ -800,7 +841,36 @@ export function schema(
  * VineJS's `vine.create(...)`. Same thing as {@link schema} — the Adonis
  * spelling is provided so a validator reads the same in both frameworks.
  */
-export const create = schema;
+/**
+ * VineJS's `vine.create(...)`. Accepts either a map of fields (rune's native
+ * spelling) or the `RuleChain` produced by `rune.object({...})`, because
+ * `vine.create(vine.object({...}))` is the form Adonis documents.
+ */
+export function create<S extends Record<string, RuleChain>>(
+	fields: S,
+): ValidationSchema<Infer<S>>;
+export function create(chain: RuleChain): ValidationSchema;
+export function create(
+	input: Record<string, RuleChain> | RuleChain,
+): ValidationSchema {
+	return schema(toFieldMap(input));
+}
+
+/** Unwrap `rune.object({...})` back to the field map `schema()` expects. */
+function toFieldMap(
+	input: Record<string, RuleChain> | RuleChain,
+): Record<string, RuleChain> {
+	if (!(input instanceof RuleChain)) return input;
+	const shape = input.getProperties();
+	if (!shape) {
+		throw new RuneError(
+			"NOT_AN_OBJECT",
+			"create()/compile() received a chain that declares no object shape.",
+			{ hint: "Use rune.object({ … }), or pass the field map directly." },
+		);
+	}
+	return shape;
+}
 
 /** Map an internal {@link ValidationError} to a {@link RuneErrorNode}. */
 function toErrorNode(error: ValidationError): RuneErrorNode {
@@ -873,6 +943,13 @@ export class RuleChain<Output = unknown> {
 		fn: (value: unknown, field: FieldContext) => unknown;
 	}> = [];
 	#preTransforms: Array<(value: unknown) => unknown> = [];
+	/**
+	 * Type coercions (VineJS accepts `"32"` for a number). Kept OUT of
+	 * `#preTransforms` on purpose: a pre-transform forces the TS path, and the
+	 * Rust engine implements the very same coercion from the rule's `strict`
+	 * param, so both engines agree without giving up the native path.
+	 */
+	#coercions: Array<(value: unknown) => unknown> = [];
 	/** Formats accepted by `date()` — also used to parse `afterField` siblings. */
 	#dateFormats: DateFormat[] | null = null;
 	#nestedSchema: Record<string, RuleChain> | null = null;
@@ -967,6 +1044,7 @@ export class RuleChain<Output = unknown> {
 		next.#bail = this.#bail;
 		next.#transforms = [...this.#transforms];
 		next.#dateFormats = this.#dateFormats;
+		next.#coercions = [...this.#coercions];
 		next.#recordValueChain = this.#recordValueChain;
 		next.#tupleChains = this.#tupleChains;
 		next.#unionChains = this.#unionChains;
@@ -1040,10 +1118,17 @@ export class RuleChain<Output = unknown> {
 		return this.#retype<string>();
 	}
 
-	/** Must be a number. */
-	number(): RuleChain<number> {
+	/**
+	 * Must be a number. Like VineJS, a numeric STRING is coerced (`"32"` → `32`)
+	 * — HTML form bodies and query strings carry numbers as text, so requiring
+	 * `typeof v === "number"` rejected the values Adonis accepts. Pass
+	 * `{ strict: true }` to refuse anything that is not already a number.
+	 */
+	number(options?: { strict?: boolean }): RuleChain<number> {
+		if (!options?.strict) this.#coercions.push(coerceNumber);
 		this.#pushRule({
 			name: "number",
+			args: { strict: options?.strict === true },
 			validate: (v) =>
 				typeof v === "number" && !Number.isNaN(v) && Number.isFinite(v),
 			message: "Must be a number",
@@ -1051,10 +1136,15 @@ export class RuleChain<Output = unknown> {
 		return this.#retype<number>();
 	}
 
-	/** Must be a boolean. */
-	boolean(): RuleChain<boolean> {
+	/**
+	 * Must be a boolean. Like VineJS, `"true"`, `"false"`, `"on"`, `"off"`,
+	 * `"1"`, `"0"`, `1` and `0` are coerced; `{ strict: true }` refuses them.
+	 */
+	boolean(options?: { strict?: boolean }): RuleChain<boolean> {
+		if (!options?.strict) this.#coercions.push(coerceBoolean);
 		this.#pushRule({
 			name: "boolean",
+			args: { strict: options?.strict === true },
 			validate: (v) => typeof v === "boolean",
 			message: "Must be a boolean",
 		});
@@ -1220,6 +1310,61 @@ export class RuleChain<Output = unknown> {
 			},
 		});
 		return this;
+	}
+
+	/** The nested shape declared by `object()`, if any (VineJS `getProperties`). */
+	getProperties(): Record<string, RuleChain> | null {
+		return this.#nestedSchema ? { ...this.#nestedSchema } : null;
+	}
+
+	/** Independent copy of this chain (VineJS `clone`). */
+	clone(): RuleChain<Output> {
+		return this.#retype<Output>();
+	}
+
+	/** Keep only `keys` of an object shape (VineJS `pick`). */
+	pick<K extends string>(keys: readonly K[]): RuleChain<Output> {
+		return this.#reshape((shape) =>
+			Object.fromEntries(
+				Object.entries(shape).filter(([key]) => keys.includes(key as K)),
+			),
+		);
+	}
+
+	/** Drop `keys` from an object shape (VineJS `omit`). */
+	omit<K extends string>(keys: readonly K[]): RuleChain<Output> {
+		return this.#reshape((shape) =>
+			Object.fromEntries(
+				Object.entries(shape).filter(([key]) => !keys.includes(key as K)),
+			),
+		);
+	}
+
+	/** Make every property of an object shape optional (VineJS `partial`). */
+	partial(): RuleChain<Output> {
+		return this.#reshape((shape) =>
+			Object.fromEntries(
+				Object.entries(shape).map(([key, chain]) => [key, chain.optional()]),
+			),
+		);
+	}
+
+	/** Shared body of `pick`/`omit`/`partial` — rebuilds the nested shape on a clone. */
+	#reshape(
+		transform: (shape: Record<string, RuleChain>) => Record<string, RuleChain>,
+	): RuleChain<Output> {
+		if (!this.#nestedSchema) {
+			throw new RuneError(
+				"NOT_AN_OBJECT",
+				"pick()/omit()/partial() need an object() shape to work on.",
+				{
+					hint: "Declare the shape first: rules.any().object({ … }).pick([…])",
+				},
+			);
+		}
+		const next = this.#retype<Output>();
+		next.#nestedSchema = transform(this.#nestedSchema);
+		return next;
 	}
 
 	/**
@@ -2050,11 +2195,18 @@ export class RuleChain<Output = unknown> {
 			report(
 				message: string,
 				rule: string,
-				reportedField?: string,
+				reportedField?: string | FieldContext,
 				args?: Record<string, unknown>,
 			): void {
+				// VineJS plugins pass the FIELD CONTEXT here, not a path. Accepting
+				// only a string let the object through and produced a
+				// `ValidationError.field` that was not a string at runtime.
+				const target =
+					typeof reportedField === "string"
+						? reportedField
+						: (reportedField?.getFieldPath() ?? field);
 				errors.push({
-					field: reportedField ?? field,
+					field: target,
 					rule,
 					message,
 					...(args ? { meta: args } : {}),
@@ -2072,7 +2224,13 @@ export class RuleChain<Output = unknown> {
 		field: string,
 		value: unknown,
 		ctx: RunContext,
+		pending?: PendingAsync[],
 	): ValidationError[] {
+		// An implicit ASYNC rule polices an absent value too, so it has to be
+		// queued here as well — filtering `#useRules` alone dropped it silently.
+		if (pending && this.#asyncRules.some((rule) => rule.implicit)) {
+			pending.push({ chain: this, field, value, ctx });
+		}
 		const implicitRules = this.#useRules.filter((rule) => rule.implicit);
 		if (implicitRules.length === 0) return [];
 		const errors: ValidationError[] = [];
@@ -2140,7 +2298,7 @@ export class RuleChain<Output = unknown> {
 			if (this.#isOptional || !this.#isRequired(ctx)) {
 				// Implicit rules are precisely the ones that must see an absent value.
 				return {
-					errors: this.#runImplicitRules(field, value, ctx),
+					errors: this.#runImplicitRules(field, value, ctx, pending),
 					transformed: value,
 				};
 			}
@@ -2153,17 +2311,22 @@ export class RuleChain<Output = unknown> {
 			// `key: null` to a payload VineJS would have left without the key.
 			if (this.#isNullable) {
 				return {
-					errors: this.#runImplicitRules(field, value, ctx),
+					errors: this.#runImplicitRules(field, value, ctx, pending),
 					transformed: value,
 				};
 			}
 			if (this.#isOptional || !this.#isRequired(ctx)) {
 				return {
-					errors: this.#runImplicitRules(field, value, ctx),
+					errors: this.#runImplicitRules(field, value, ctx, pending),
 					transformed: undefined,
 				};
 			}
 			return { errors: [this.#requiredError(field, ctx)], transformed: value };
+		}
+
+		// 0b. Coerce before the type rules — a coerced value is the validated value.
+		for (const coerce of this.#coercions) {
+			value = coerce(value);
 		}
 
 		// 1. Type rules first on the raw value — bail on type mismatch.
@@ -2247,10 +2410,21 @@ export class RuleChain<Output = unknown> {
 		if (this.#unionChains) {
 			let matched = false;
 			for (const branch of this.#unionChains) {
-				const res = branch._validateWithTransform(field, transformed, ctx);
+				// Each branch collects into its OWN buffer: a losing branch must not
+				// leave async work queued, and the winning one must not lose it —
+				// without this, a `unique()` inside the matching branch was never
+				// awaited, which reads exactly like a check that passed.
+				const branchPending: PendingAsync[] = [];
+				const res = branch._validateWithTransform(
+					field,
+					transformed,
+					ctx,
+					pending ? branchPending : undefined,
+				);
 				if (res.errors.length === 0) {
 					transformed = res.transformed;
 					matched = true;
+					if (pending) pending.push(...branchPending);
 					break;
 				}
 			}
@@ -2560,15 +2734,22 @@ function evalRequiredCondition(
 }
 
 /** No-op alias of {@link schema} — VineJS `vine.compile()` API parity. */
-export function compile<T extends ValidationSchema>(s: T): T {
-	return s;
+export function compile<T extends ValidationSchema>(s: T): T;
+export function compile(chain: RuleChain): ValidationSchema;
+export function compile(input: ValidationSchema | RuleChain): ValidationSchema {
+	// A rune schema is already compiled, so this is identity for that form; the
+	// `RuleChain` form exists because `vine.compile(vine.object({…}))` is the
+	// shape Adonis documents.
+	return input instanceof RuleChain ? schema(toFieldMap(input)) : input;
 }
 
 /** Entry point for building rules. */
 export const rules = {
 	string: (): RuleChain<string> => new RuleChain().string(),
-	number: (): RuleChain<number> => new RuleChain().number(),
-	boolean: (): RuleChain<boolean> => new RuleChain().boolean(),
+	number: (options?: { strict?: boolean }): RuleChain<number> =>
+		new RuleChain().number(options),
+	boolean: (options?: { strict?: boolean }): RuleChain<boolean> =>
+		new RuleChain().boolean(options),
 	any: (): RuleChain<unknown> => new RuleChain(),
 	date: (options?: { formats?: DateFormat[] }): RuleChain<Date> =>
 		new RuleChain().date(options),

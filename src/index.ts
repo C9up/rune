@@ -44,6 +44,8 @@ export {
 	setValidationTranslator,
 } from "./Schema.js";
 
+import type { MessagesProviderContract } from "./MessagesProvider.js";
+import type { RuleChain } from "./Schema.js";
 import {
 	bindDatabase,
 	bindRosetta,
@@ -51,9 +53,11 @@ import {
 	create,
 	createAsyncRule,
 	createRule,
+	getGlobalMessagesProvider,
 	rules,
 	schema,
 	setDateTransform,
+	setGlobalMessagesProvider,
 	setValidationTranslator,
 } from "./Schema.js";
 
@@ -76,6 +80,39 @@ const rune = {
 	bindRosetta,
 	setDateTransform,
 	setValidationTranslator,
+	/** One-shot validation, VineJS `vine.validate({ schema, data })`. */
+	validate<T extends Record<string, RuleChain>>(options: {
+		schema: T | RuleChain;
+		data: unknown;
+	}) {
+		return create(options.schema as T).validateOrThrow(options.data);
+	},
+	/** One-shot non-throwing validation, VineJS `vine.tryValidate`. */
+	tryValidate<T extends Record<string, RuleChain>>(options: {
+		schema: T | RuleChain;
+		data: unknown;
+	}) {
+		return create(options.schema as T).tryValidate(options.data);
+	},
+	/**
+	 * Type the `meta` passed to `validate(data, { meta })` (VineJS
+	 * `withMetaData`). Purely a typing seam — rune carries meta on the call.
+	 */
+	withMetaData<M extends Record<string, unknown>>(): {
+		create<T extends Record<string, RuleChain>>(
+			fields: T,
+		): ReturnType<typeof create<T>>;
+		meta: M;
+	} {
+		return { create, meta: {} as M };
+	},
+	/** Bind the global messages provider (VineJS `vine.messagesProvider`). */
+	set messagesProvider(provider: MessagesProviderContract | null) {
+		setGlobalMessagesProvider(provider);
+	},
+	get messagesProvider(): MessagesProviderContract | null {
+		return getGlobalMessagesProvider();
+	},
 };
 
 export default rune;
