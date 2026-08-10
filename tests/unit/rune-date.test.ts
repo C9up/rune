@@ -84,27 +84,30 @@ describe("rune > date", () => {
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]?.rule).toBe("afterField");
 
-		// Same calendar day, later clock time: strict comparison passes, day-granular fails.
-		const strict = schema({
+		// VineJS compares at DAY granularity by default (`options.compare || "day"`),
+		// so a later clock time on the SAME day is not "after".
+		const byDefault = schema({
 			a: rules.date(),
 			b: rules.date().afterField("a"),
 		});
 		expect(
-			strict.validateResult({
-				a: "2026-06-25T08:00:00Z",
-				b: "2026-06-25T09:00:00Z",
-			}).valid,
-		).toBe(true);
-		const byDay = schema({
-			a: rules.date(),
-			b: rules.date().afterField("a", { compare: "day" }),
-		});
-		expect(
-			byDay.validateResult({
-				a: "2026-06-25T08:00:00Z",
-				b: "2026-06-25T09:00:00Z",
+			byDefault.validateResult({
+				a: "2026-06-25T08:00:00",
+				b: "2026-06-25T09:00:00",
 			}).valid,
 		).toBe(false);
+
+		// Ask for a finer unit and the same pair passes.
+		const byMinute = schema({
+			a: rules.date(),
+			b: rules.date().afterField("a", { compare: "minute" }),
+		});
+		expect(
+			byMinute.validateResult({
+				a: "2026-06-25T08:00:00",
+				b: "2026-06-25T09:00:00",
+			}).valid,
+		).toBe(true);
 	});
 
 	it("enforces weekend / weekday", () => {
@@ -189,5 +192,56 @@ describe("rune > date grammar and callable operands", () => {
 		boundary = "2027-01-01";
 		// The boundary moved, so the same input is now refused.
 		expect(s.validateResult({ at: "2026-06-25" }).valid).toBe(false);
+	});
+});
+
+describe("rune > date comparison granularity (VineJS default)", () => {
+	it("literal comparisons are day-granular by default", () => {
+		// Vine: `options.compare || "day"`. `after('2026-06-25')` means a LATER
+		// DAY, so the same day at any clock time is not after it.
+		const s = schema({ d: rules.date().after("2026-06-25") });
+		// Naive times: the day boundary is the LOCAL one, as with dayjs.
+		expect(s.validateResult({ d: "2026-06-25T18:00:00" }).valid).toBe(false);
+		expect(s.validateResult({ d: "2026-06-26T09:00:00" }).valid).toBe(true);
+	});
+
+	it("accepts a finer or coarser unit", () => {
+		const bySecond = schema({
+			d: rules.date().after("2026-06-25T08:00:00", { compare: "second" }),
+		});
+		expect(bySecond.validateResult({ d: "2026-06-25T08:00:01" }).valid).toBe(
+			true,
+		);
+
+		const byMonth = schema({
+			d: rules.date().after("2026-06-25", { compare: "month" }),
+		});
+		expect(byMonth.validateResult({ d: "2026-06-30" }).valid).toBe(false);
+		expect(byMonth.validateResult({ d: "2026-07-01" }).valid).toBe(true);
+	});
+
+	it("parses the operand with an explicit format", () => {
+		const s = schema({
+			d: rules.date().after("25/06/2026", { format: "DD/MM/YYYY" }),
+		});
+		expect(s.validateResult({ d: "2026-06-26" }).valid).toBe(true);
+		expect(s.validateResult({ d: "2026-06-24" }).valid).toBe(false);
+	});
+
+	it("equals is day-granular too", () => {
+		const s = schema({ d: rules.date().equals("2026-06-25") });
+		expect(s.validateResult({ d: "2026-06-25T18:30:00" }).valid).toBe(true);
+	});
+});
+
+describe("rune > partial() does not mutate its source", () => {
+	it("leaves the original shape required", () => {
+		const base = rules
+			.any()
+			.object({ id: rules.number(), name: rules.string() });
+		const relaxed = base.partial();
+		expect(schema({ u: relaxed }).validateResult({ u: {} }).valid).toBe(true);
+		// The source must still demand its properties.
+		expect(schema({ u: base }).validateResult({ u: {} }).valid).toBe(false);
 	});
 });

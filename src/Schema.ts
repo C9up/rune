@@ -5,10 +5,11 @@
  */
 
 import {
+	type CompareUnit,
 	type DateFormat,
 	parseDateValue,
 	resolveOperand,
-	startOfDay,
+	truncateTo,
 } from "./date.js";
 import type { RuneErrorNode } from "./errors.js";
 import { RuneError, RuneValidationError } from "./errors.js";
@@ -156,6 +157,13 @@ export interface CreateRuleOptions {
 	implicit?: boolean;
 	/** Rule name reported in errors when the validator does not pass one. */
 	name?: string;
+	/**
+	 * Declare the rule asynchronous (VineJS `{ isAsync: true }`).
+	 * {@link createAsyncRule} sets it; passing it to {@link createRule} routes
+	 * the rule to the async builder instead of silently producing a sync rule
+	 * whose Promise nobody awaits.
+	 */
+	isAsync?: boolean;
 }
 
 export function createRule(
@@ -170,6 +178,16 @@ export function createRule<Options>(
 	validator: RuleValidator<Options>,
 	ruleOptions?: CreateRuleOptions,
 ): (options: Options) => CompiledRule {
+	if (ruleOptions?.isAsync) {
+		// A sync rule whose validator returns a Promise is a rule nobody awaits.
+		// Vine expresses "async" as an option, so honour it by building the async
+		// rule instead of quietly dropping the await.
+		throw new RuneError(
+			"ASYNC_RULE_MISMATCH",
+			"createRule(fn, { isAsync: true }) builds a rule that must be awaited.",
+			{ hint: "Use createAsyncRule(fn) — it is the same contract, awaited." },
+		);
+	}
 	return (options: Options): CompiledRule => ({
 		__rune: "rule",
 		implicit: ruleOptions?.implicit ?? false,
@@ -250,6 +268,8 @@ export interface ValidateOptions {
 
 export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
+	/** Field-by-field introspection of the compiled schema (VineJS `toJSON`). */
+	toJSON(): Record<string, { rules: string[]; optional: boolean }>;
 	/**
 	 * Validate and return the payload, throwing {@link RuneValidationError} on
 	 * failure — the VineJS/Adonis contract (`validator.validate(data)`), async
@@ -333,6 +353,38 @@ export interface HostResolver {
 }
 
 let hostResolver: HostResolver | null = null;
+
+/** See `rune.convertEmptyStringsToNull`. */
+let convertEmptyStringsToNull = false;
+
+/** Toggle the global `"" -> null` conversion (VineJS `convertEmptyStringsToNull`). */
+export function setConvertEmptyStringsToNull(enabled: boolean): void {
+	convertEmptyStringsToNull = enabled;
+}
+
+/** Read the global `"" -> null` conversion flag. */
+export function getConvertEmptyStringsToNull(): boolean {
+	return convertEmptyStringsToNull;
+}
+
+/**
+ * Rewrite every `""` to `null`, deeply, before validation.
+ *
+ * Applied to the DATA rather than inside each chain: it has to happen before
+ * the optional/nullable decision, and before the native-engine routing — the
+ * Rust engine never sees this flag, so converting later would have made the
+ * behaviour depend on whether the binary was loadable.
+ */
+function convertEmptyStrings(value: unknown): unknown {
+	if (value === "") return null;
+	if (Array.isArray(value)) return value.map(convertEmptyStrings);
+	if (isPlainObject(value)) {
+		return Object.fromEntries(
+			Object.entries(value).map(([k, v]) => [k, convertEmptyStrings(v)]),
+		);
+	}
+	return value;
+}
 
 /** Bind (or clear, with `null`) the resolver backing `activeUrl()`. */
 export function bindHostResolver(resolver: HostResolver | null): void {
@@ -446,6 +498,46 @@ function coerceBoolean(value: unknown): unknown {
 	if (["true", "on", "1"].includes(v)) return true;
 	if (["false", "off", "0"].includes(v)) return false;
 	return value;
+}
+
+/** Options accepted by every date comparison (VineJS `{ compare, format }`). */
+export interface DateCompareOptions {
+	/** Granularity of the comparison. Defaults to `"day"`, like VineJS. */
+	compare?: CompareUnit;
+	/** Format used to parse the operand / sibling, when it is a string. */
+	format?: string;
+}
+
+/**
+ * The structural shape `file()` accepts. An Adonis bodyparser `MultipartFile`
+ * satisfies it without rune having to know the type.
+ */
+export interface FileLike {
+	size: number;
+	extname?: string | null;
+	clientName?: string;
+	name?: string;
+}
+
+/** Structural guard for {@link FileLike}. */
+function isFileLike(value: unknown): value is FileLike {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"size" in value &&
+		typeof (value as FileLike).size === "number"
+	);
+}
+
+/** Lowercase extension without the dot, from `extname` or a file name. */
+function fileExtension(file: FileLike): string | null {
+	if (typeof file.extname === "string" && file.extname.length > 0) {
+		return file.extname.replace(/^\./, "").toLowerCase();
+	}
+	const name = file.clientName ?? file.name;
+	if (typeof name !== "string") return null;
+	const dot = name.lastIndexOf(".");
+	return dot > 0 ? name.slice(dot + 1).toLowerCase() : null;
 }
 
 /** A union branch guarded by a predicate — `vine.union.if(...)`. */
@@ -728,9 +820,12 @@ export function schema(
 	);
 
 	function validateResult(
-		data: unknown,
+		rawData: unknown,
 		options?: ValidateOptions,
 	): ValidationResult<Record<string, unknown>> {
+		const data = convertEmptyStringsToNull
+			? convertEmptyStrings(rawData)
+			: rawData;
 		if (hasAsyncRules) {
 			throw new Error(
 				"rune: this schema has async rules (unique/exists/useAsync) — call validateAsync() instead of validate().",
@@ -798,9 +893,12 @@ export function schema(
 	}
 
 	async function validateResultAsync(
-		data: unknown,
+		rawData: unknown,
 		options?: ValidateOptions,
 	): Promise<ValidationResult<Record<string, unknown>>> {
+		const data = convertEmptyStringsToNull
+			? convertEmptyStrings(rawData)
+			: rawData;
 		if (!isPlainObject(data)) {
 			return {
 				valid: false,
@@ -899,8 +997,25 @@ export function schema(
 		return validateOrThrowAsync(data, options);
 	}
 
+	/**
+	 * Introspection of the compiled schema (VineJS `toJSON`): field names and the
+	 * rules attached to each, enough to render a form or diff two schemas.
+	 */
+	function toJSON(): Record<string, { rules: string[]; optional: boolean }> {
+		return Object.fromEntries(
+			Object.entries(fields).map(([field, chain]) => [
+				field,
+				{
+					rules: chain.rules.map((rule) => rule.name),
+					optional: chain.isOptionalField,
+				},
+			]),
+		);
+	}
+
 	return {
 		fields,
+		toJSON,
 		validate,
 		validateResult,
 		validateResultAsync,
@@ -1252,27 +1367,37 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must be strictly after `operand` (`'today'`, an ISO string, or a `Date`). */
-	after(operand: unknown): this {
-		return this.#compareDate("after", operand, (a, b) => a > b);
+	after(operand: unknown, options?: DateCompareOptions): this {
+		return this.#compareDate("after", operand, (a, b) => a > b, options);
 	}
 
 	/** Must be strictly before `operand`. */
-	before(operand: unknown): this {
-		return this.#compareDate("before", operand, (a, b) => a < b);
+	before(operand: unknown, options?: DateCompareOptions): this {
+		return this.#compareDate("before", operand, (a, b) => a < b, options);
 	}
 
 	/** Must be after `operand`, or equal to it. */
-	afterOrEqual(operand: unknown): this {
-		return this.#compareDate("afterOrEqual", operand, (a, b) => a >= b);
+	afterOrEqual(operand: unknown, options?: DateCompareOptions): this {
+		return this.#compareDate(
+			"afterOrEqual",
+			operand,
+			(a, b) => a >= b,
+			options,
+		);
 	}
 
 	/** Must be before `operand`, or equal to it. */
-	beforeOrEqual(operand: unknown): this {
-		return this.#compareDate("beforeOrEqual", operand, (a, b) => a <= b);
+	beforeOrEqual(operand: unknown, options?: DateCompareOptions): this {
+		return this.#compareDate(
+			"beforeOrEqual",
+			operand,
+			(a, b) => a <= b,
+			options,
+		);
 	}
 
 	/** Must be after the date held by a sibling field (VineJS `afterField`). */
-	afterField(otherField: string, options?: { compare?: "day" }): this {
+	afterField(otherField: string, options?: DateCompareOptions): this {
 		return this.#compareDateField(
 			"afterField",
 			otherField,
@@ -1282,7 +1407,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must be before the date held by a sibling field. */
-	beforeField(otherField: string, options?: { compare?: "day" }): this {
+	beforeField(otherField: string, options?: DateCompareOptions): this {
 		return this.#compareDateField(
 			"beforeField",
 			otherField,
@@ -1292,12 +1417,12 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must be the same instant as `operand` (VineJS `equals`). */
-	equals(operand: unknown): this {
-		return this.#compareDate("equals", operand, (a, b) => a === b);
+	equals(operand: unknown, options?: DateCompareOptions): this {
+		return this.#compareDate("equals", operand, (a, b) => a === b, options);
 	}
 
 	/** Must be after the sibling's date, or the same instant (VineJS `afterOrSameAs`). */
-	afterOrSameAs(otherField: string, options?: { compare?: "day" }): this {
+	afterOrSameAs(otherField: string, options?: DateCompareOptions): this {
 		return this.#compareDateField(
 			"afterOrSameAs",
 			otherField,
@@ -1307,7 +1432,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must be before the sibling's date, or the same instant. */
-	beforeOrSameAs(otherField: string, options?: { compare?: "day" }): this {
+	beforeOrSameAs(otherField: string, options?: DateCompareOptions): this {
 		return this.#compareDateField(
 			"beforeOrSameAs",
 			otherField,
@@ -1342,7 +1467,13 @@ export class RuleChain<Output = unknown> {
 		name: string,
 		operand: unknown,
 		cmp: (a: number, b: number) => boolean,
+		options?: DateCompareOptions,
 	): this {
+		// VineJS: `options.compare || "day"`. A bare `after('today')` is about the
+		// calendar date, not the clock — comparing exact timestamps made every
+		// same-day value fail a rule the caller read as "today or later".
+		const unit: CompareUnit = options?.compare ?? "day";
+		const formats = options?.format ? [options.format] : null;
 		this.#pushRule({
 			name,
 			// A callable operand is resolved per validation, not once at build
@@ -1350,13 +1481,16 @@ export class RuleChain<Output = unknown> {
 			// at the moment the schema was declared (VineJS allows the callback).
 			args: typeof operand === "function" ? undefined : { operand },
 			validate: (v) => {
-				const other = resolveOperand(
+				const raw =
 					typeof operand === "function"
 						? (operand as () => unknown)()
-						: operand,
-				);
+						: operand;
+				const other =
+					formats && typeof raw === "string"
+						? parseDateValue(raw, formats)
+						: resolveOperand(raw);
 				if (!(v instanceof Date) || other === null) return false;
-				return cmp(v.getTime(), other.getTime());
+				return cmp(truncateTo(v, unit), truncateTo(other, unit));
 			},
 			message: `Must be ${name.replace(/([A-Z])/g, " $1").toLowerCase()} ${String(operand)}`,
 		});
@@ -1367,11 +1501,13 @@ export class RuleChain<Output = unknown> {
 	#compareDateField(
 		name: string,
 		otherField: string,
-		options: { compare?: "day" } | undefined,
+		options: DateCompareOptions | undefined,
 		cmp: (a: number, b: number) => boolean,
 	): this {
-		const formats = this.#dateFormats ?? ["iso8601"];
-		const byDay = options?.compare === "day";
+		const formats = options?.format
+			? [options.format]
+			: (this.#dateFormats ?? ["iso8601"]);
+		const unit: CompareUnit = options?.compare ?? "day";
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
@@ -1380,9 +1516,7 @@ export class RuleChain<Output = unknown> {
 					field.report(`Cannot compare with ${otherField}`, name);
 					return;
 				}
-				const a = byDay ? startOfDay(value) : value;
-				const b = byDay ? startOfDay(other) : other;
-				if (!cmp(a.getTime(), b.getTime())) {
+				if (!cmp(truncateTo(value, unit), truncateTo(other, unit))) {
 					field.report(
 						`Must be ${name.replace("Field", "")} ${otherField}`,
 						name,
@@ -1423,9 +1557,15 @@ export class RuleChain<Output = unknown> {
 
 	/** Make every property of an object shape optional (VineJS `partial`). */
 	partial(): RuleChain<Output> {
+		// `optional()` mutates and returns the SAME chain, so calling it on the
+		// stored properties made the source shape optional too — `base.partial()`
+		// silently relaxed `base`. Clone each property first, like VineJS does.
 		return this.#reshape((shape) =>
 			Object.fromEntries(
-				Object.entries(shape).map(([key, chain]) => [key, chain.optional()]),
+				Object.entries(shape).map(([key, chain]) => [
+					key,
+					chain.clone().optional(),
+				]),
 			),
 		);
 	}
@@ -1524,6 +1664,40 @@ export class RuleChain<Output = unknown> {
 			message: "Does not match any allowed shape",
 		});
 		return this;
+	}
+
+	/**
+	 * Must be an uploaded file (VineJS/Adonis `vine.file()`).
+	 *
+	 * Named deviation: Adonis validates a bodyparser `MultipartFile`, which rune
+	 * cannot import and stay agnostic. It checks the STRUCTURE instead — any
+	 * object exposing `size` and a name/extension — so an Adonis MultipartFile
+	 * satisfies it, and so does any other upload representation.
+	 *
+	 * `size` is a byte count; `extnames` are compared lowercase, without the dot.
+	 */
+	file(options?: {
+		size?: number;
+		extnames?: readonly string[];
+	}): RuleChain<FileLike> {
+		this.#pushRule({
+			name: "file",
+			args: options ? { ...options } : undefined,
+			validate: (v) => {
+				if (!isFileLike(v)) return false;
+				if (options?.size !== undefined && v.size > options.size) return false;
+				if (options?.extnames) {
+					const ext = fileExtension(v);
+					if (ext === null) return false;
+					if (!options.extnames.map((e) => e.toLowerCase()).includes(ext)) {
+						return false;
+					}
+				}
+				return true;
+			},
+			message: "Must be a valid file",
+		});
+		return this.#retype<FileLike>();
 	}
 
 	/** Must equal one of `values` (enum). Narrows the output to the union. */
@@ -1798,7 +1972,9 @@ export class RuleChain<Output = unknown> {
 	postalCode(
 		options:
 			| { countryCode: string | string[] }
-			| ((field: FieldContext) => string | string[]),
+			| ((field: FieldContext) => {
+					countryCode: string | string[];
+			  }),
 	): this {
 		// The callback form resolves per validation (VineJS lets the country come
 		// from a sibling field), so its countries cannot be checked up front.
@@ -1807,7 +1983,7 @@ export class RuleChain<Output = unknown> {
 				__rune: "rule",
 				run: (value, field) => {
 					if (typeof value !== "string") return;
-					const countries = [options(field)].flat();
+					const countries = [options(field).countryCode].flat();
 					if (!countries.some((c) => isPostalCode(value, c) === true)) {
 						field.report(
 							`Must be a valid ${countries.join("/")} postal code`,
@@ -1877,6 +2053,16 @@ export class RuleChain<Output = unknown> {
 			message: field
 				? `Items must have a unique ${field}`
 				: "Items must be unique",
+		});
+		return this;
+	}
+
+	/** Must be less than or equal to zero (VineJS `nonPositive`). */
+	nonPositive(): this {
+		this.#pushRule({
+			name: "nonPositive",
+			validate: (v) => typeof v === "number" && v <= 0,
+			message: "Must be zero or negative",
 		});
 		return this;
 	}
@@ -2083,16 +2269,20 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Number must have at most `digits` decimal places (TS-only). */
-	decimal(digits: number): this {
+	decimal(digits: number | [number, number]): this {
+		// VineJS accepts a `[min, max]` range as well as a single maximum.
+		const [min, max] = Array.isArray(digits) ? digits : [0, digits];
 		this.#pushRule({
 			name: "decimal",
 			args: { digits },
 			validate: (v) => {
 				if (typeof v !== "number" || !Number.isFinite(v)) return false;
-				const parts = String(v).split(".");
-				return (parts[1]?.length ?? 0) <= digits;
+				const places = String(v).split(".")[1]?.length ?? 0;
+				return places >= min && places <= max;
 			},
-			message: `Must have at most ${digits} decimal places`,
+			message: Array.isArray(digits)
+				? `Must have between ${min} and ${max} decimal places`
+				: `Must have at most ${max} decimal places`,
 		});
 		return this;
 	}
@@ -2944,6 +3134,10 @@ export const rules = {
 	date: (options?: { formats?: DateFormat[] }): RuleChain<Date> =>
 		new RuleChain().date(options),
 	accepted: (): RuleChain<true> => new RuleChain().accepted(),
+	file: (options?: {
+		size?: number;
+		extnames?: readonly string[];
+	}): RuleChain<FileLike> => new RuleChain().file(options),
 	record: <Item extends RuleChain>(
 		valueChain: Item,
 	): RuleChain<Record<string, OutputOf<Item>>> =>

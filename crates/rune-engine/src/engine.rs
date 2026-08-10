@@ -15,10 +15,8 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// ASCII letters only — mirrors the TS `^[a-zA-Z]+$`.
-static ALPHA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z]+$").unwrap());
 
 /// ASCII letters and digits — mirrors the TS `^[a-zA-Z0-9]+$`.
-static ALPHANUMERIC_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9]+$").unwrap());
 
 /// Code-point length for a string, element count for an array, else `-1`.
 /// Mirrors the TS `sizedLength` helper (`[...v].length` counts code points).

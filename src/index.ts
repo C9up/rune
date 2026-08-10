@@ -43,6 +43,7 @@ export {
 	createRule,
 	rules,
 	schema,
+	setConvertEmptyStringsToNull,
 	setDateTransform,
 	setValidationTranslator,
 } from "./Schema.js";
@@ -51,14 +52,17 @@ import type { MessagesProviderContract } from "./MessagesProvider.js";
 import type { RuleChain } from "./Schema.js";
 import {
 	bindDatabase,
+	bindHostResolver,
 	bindRosetta,
 	compile,
 	create,
 	createAsyncRule,
 	createRule,
+	getConvertEmptyStringsToNull,
 	getGlobalMessagesProvider,
 	rules,
 	schema,
+	setConvertEmptyStringsToNull,
 	setDateTransform,
 	setGlobalMessagesProvider,
 	setValidationTranslator,
@@ -80,34 +84,85 @@ const rune = {
 	createRule,
 	createAsyncRule,
 	bindDatabase,
+	bindHostResolver,
 	bindRosetta,
 	setDateTransform,
 	setValidationTranslator,
+	/**
+	 * Convert `""` to `null` before validating (VineJS
+	 * `convertEmptyStringsToNull`). An HTML form posts empty inputs as `""`, and
+	 * an optional field should read that as "absent", not as a present empty
+	 * string that fails `minLength`.
+	 */
+	set convertEmptyStringsToNull(enabled: boolean) {
+		setConvertEmptyStringsToNull(enabled);
+	},
+	get convertEmptyStringsToNull(): boolean {
+		return getConvertEmptyStringsToNull();
+	},
 	/** One-shot validation, VineJS `vine.validate({ schema, data })`. */
 	validate<T extends Record<string, RuleChain>>(options: {
 		schema: T | RuleChain;
 		data: unknown;
+		meta?: Record<string, unknown>;
+		messagesProvider?: MessagesProviderContract;
 	}) {
-		return create(options.schema as T).validate(options.data);
+		return create(options.schema as T).validate(options.data, {
+			meta: options.meta,
+			messagesProvider: options.messagesProvider,
+		});
 	},
 	/** One-shot non-throwing validation, VineJS `vine.tryValidate`. */
 	tryValidate<T extends Record<string, RuleChain>>(options: {
 		schema: T | RuleChain;
 		data: unknown;
+		meta?: Record<string, unknown>;
+		messagesProvider?: MessagesProviderContract;
 	}) {
-		return create(options.schema as T).tryValidate(options.data);
+		return create(options.schema as T).tryValidate(options.data, {
+			meta: options.meta,
+			messagesProvider: options.messagesProvider,
+		});
 	},
 	/**
 	 * Type the `meta` passed to `validate(data, { meta })` (VineJS
 	 * `withMetaData`). Purely a typing seam — rune carries meta on the call.
 	 */
-	withMetaData<M extends Record<string, unknown>>(): {
+	withMetaData<M extends Record<string, unknown>>(
+		validateMeta?: (meta: M) => void,
+	): {
 		create<T extends Record<string, RuleChain>>(
 			fields: T,
 		): ReturnType<typeof create<T>>;
-		meta: M;
 	} {
-		return { create, meta: {} as M };
+		return {
+			create<T extends Record<string, RuleChain>>(fields: T) {
+				const validator = create(fields);
+				if (!validateMeta) return validator;
+				// The callback runs BEFORE the payload: meta that is wrong makes
+				// every rule reading it meaningless, so failing early is the only
+				// honest outcome.
+				const guard = <A extends unknown[], R>(
+					run: (...args: A) => R,
+				): ((...args: A) => R) => {
+					return (...args: A): R => {
+						const options = args[1] as { meta?: M } | undefined;
+						validateMeta((options?.meta ?? {}) as M);
+						return run(...args);
+					};
+				};
+				return {
+					...validator,
+					validate: guard(validator.validate),
+					validateResult: guard(validator.validateResult),
+					validateResultAsync: guard(validator.validateResultAsync),
+					validateOrThrow: guard(validator.validateOrThrow),
+					validateOrThrowAsync: guard(validator.validateOrThrowAsync),
+					tryValidate: guard(validator.tryValidate),
+					tryValidateSync: guard(validator.tryValidateSync),
+				} as ReturnType<typeof create<T>>;
+			},
+		};
 	},
 	/** Bind the global messages provider (VineJS `vine.messagesProvider`). */
 	set messagesProvider(provider: MessagesProviderContract | null) {

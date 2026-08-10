@@ -196,11 +196,11 @@ describe("rune > format rule options (VineJS)", () => {
 		).toBe(true);
 		const s = schema({
 			country: rules.string(),
-			zip: rules
-				.string()
-				.postalCode((field) =>
-					Array.isArray(field.parent) ? "CH" : String(field.parent.country),
-				),
+			zip: rules.string().postalCode((field) => ({
+				countryCode: Array.isArray(field.parent)
+					? "CH"
+					: String(field.parent.country),
+			})),
 		});
 		expect(s.validateResult({ country: "CH", zip: "1201" }).valid).toBe(true);
 		expect(s.validateResult({ country: "CH", zip: "75001" }).valid).toBe(false);

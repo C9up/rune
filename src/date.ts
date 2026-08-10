@@ -213,3 +213,47 @@ export function startOfDay(date: Date): Date {
 	d.setHours(0, 0, 0, 0);
 	return d;
 }
+
+/** Granularity of a date comparison (VineJS `{ compare }`, dayjs units). */
+export type CompareUnit =
+	| "millisecond"
+	| "second"
+	| "minute"
+	| "hour"
+	| "day"
+	| "month"
+	| "year";
+
+/**
+ * Truncate a date to `unit`, so a comparison ignores everything finer.
+ * VineJS compares at DAY granularity by default (`options.compare || "day"`),
+ * which is why a bare `after('today')` is about the date, not the clock.
+ */
+export function truncateTo(date: Date, unit: CompareUnit): number {
+	const d = new Date(date.getTime());
+	switch (unit) {
+		case "year":
+			d.setMonth(0, 1);
+			d.setHours(0, 0, 0, 0);
+			break;
+		case "month":
+			d.setDate(1);
+			d.setHours(0, 0, 0, 0);
+			break;
+		case "day":
+			d.setHours(0, 0, 0, 0);
+			break;
+		case "hour":
+			d.setMinutes(0, 0, 0);
+			break;
+		case "minute":
+			d.setSeconds(0, 0);
+			break;
+		case "second":
+			d.setMilliseconds(0);
+			break;
+		case "millisecond":
+			break;
+	}
+	return d.getTime();
+}
