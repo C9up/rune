@@ -98,16 +98,54 @@ export function isCoordinates(v: string): boolean {
  * than at the call site, and see the module note on unknown locales.
  */
 const POSTAL_CODES: Record<string, RegExp> = {
-	CH: /^\d{4}$/,
-	FR: /^\d{5}$/,
-	DE: /^\d{5}$/,
-	US: /^\d{5}(?:-\d{4})?$/,
-	CA: /^[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d$/i,
-	GB: /^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$/i,
-	IT: /^\d{5}$/,
-	ES: /^\d{5}$/,
+	AD: /^AD\d{3}$/i,
+	AT: /^\d{4}$/,
+	AU: /^\d{4}$/,
 	BE: /^\d{4}$/,
+	BG: /^\d{4}$/,
+	BR: /^\d{5}-?\d{3}$/,
+	CA: /^[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d$/i,
+	CH: /^\d{4}$/,
+	CN: /^\d{6}$/,
+	CZ: /^\d{3} ?\d{2}$/,
+	DE: /^\d{5}$/,
+	DK: /^\d{4}$/,
+	EE: /^\d{5}$/,
+	ES: /^\d{5}$/,
+	FI: /^\d{5}$/,
+	FR: /^\d{5}$/,
+	GB: /^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$/i,
+	GR: /^\d{3} ?\d{2}$/,
+	HR: /^\d{5}$/,
+	HU: /^\d{4}$/,
+	IE: /^[A-Z]\d[\dW] ?[A-Z\d]{4}$/i,
+	IL: /^\d{5}(?:\d{2})?$/,
+	IN: /^\d{6}$/,
+	IS: /^\d{3}$/,
+	IT: /^\d{5}$/,
+	JP: /^\d{3}-?\d{4}$/,
+	KR: /^\d{5}$/,
+	LI: /^\d{4}$/,
+	LT: /^(?:LT-)?\d{5}$/i,
+	LU: /^\d{4}$/,
+	LV: /^(?:LV-)?\d{4}$/i,
+	MC: /^980\d{2}$/,
+	MT: /^[A-Z]{3} ?\d{4}$/i,
+	MX: /^\d{5}$/,
 	NL: /^\d{4} ?[A-Z]{2}$/i,
+	NO: /^\d{4}$/,
+	NZ: /^\d{4}$/,
+	PL: /^\d{2}-?\d{3}$/,
+	PT: /^\d{4}-?\d{3}$/,
+	RO: /^\d{6}$/,
+	RU: /^\d{6}$/,
+	SE: /^\d{3} ?\d{2}$/,
+	SI: /^(?:SI-)?\d{4}$/i,
+	SK: /^\d{3} ?\d{2}$/,
+	TR: /^\d{5}$/,
+	UA: /^\d{5}$/,
+	US: /^\d{5}(?:-\d{4})?$/,
+	ZA: /^\d{4}$/,
 };
 
 /** Country codes rune can check postal codes for. */
@@ -223,12 +261,36 @@ export function toCamelCase(v: string): string {
  * {@link isPostalCode}: an unknown country returns `null`.
  */
 const PASSPORTS: Record<string, RegExp> = {
+	AT: /^[A-Z]\d{7}$/i,
+	AU: /^[A-Z]\d{7}$/i,
+	BE: /^[A-Z]{2}\d{6}$/i,
+	CA: /^[A-Z]{2}\d{6}$/i,
 	CH: /^[A-Z]\d{7}$/i,
-	FR: /^\d{2}[A-Z]{2}\d{5}$/i,
-	US: /^\d{9}$/,
-	GB: /^\d{9}$/,
+	CZ: /^\d{8}$/,
 	DE: /^[CFGHJKLMNPRTVWXYZ0-9]{9}$/i,
+	DK: /^\d{9}$/,
+	ES: /^[A-Z]{3}\d{6}$/i,
+	FI: /^[A-Z]{2}\d{7}$/i,
+	FR: /^\d{2}[A-Z]{2}\d{5}$/i,
+	GB: /^\d{9}$/,
+	GR: /^[A-Z]{2}\d{7}$/i,
+	HU: /^[A-Z]{2}\d{6}$/i,
+	IE: /^[A-Z0-9]{2}\d{7}$/i,
+	IN: /^[A-Z]\d{7}$/i,
 	IT: /^[A-Z0-9]{2}\d{7}$/i,
+	JP: /^[A-Z]{2}\d{7}$/i,
+	KR: /^[MS]\d{8}$/i,
+	NL: /^[A-Z]{2}\d{6}[A-Z0-9]$/i,
+	NO: /^\d{8}$/,
+	PL: /^[A-Z]{2}\d{7}$/i,
+	PT: /^[A-Z]\d{6}$/i,
+	RO: /^\d{8,9}$/,
+	RU: /^\d{9}$/,
+	SE: /^\d{8}$/,
+	TR: /^[A-Z]\d{8}$/i,
+	UA: /^[A-Z]{2}\d{6}$/i,
+	US: /^\d{9}$/,
+	ZA: /^[TAMD]\d{8}$/i,
 };
 
 export const SUPPORTED_PASSPORTS = Object.keys(PASSPORTS);
@@ -309,11 +371,46 @@ export function isUrlWithOptions(
  */
 const MOBILE_LOCALES: Record<string, RegExp> = {
 	"fr-CH": /^(?:\+41|0)7[5-9]\d{7}$/,
+	"de-CH": /^(?:\+41|0)7[5-9]\d{7}$/,
+	"it-CH": /^(?:\+41|0)7[5-9]\d{7}$/,
 	"fr-FR": /^(?:\+33|0)[67]\d{8}$/,
+	"fr-BE": /^(?:\+32|0)4[5-9]\d{7}$/,
+	"nl-BE": /^(?:\+32|0)4[5-9]\d{7}$/,
 	"en-US": /^(?:\+1)?[2-9]\d{9}$/,
+	"en-CA": /^(?:\+1)?[2-9]\d{9}$/,
 	"en-GB": /^(?:\+44|0)7\d{9}$/,
+	"en-IE": /^(?:\+353|0)8[35-9]\d{7}$/,
+	"en-AU": /^(?:\+61|0)4\d{8}$/,
+	"en-NZ": /^(?:\+64|0)2\d{7,9}$/,
+	"en-IN": /^(?:\+91|0)?[6-9]\d{9}$/,
 	"de-DE": /^(?:\+49|0)1[5-7]\d{8,9}$/,
+	"de-AT": /^(?:\+43|0)6[4-9]\d{7,10}$/,
 	"it-IT": /^(?:\+39)?3\d{8,9}$/,
+	"es-ES": /^(?:\+34)?[679]\d{8}$/,
+	"pt-PT": /^(?:\+351)?9[1236]\d{7}$/,
+	"pt-BR": /^(?:\+55)?(?:\d{2})?9?\d{8}$/,
+	"nl-NL": /^(?:\+31|0)6\d{8}$/,
+	"da-DK": /^(?:\+45)?\d{8}$/,
+	"sv-SE": /^(?:\+46|0)7[02369]\d{7}$/,
+	"nb-NO": /^(?:\+47)?[49]\d{7}$/,
+	"fi-FI": /^(?:\+358|0)4\d{5,10}$/,
+	"pl-PL": /^(?:\+48)?\d{9}$/,
+	"cs-CZ": /^(?:\+420)?[6-7]\d{8}$/,
+	"sk-SK": /^(?:\+421)?9\d{8}$/,
+	"hu-HU": /^(?:\+36|06)(?:20|30|31|50|70)\d{7}$/,
+	"ro-RO": /^(?:\+40|0)7\d{8}$/,
+	"el-GR": /^(?:\+30|0)6[89]\d{8}$/,
+	"tr-TR": /^(?:\+90|0)5\d{9}$/,
+	"ru-RU": /^(?:\+7|8)9\d{9}$/,
+	"uk-UA": /^(?:\+380|0)\d{9}$/,
+	"ja-JP": /^(?:\+81|0)[7-9]0\d{8}$/,
+	"ko-KR": /^(?:\+82|0)1[0-9]\d{7,8}$/,
+	"zh-CN": /^(?:\+86|0)?1[3-9]\d{9}$/,
+	"zh-TW": /^(?:\+886|0)9\d{8}$/,
+	"ar-AE": /^(?:\+971|0)5[0245678]\d{7}$/,
+	"ar-SA": /^(?:\+966|0)5\d{8}$/,
+	"he-IL": /^(?:\+972|0)5[0-9]\d{7}$/,
+	"en-ZA": /^(?:\+27|0)[6-8]\d{8}$/,
 };
 
 export const SUPPORTED_MOBILE_LOCALES = Object.keys(MOBILE_LOCALES);
@@ -322,4 +419,113 @@ export function isMobileForLocale(v: string, locale: string): boolean | null {
 	const re = MOBILE_LOCALES[locale];
 	if (re === undefined) return null;
 	return re.test(v.replace(/[ .-]/g, ""));
+}
+
+/**
+ * Options accepted by `email()` — the validator.js names VineJS forwards.
+ * Implemented here rather than delegated: rune carries no runtime dependency,
+ * so every check it claims to do, it does itself.
+ */
+export interface EmailOptions {
+	/** Accept `Name <a@b.io>`. Off by default. */
+	allow_display_name?: boolean;
+	/** Require a dotted domain. On by default. */
+	require_tld?: boolean;
+	/** Accept `user@[192.168.0.1]` / `user@[IPv6:…]`. Off by default. */
+	allow_ip_domain?: boolean;
+	/** Skip the RFC length caps (64 local / 254 total). Off by default. */
+	ignore_max_length?: boolean;
+	/** Characters refused anywhere in the local part. */
+	blacklisted_chars?: string;
+	/** Apply Gmail's own extra restrictions when the domain is Gmail. */
+	domain_specific_validation?: boolean;
+}
+
+/** Unquoted local part: dot-separated atoms of RFC 5322 atext. */
+const ATEXT = "[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+";
+const DOT_ATOM_RE = new RegExp(`^${ATEXT}(?:\\.${ATEXT})*$`);
+/** Quoted local part: `"anything but bare quote/backslash, or escaped"`. */
+const QUOTED_LOCAL_RE = /^"(?:[^"\\]|\\.)*"$/;
+const DISPLAY_NAME_RE = /^\s*(?:"(?:[^"\\]|\\.)*"|[^<>@]*?)\s*<(.+)>\s*$/;
+
+/** A single DNS label: alphanumerics and inner hyphens, 1..63 chars. */
+function isDnsLabel(label: string): boolean {
+	if (label.length === 0 || label.length > 63) return false;
+	if (label.startsWith("-") || label.endsWith("-")) return false;
+	return /^[a-zA-Z0-9-]+$/.test(label);
+}
+
+/** Bracketed IP domain literal — `[192.168.0.1]` or `[IPv6:::1]`. */
+function isIpDomainLiteral(domain: string): boolean {
+	if (!domain.startsWith("[") || !domain.endsWith("]")) return false;
+	const inner = domain.slice(1, -1);
+	if (inner.toLowerCase().startsWith("ipv6:")) {
+		return isIpAddress(inner.slice(5), 6);
+	}
+	return isIpAddress(inner, 4);
+}
+
+/**
+ * Validate an email address.
+ *
+ * Deliberately structural rather than one giant regex: the length caps, the
+ * quoted local part and the IP-literal domain are separate rules in RFC 5321,
+ * and a single pattern that tries to express all of them is the classic source
+ * of both false accepts and false rejects.
+ */
+export function isEmail(value: string, options: EmailOptions = {}): boolean {
+	let candidate = value;
+
+	if (options.allow_display_name) {
+		const match = DISPLAY_NAME_RE.exec(candidate);
+		if (match) candidate = match[1];
+	} else if (/[<>]/.test(candidate)) {
+		return false;
+	}
+
+	if (!options.ignore_max_length && candidate.length > 254) return false;
+
+	const at = candidate.lastIndexOf("@");
+	if (at < 1 || at === candidate.length - 1) return false;
+	const local = candidate.slice(0, at);
+	const domain = candidate.slice(at + 1);
+
+	if (options.blacklisted_chars) {
+		for (const char of options.blacklisted_chars) {
+			if (local.includes(char)) return false;
+		}
+	}
+
+	const quoted = QUOTED_LOCAL_RE.test(local);
+	if (!quoted && !DOT_ATOM_RE.test(local)) return false;
+	if (!options.ignore_max_length && local.length > 64) return false;
+
+	if (domain.startsWith("[")) {
+		return options.allow_ip_domain === true && isIpDomainLiteral(domain);
+	}
+
+	const labels = domain.split(".");
+	if (options.require_tld !== false) {
+		if (labels.length < 2) return false;
+		// A TLD is alphabetic and at least two characters.
+		const tld = labels[labels.length - 1];
+		if (tld.length < 2 || !/^[a-zA-Z]+$/.test(tld)) return false;
+	}
+	if (!labels.every(isDnsLabel)) return false;
+
+	if (
+		options.domain_specific_validation &&
+		GMAIL_DOMAINS.has(domain.toLowerCase())
+	) {
+		// Gmail: 6..30 chars, letters/digits/dots only, no leading/trailing dot,
+		// no doubled dot — and dots are ignored for the length check.
+		const username = local.split("+")[0];
+		if (!/^[a-zA-Z0-9.]+$/.test(username)) return false;
+		if (username.startsWith(".") || username.endsWith(".")) return false;
+		if (username.includes("..")) return false;
+		const bare = username.replace(/\./g, "");
+		if (bare.length < 6 || bare.length > 30) return false;
+	}
+
+	return true;
 }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import rune, { createRule, RuneError, rules, schema } from "../../src/index.js";
+import rune, {
+	createRule,
+	RuneError,
+	rules,
+	schema,
+	setValidationTranslator,
+} from "../../src/index.js";
 
 describe("rune > audit 5", () => {
 	it("nested objects DROP undeclared keys unless allowUnknownProperties()", () => {
@@ -233,5 +239,135 @@ describe("rune > audit 6", () => {
 		expect(rune.helpers.isFalse("off")).toBe(true);
 		expect(rune.helpers.exists("")).toBe(true);
 		expect(rune.helpers.isMissing(null)).toBe(true);
+	});
+});
+
+describe("rune > audit 7 — in-house parity, zero dependency", () => {
+	it("email() implements the RFC shapes, not a single regex", () => {
+		const plain = schema({ e: rules.string().email() });
+		for (const ok of [
+			"ada@example.com",
+			"a.b+tag@sub.example.co.uk",
+			"a!#$%&'*+/=?^_`{|}~-@example.com",
+		]) {
+			expect(plain.validateResult({ e: ok }).valid, ok).toBe(true);
+		}
+		for (const bad of [
+			"ada@example",
+			"ada@@example.com",
+			"@example.com",
+			"ada@-example.com",
+			"ada@example-.com",
+			"ada@exam ple.com",
+			"ada@example.c",
+			"Ada <ada@example.com>",
+			`${"a".repeat(65)}@example.com`,
+		]) {
+			expect(plain.validateResult({ e: bad }).valid, bad).toBe(false);
+		}
+	});
+
+	it("email() honours the validator.js options", () => {
+		expect(
+			schema({
+				e: rules.string().email({ allow_display_name: true }),
+			}).validateResult({ e: "Ada <ada@example.com>" }).valid,
+		).toBe(true);
+		expect(
+			schema({
+				e: rules.string().email({ require_tld: false }),
+			}).validateResult({
+				e: "ada@localhost",
+			}).valid,
+		).toBe(true);
+		expect(
+			schema({
+				e: rules.string().email({ allow_ip_domain: true }),
+			}).validateResult({ e: "ada@[192.168.0.1]" }).valid,
+		).toBe(true);
+		expect(
+			schema({
+				e: rules.string().email({ blacklisted_chars: "+" }),
+			}).validateResult({ e: "a+b@example.com" }).valid,
+		).toBe(false);
+		// Gmail's own rules: under 6 bare characters is not a Gmail address.
+		expect(
+			schema({
+				e: rules.string().email({ domain_specific_validation: true }),
+			}).validateResult({ e: "a.b@gmail.com" }).valid,
+		).toBe(false);
+	});
+
+	it("a quoted local part and an IP literal are handled structurally", () => {
+		const s = schema({ e: rules.string().email({ allow_ip_domain: true }) });
+		expect(s.validateResult({ e: '"ada smith"@example.com' }).valid).toBe(true);
+		expect(s.validateResult({ e: '"unterminated@example.com' }).valid).toBe(
+			false,
+		);
+		expect(s.validateResult({ e: "ada@[IPv6:::1]" }).valid).toBe(true);
+		expect(s.validateResult({ e: "ada@[999.1.1.1]" }).valid).toBe(false);
+	});
+
+	it("mobile strictMode requires the country prefix", () => {
+		const strict = schema({
+			m: rules.string().mobile({ locale: "fr-CH", strictMode: true }),
+		});
+		expect(strict.validateResult({ m: "+41791234567" }).valid).toBe(true);
+		expect(strict.validateResult({ m: "0791234567" }).valid).toBe(false);
+		// Without strictMode the national form is accepted.
+		expect(
+			schema({ m: rules.string().mobile({ locale: "fr-CH" }) }).validateResult({
+				m: "0791234567",
+			}).valid,
+		).toBe(true);
+	});
+
+	it("passport accepts several countries", () => {
+		const s = schema({
+			p: rules.string().passport({ countryCode: ["CH", "US"] }),
+		});
+		expect(s.validateResult({ p: "X1234567" }).valid).toBe(true);
+		expect(s.validateResult({ p: "123456789" }).valid).toBe(true);
+		expect(s.validateResult({ p: "nope" }).valid).toBe(false);
+	});
+
+	it("the widened tables cover the locales and countries they claim", () => {
+		expect(
+			schema({
+				z: rules.string().postalCode({ countryCode: "PT" }),
+			}).validateResult({ z: "1000-100" }).valid,
+		).toBe(true);
+		expect(
+			schema({ m: rules.string().mobile({ locale: "ja-JP" }) }).validateResult({
+				m: "+819012345678",
+			}).valid,
+		).toBe(true);
+	});
+});
+
+/**
+ * The two sets must stay separate. Conflating "translatable message" with "the
+ * Rust engine can run it" is what silently un-translated a rule when it left the
+ * native path, and silently disabled a TS-only option on a rule that stayed.
+ */
+describe("rune > message keys and native routing are independent", () => {
+	it("email keeps its translated message while running on the TS path", () => {
+		setValidationTranslator((key) =>
+			key === "validation.email" ? "Email invalide" : key,
+		);
+		const res = schema({ e: rules.string().email() }).validateResult({
+			e: "bad",
+		});
+		expect(res.errors[0]?.message).toBe("Email invalide");
+		setValidationTranslator(undefined);
+	});
+
+	it("a TS-only option is never routed to an engine that ignores it", () => {
+		// alpha({ allowSpaces }) is implemented in BOTH engines, so it may route
+		// natively; email options are TS-only, so the schema must not.
+		const withOptions = schema({
+			e: rules.string().email({ require_tld: false }),
+		});
+		expect(withOptions.validateResult({ e: "ada@localhost" }).valid).toBe(true);
 	});
 });

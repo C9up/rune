@@ -16,10 +16,12 @@ import { RuneError, RuneValidationError } from "./errors.js";
 import {
 	type AlphaOptions,
 	alphaPattern,
+	type EmailOptions,
 	escapeHtml,
 	isAscii,
 	isCoordinates,
 	isCreditCard,
+	isEmail,
 	isHexCode,
 	isIban,
 	isIpAddress,
@@ -659,6 +661,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * The TS chain rules (minLength/uuid/alpha/in/enum/range/…) live only in the TS
  * validator, so they are deliberately absent here.
  */
+/**
+ * Rules whose default message is a TRANSLATABLE key (`validation.<rule>`).
+ *
+ * This set answers one question only: "does this rule have a canonical message?"
+ * It used to answer a second one — "can the Rust engine run it?" — and that
+ * conflation is why every divergence kept coming back: excluding a rule from the
+ * native path silently un-translated it, and adding a TS-only option to a listed
+ * rule silently made the option inert. {@link NATIVE_RULES} answers the routing
+ * question now.
+ */
 const STANDARD_RULES: ReadonlySet<string> = new Set([
 	"string",
 	"number",
@@ -666,6 +678,38 @@ const STANDARD_RULES: ReadonlySet<string> = new Set([
 	"min",
 	"max",
 	"email",
+	"positive",
+	"minLength",
+	"maxLength",
+	"fixedLength",
+	"uuid",
+	"alpha",
+	"alphaNumeric",
+	"startsWith",
+	"endsWith",
+	"in",
+	"notIn",
+	"enum",
+	"negative",
+	"nonNegative",
+	"range",
+]);
+
+/**
+ * Rules the Rust engine implements IDENTICALLY to the TS path.
+ *
+ * A rule belongs here only while both engines answer the same question for
+ * every input. `email` is excluded on purpose: the TS check is structural
+ * (quoted local parts, IP-literal domains, RFC length caps, validator.js-style
+ * options) where Rust has one regex — routing there would give a different
+ * answer for the same schema.
+ */
+const NATIVE_RULES: ReadonlySet<string> = new Set([
+	"string",
+	"number",
+	"boolean",
+	"min",
+	"max",
 	"positive",
 	"minLength",
 	"maxLength",
@@ -811,7 +855,7 @@ function detectHasCustomRules(fields: Record<string, RuleChain>): boolean {
 		if (chain.transforms.length > 0) return true; // .transform() — Rust gets only the NAME, can't run a JS fn
 		if (chain.isNullable) return true; // .nullable() — the flag is not sent to the Rust engine
 		return chain.rules.some((r) => {
-			if (!STANDARD_RULES.has(r.name)) return true; // custom rule
+			if (!NATIVE_RULES.has(r.name)) return true; // Rust cannot run it identically
 			if (hasCustomMessage(r)) return true; // custom message
 			return false;
 		});
@@ -1778,7 +1822,7 @@ export class RuleChain<Output = unknown> {
 	 */
 	union(chains: readonly UnionBranch[]): this {
 		this.#unionChains = chains.map(toUnionBranch);
-		// Marker rule: its name is not in STANDARD_RULES, which is what keeps a
+		// Marker rule: its name is not in NATIVE_RULES, which is what keeps a
 		// union off the native path. The Rust engine knows nothing about branches
 		// and would silently accept anything.
 		this.#pushRule({
@@ -1966,16 +2010,13 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must be a valid email. */
-	email(): this {
-		this.#pushRule({
-			name: "email",
-			// Mirror the Rust engine's regex exactly so the SAME schema validates
-			// identically whether or not the native binary loaded.
-			validate: (v) =>
-				typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v),
-			message: "Must be a valid email",
-		});
-		return this;
+	email(options?: EmailOptions): this {
+		return this.#stringRule(
+			"email",
+			(v) => isEmail(v, options),
+			"Must be a valid email address",
+			options ? { ...options } : undefined,
+		);
 	}
 
 	/** Must match a regular expression (TS-only — never dispatched to Rust). */
@@ -2108,7 +2149,7 @@ export class RuleChain<Output = unknown> {
 	 * Must be a mobile number in E.164 form. Named deviation from VineJS: rune
 	 * carries no per-locale numbering plans, so there is no `locale` option.
 	 */
-	mobile(options?: { locale?: string | string[] }): this {
+	mobile(options?: { locale?: string | string[]; strictMode?: boolean }): this {
 		const locales = options?.locale ? [options.locale].flat() : null;
 		for (const locale of locales ?? []) {
 			if (isMobileForLocale("", locale) === null) {
@@ -2123,12 +2164,18 @@ export class RuleChain<Output = unknown> {
 		}
 		return this.#stringRule(
 			"mobile",
-			(v) =>
-				locales
+			(v) => {
+				// strictMode (validator.js): the number must carry its `+` country
+				// prefix, so a national-format string is not silently accepted.
+				if (options?.strictMode && !v.trim().startsWith("+")) return false;
+				return locales
 					? locales.some((locale) => isMobileForLocale(v, locale) === true)
-					: isMobile(v),
+					: isMobile(v);
+			},
 			"Must be a valid mobile number",
-			locales ? { locale: locales } : undefined,
+			(locales ?? options?.strictMode)
+				? { locale: locales, strictMode: options?.strictMode }
+				: undefined,
 		);
 	}
 
@@ -2297,22 +2344,24 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must be a passport number for `countryCode`. Throws for an uncovered country. */
-	passport(options: { countryCode: string }): this {
-		const { countryCode } = options;
-		if (isPassport("", countryCode) === null) {
-			throw new RuneError(
-				"UNSUPPORTED_COUNTRY",
-				`passport(): no pattern for country '${countryCode}'.`,
-				{
-					hint: `Supported: ${SUPPORTED_PASSPORTS.join(", ")}. Use .regex() for others.`,
-				},
-			);
+	passport(options: { countryCode: string | string[] }): this {
+		const countries = [options.countryCode].flat();
+		for (const country of countries) {
+			if (isPassport("", country) === null) {
+				throw new RuneError(
+					"UNSUPPORTED_COUNTRY",
+					`passport(): no pattern for country '${country}'.`,
+					{
+						hint: `Supported: ${SUPPORTED_PASSPORTS.join(", ")}. Use .regex() for others.`,
+					},
+				);
+			}
 		}
 		return this.#stringRule(
 			"passport",
-			(v) => isPassport(v, countryCode) === true,
-			`Must be a valid ${countryCode.toUpperCase()} passport number`,
-			{ countryCode },
+			(v) => countries.some((c) => isPassport(v, c) === true),
+			`Must be a valid ${countries.join("/").toUpperCase()} passport number`,
+			{ countryCode: countries },
 		);
 	}
 
