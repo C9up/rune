@@ -24,13 +24,13 @@ describe("rune > date", () => {
 			"2026-00-10",
 			"not-a-date",
 		]) {
-			const res = s.validate({ at: bad });
+			const res = s.validateResult({ at: bad });
 			expect(res.valid, `${bad} must be rejected`).toBe(false);
 			expect(res.errors[0]?.rule).toBe("date");
 		}
 		// …and the leap day that DOES exist still passes.
-		expect(s.validate({ at: "2024-02-29" }).valid).toBe(true);
-		expect(s.validate({ at: "2026-02-29" }).valid).toBe(false);
+		expect(s.validateResult({ at: "2024-02-29" }).valid).toBe(true);
+		expect(s.validateResult({ at: "2026-02-29" }).valid).toBe(false);
 	});
 
 	it("accepts unix timestamps and token formats", () => {
@@ -45,24 +45,28 @@ describe("rune > date", () => {
 		expect(parsed.at.getMonth()).toBe(5);
 		expect(parsed.at.getDate()).toBe(25);
 		// The format is exclusive — an ISO string no longer matches.
-		expect(fr.validate({ at: "2026-06-25" }).valid).toBe(false);
+		expect(fr.validateResult({ at: "2026-06-25" }).valid).toBe(false);
 	});
 
 	it("compares against literals and the 'today' keyword", () => {
 		const s = schema({
 			at: rules.date().after("2026-01-01").before("2030-12-31"),
 		});
-		expect(s.validate({ at: "2026-06-25" }).valid).toBe(true);
-		expect(s.validate({ at: "2025-12-31" }).valid).toBe(false);
-		expect(s.validate({ at: "2031-01-01" }).valid).toBe(false);
+		expect(s.validateResult({ at: "2026-06-25" }).valid).toBe(true);
+		expect(s.validateResult({ at: "2025-12-31" }).valid).toBe(false);
+		expect(s.validateResult({ at: "2031-01-01" }).valid).toBe(false);
 
 		const future = schema({ at: rules.date().after("today") });
 		const tomorrow = new Date();
 		tomorrow.setDate(tomorrow.getDate() + 1);
-		expect(future.validate({ at: tomorrow.toISOString() }).valid).toBe(true);
+		expect(future.validateResult({ at: tomorrow.toISOString() }).valid).toBe(
+			true,
+		);
 		const yesterday = new Date();
 		yesterday.setDate(yesterday.getDate() - 1);
-		expect(future.validate({ at: yesterday.toISOString() }).valid).toBe(false);
+		expect(future.validateResult({ at: yesterday.toISOString() }).valid).toBe(
+			false,
+		);
 	});
 
 	it("compares against a sibling field, optionally by day", () => {
@@ -71,9 +75,12 @@ describe("rune > date", () => {
 			checkOut: rules.date().afterField("checkIn"),
 		});
 		expect(
-			s.validate({ checkIn: "2026-06-25", checkOut: "2026-06-28" }).valid,
+			s.validateResult({ checkIn: "2026-06-25", checkOut: "2026-06-28" }).valid,
 		).toBe(true);
-		const bad = s.validate({ checkIn: "2026-06-28", checkOut: "2026-06-25" });
+		const bad = s.validateResult({
+			checkIn: "2026-06-28",
+			checkOut: "2026-06-25",
+		});
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]?.rule).toBe("afterField");
 
@@ -83,32 +90,40 @@ describe("rune > date", () => {
 			b: rules.date().afterField("a"),
 		});
 		expect(
-			strict.validate({ a: "2026-06-25T08:00:00Z", b: "2026-06-25T09:00:00Z" })
-				.valid,
+			strict.validateResult({
+				a: "2026-06-25T08:00:00Z",
+				b: "2026-06-25T09:00:00Z",
+			}).valid,
 		).toBe(true);
 		const byDay = schema({
 			a: rules.date(),
 			b: rules.date().afterField("a", { compare: "day" }),
 		});
 		expect(
-			byDay.validate({ a: "2026-06-25T08:00:00Z", b: "2026-06-25T09:00:00Z" })
-				.valid,
+			byDay.validateResult({
+				a: "2026-06-25T08:00:00Z",
+				b: "2026-06-25T09:00:00Z",
+			}).valid,
 		).toBe(false);
 	});
 
 	it("enforces weekend / weekday", () => {
 		// 2026-06-27 is a Saturday, 2026-06-25 a Thursday.
 		expect(
-			schema({ d: rules.date().weekend() }).validate({ d: "2026-06-27" }).valid,
+			schema({ d: rules.date().weekend() }).validateResult({ d: "2026-06-27" })
+				.valid,
 		).toBe(true);
 		expect(
-			schema({ d: rules.date().weekend() }).validate({ d: "2026-06-25" }).valid,
+			schema({ d: rules.date().weekend() }).validateResult({ d: "2026-06-25" })
+				.valid,
 		).toBe(false);
 		expect(
-			schema({ d: rules.date().weekday() }).validate({ d: "2026-06-25" }).valid,
+			schema({ d: rules.date().weekday() }).validateResult({ d: "2026-06-25" })
+				.valid,
 		).toBe(true);
 		expect(
-			schema({ d: rules.date().weekday() }).validate({ d: "2026-06-27" }).valid,
+			schema({ d: rules.date().weekday() }).validateResult({ d: "2026-06-27" })
+				.valid,
 		).toBe(false);
 	});
 
@@ -121,7 +136,7 @@ describe("rune > date", () => {
 		});
 
 		// The comparison still sees a real Date — the mapping must not blind it.
-		expect(s.validate({ at: "2025-01-01T00:00:00Z" }).valid).toBe(false);
+		expect(s.validateResult({ at: "2025-01-01T00:00:00Z" }).valid).toBe(false);
 	});
 
 	it("respects optional() without inventing a date", () => {
@@ -156,23 +171,23 @@ describe("rune > date grammar and callable operands", () => {
 			0,
 		);
 		// 13 on a 12-hour clock is not a time.
-		expect(s.validate({ at: "2026-06-25 13:00 PM" }).valid).toBe(false);
+		expect(s.validateResult({ at: "2026-06-25 13:00 PM" }).valid).toBe(false);
 	});
 
 	it("escapes a literal run with [...]", () => {
 		const s = schema({
 			at: rules.date({ formats: ["YYYY-MM-DD [at] HH:mm"] }),
 		});
-		expect(s.validate({ at: "2026-06-25 at 10:30" }).valid).toBe(true);
-		expect(s.validate({ at: "2026-06-25 pm 10:30" }).valid).toBe(false);
+		expect(s.validateResult({ at: "2026-06-25 at 10:30" }).valid).toBe(true);
+		expect(s.validateResult({ at: "2026-06-25 pm 10:30" }).valid).toBe(false);
 	});
 
 	it("resolves a callable operand at validation time, not at declaration", () => {
 		let boundary = "2026-01-01";
 		const s = schema({ at: rules.date().after(() => boundary) });
-		expect(s.validate({ at: "2026-06-25" }).valid).toBe(true);
+		expect(s.validateResult({ at: "2026-06-25" }).valid).toBe(true);
 		boundary = "2027-01-01";
 		// The boundary moved, so the same input is now refused.
-		expect(s.validate({ at: "2026-06-25" }).valid).toBe(false);
+		expect(s.validateResult({ at: "2026-06-25" }).valid).toBe(false);
 	});
 });

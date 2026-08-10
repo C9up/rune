@@ -250,8 +250,22 @@ export interface ValidateOptions {
 
 export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
-	/** Result-based validation (superset) — never throws. */
-	validate(data: unknown, options?: ValidateOptions): ValidationResult<T>;
+	/**
+	 * Validate and return the payload, throwing {@link RuneValidationError} on
+	 * failure — the VineJS/Adonis contract (`validator.validate(data)`), async
+	 * so a schema carrying `unique`/`exists` behaves like any other.
+	 *
+	 * The never-throwing, synchronous form rune also offers is
+	 * {@link validateResult}.
+	 */
+	validate(data: unknown, options?: ValidateOptions): Promise<T>;
+	/** Result-based validation (rune superset) — synchronous, never throws. */
+	validateResult(data: unknown, options?: ValidateOptions): ValidationResult<T>;
+	/** Result-based validation awaiting async rules — never throws. */
+	validateResultAsync(
+		data: unknown,
+		options?: ValidateOptions,
+	): Promise<ValidationResult<T>>;
 	/**
 	 * Throwing validation (VineJS/Adonis parity). Returns the validated data on
 	 * success; throws {@link RuneValidationError} (`E_VALIDATION_ERROR`, HTTP 422)
@@ -265,22 +279,12 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	tryValidate(
 		data: unknown,
 		options?: ValidateOptions,
-	): [RuneValidationError, null] | [null, T];
-	/** Async counterpart of {@link tryValidate}. */
-	tryValidateAsync(
-		data: unknown,
-		options?: ValidateOptions,
 	): Promise<[RuneValidationError, null] | [null, T]>;
-	/**
-	 * Async validation — runs the sync rules, then any `.useAsync()`/`unique`/
-	 * `exists` rules (awaited). Required when the schema carries async rules; the
-	 * sync {@link validate} throws for such a schema rather than silently skipping
-	 * them.
-	 */
-	validateAsync(
+	/** Synchronous counterpart of {@link tryValidate} (rune superset). */
+	tryValidateSync(
 		data: unknown,
 		options?: ValidateOptions,
-	): Promise<ValidationResult<T>>;
+	): [RuneValidationError, null] | [null, T];
 	/** Throwing async validation (see {@link validateAsync} + {@link validateOrThrow}). */
 	validateOrThrowAsync(data: unknown, options?: ValidateOptions): Promise<T>;
 }
@@ -444,6 +448,41 @@ function coerceBoolean(value: unknown): unknown {
 	return value;
 }
 
+/** A union branch guarded by a predicate — `vine.union.if(...)`. */
+export interface ConditionalBranch {
+	/** `null` for an unconditional branch (`union.else`). */
+	predicate: ((value: unknown, field: FieldContext) => boolean) | null;
+	chain: RuleChain;
+}
+
+/** What `union()` accepts: a bare chain, or a guarded branch. */
+export type UnionBranch = RuleChain | ConditionalBranch;
+
+/** Normalise a bare chain into an unconditional branch. */
+function toUnionBranch(branch: UnionBranch): ConditionalBranch {
+	return branch instanceof RuleChain
+		? { predicate: null, chain: branch }
+		: branch;
+}
+
+/**
+ * Guarded union branch (VineJS `vine.union.if`). The predicate picks the branch;
+ * the chosen branch's OWN errors are reported, which is what makes a union
+ * diagnosable — "matches nothing" tells the caller nothing about which shape it
+ * nearly matched.
+ */
+export function unionIf(
+	predicate: (value: unknown, field: FieldContext) => boolean,
+	chain: RuleChain,
+): ConditionalBranch {
+	return { predicate, chain };
+}
+
+/** Fallback union branch (VineJS `vine.union.else`). */
+export function unionElse(chain: RuleChain): ConditionalBranch {
+	return { predicate: null, chain };
+}
+
 /** The checkbox-style truthies VineJS `accepted` recognises. */
 function isAcceptedValue(value: unknown): boolean {
 	return (
@@ -589,9 +628,12 @@ function resolveRuleMessage(
 		if (rule.name === "max" || rule.name === "maxLength")
 			params.max = rule.param;
 	}
+	// STANDARD_MSGS is the last-resort default for a standard rule: a rule object
+	// built without a message (or with an empty one) still gets the canonical
+	// text rather than an empty error. `rule.message` wins when it carries one.
 	return resolveValidationMessage(
 		`validation.${rule.name}`,
-		rule.message,
+		rule.message || STANDARD_MSGS[rule.name] || rule.name,
 		params,
 	);
 }
@@ -685,7 +727,7 @@ export function schema(
 		(chain) => chain.hasAsyncRulesDeep,
 	);
 
-	function validate(
+	function validateResult(
 		data: unknown,
 		options?: ValidateOptions,
 	): ValidationResult<Record<string, unknown>> {
@@ -748,14 +790,14 @@ export function schema(
 		data: unknown,
 		options?: ValidateOptions,
 	): Record<string, unknown> {
-		const result = validate(data, options);
+		const result = validateResult(data, options);
 		if (result.valid) {
 			return result.data;
 		}
 		throw new RuneValidationError(result.errors.map(toErrorNode));
 	}
 
-	async function validateAsync(
+	async function validateResultAsync(
 		data: unknown,
 		options?: ValidateOptions,
 	): Promise<ValidationResult<Record<string, unknown>>> {
@@ -815,21 +857,21 @@ export function schema(
 	 * Non-throwing validation returning a `[error, null] | [null, data]` tuple
 	 * (VineJS `tryValidate`), for when a failure is an expected code path.
 	 */
-	function tryValidate(
+	function tryValidateSync(
 		data: unknown,
 		options?: ValidateOptions,
 	): [RuneValidationError, null] | [null, Record<string, unknown>] {
-		const result = validate(data, options);
+		const result = validateResult(data, options);
 		if (result.valid) return [null, result.data];
 		return [new RuneValidationError(result.errors.map(toErrorNode)), null];
 	}
 
 	/** Async counterpart of {@link tryValidate}. */
-	async function tryValidateAsync(
+	async function tryValidate(
 		data: unknown,
 		options?: ValidateOptions,
 	): Promise<[RuneValidationError, null] | [null, Record<string, unknown>]> {
-		const result = await validateAsync(data, options);
+		const result = await validateResultAsync(data, options);
 		if (result.valid) return [null, result.data];
 		return [new RuneValidationError(result.errors.map(toErrorNode)), null];
 	}
@@ -838,21 +880,34 @@ export function schema(
 		data: unknown,
 		options?: ValidateOptions,
 	): Promise<Record<string, unknown>> {
-		const result = await validateAsync(data, options);
+		const result = await validateResultAsync(data, options);
 		if (result.valid) {
 			return result.data;
 		}
 		throw new RuneValidationError(result.errors.map(toErrorNode));
 	}
 
+	/**
+	 * The VineJS contract: async, returns the payload, throws on failure. A
+	 * schema carrying async rules works here without the caller having to know,
+	 * which is the whole point of Vine's single entry point.
+	 */
+	async function validate(
+		data: unknown,
+		options?: ValidateOptions,
+	): Promise<Record<string, unknown>> {
+		return validateOrThrowAsync(data, options);
+	}
+
 	return {
 		fields,
 		validate,
+		validateResult,
+		validateResultAsync,
 		validateOrThrow,
-		validateAsync,
 		validateOrThrowAsync,
 		tryValidate,
-		tryValidateAsync,
+		tryValidateSync,
 	};
 }
 
@@ -975,7 +1030,7 @@ export class RuleChain<Output = unknown> {
 	#arrayItemChain: RuleChain | null = null;
 	#recordValueChain: RuleChain | null = null;
 	#tupleChains: RuleChain[] | null = null;
-	#unionChains: RuleChain[] | null = null;
+	#unionChains: ConditionalBranch[] | null = null;
 	#useRules: CompiledRule[] = [];
 	#asyncRules: AsyncCompiledRule[] = [];
 	/** Last rule added, whichever register it landed in — the `message()` target. */
@@ -1030,7 +1085,7 @@ export class RuleChain<Output = unknown> {
 		if (this.#recordValueChain?.hasAsyncRulesDeep) return true;
 		for (const chain of [
 			...(this.#tupleChains ?? []),
-			...(this.#unionChains ?? []),
+			...(this.#unionChains ?? []).map((b) => b.chain),
 		]) {
 			if (chain.hasAsyncRulesDeep) return true;
 		}
@@ -1449,14 +1504,17 @@ export class RuleChain<Output = unknown> {
 	/**
 	 * Value must satisfy at least one of `chains`.
 	 *
-	 * Named deviation: VineJS's `vine.union` selects a branch with an explicit
-	 * predicate (`vine.union.if(...)`) and reports that branch's errors. rune
-	 * tries each branch and passes on the first match; when none matches it
-	 * reports a single `union` error rather than the losing branches' errors,
-	 * which would be noise attributable to no particular branch.
+	 * Two forms, both supported:
+	 *
+	 * - guarded (VineJS parity): `union([rules.union.if(pred, chain), …,
+	 *   rules.union.else(fallback)])` — the predicate SELECTS the branch and
+	 *   that branch's own errors are reported, so a failure says which shape was
+	 *   meant and why it did not fit.
+	 * - bare chains: tried in order, first match wins, and a total miss reports a
+	 *   single `union` error rather than every losing branch's noise.
 	 */
-	union(chains: readonly RuleChain[]): this {
-		this.#unionChains = [...chains];
+	union(chains: readonly UnionBranch[]): this {
+		this.#unionChains = chains.map(toUnionBranch);
 		// Marker rule: its name is not in STANDARD_RULES, which is what keeps a
 		// union off the native path. The Rust engine knows nothing about branches
 		// and would silently accept anything.
@@ -2515,13 +2573,39 @@ export class RuleChain<Output = unknown> {
 		// 4d. Union — first branch that validates wins; its transform is kept.
 		if (this.#unionChains) {
 			let matched = false;
-			for (const branch of this.#unionChains) {
+			// A guarded branch (union.if) is SELECTED by its predicate, and its own
+			// errors are reported — that is the diagnosable half of VineJS's union.
+			const guarded = this.#unionChains.filter((b) => b.predicate !== null);
+			if (guarded.length > 0) {
+				const probe = this.#makeFieldContext(
+					field,
+					transformed,
+					ctx,
+					[],
+					() => {},
+				);
+				const chosen =
+					guarded.find((b) => b.predicate?.(transformed, probe)) ??
+					this.#unionChains.find((b) => b.predicate === null);
+				if (chosen) {
+					const res = chosen.chain._validateWithTransform(
+						field,
+						transformed,
+						ctx,
+						pending,
+					);
+					transformed = res.transformed;
+					errors.push(...res.errors);
+					matched = true;
+				}
+			}
+			for (const branch of matched ? [] : this.#unionChains) {
 				// Each branch collects into its OWN buffer: a losing branch must not
 				// leave async work queued, and the winning one must not lose it —
 				// without this, a `unique()` inside the matching branch was never
 				// awaited, which reads exactly like a check that passed.
 				const branchPending: PendingAsync[] = [];
-				const res = branch._validateWithTransform(
+				const res = branch.chain._validateWithTransform(
 					field,
 					transformed,
 					ctx,
@@ -2868,8 +2952,11 @@ export const rules = {
 		items: Items,
 	): RuleChain<{ [K in keyof Items]: OutputOf<Items[K]> }> =>
 		new RuleChain().tuple(items),
-	union: (chains: readonly RuleChain[]): RuleChain =>
-		new RuleChain().union(chains),
+	union: Object.assign(
+		(chains: readonly UnionBranch[]): RuleChain =>
+			new RuleChain().union(chains),
+		{ if: unionIf, else: unionElse },
+	),
 	object: <Sh extends Record<string, RuleChain>>(
 		shape: Sh,
 	): RuleChain<Infer<Sh>> => new RuleChain().object(shape),

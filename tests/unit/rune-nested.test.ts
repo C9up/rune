@@ -9,10 +9,10 @@ describe("rune > nested object schemas", () => {
 				age: rules.number().positive(),
 			}),
 		});
-		const ok = s.validate({ user: { name: "Alice", age: 30 } });
+		const ok = s.validateResult({ user: { name: "Alice", age: 30 } });
 		expect(ok.valid).toBe(true);
 
-		const bad = s.validate({ user: { name: "A", age: -1 } });
+		const bad = s.validateResult({ user: { name: "A", age: -1 } });
 		expect(bad.valid).toBe(false);
 		const fields = bad.errors.map((e) => e.field).sort();
 		expect(fields).toEqual(["user.age", "user.name"]);
@@ -22,7 +22,7 @@ describe("rune > nested object schemas", () => {
 		const s = schema({
 			user: rules.any().object({ name: rules.string() }),
 		});
-		const result = s.validate({ user: "not-an-object" });
+		const result = s.validateResult({ user: "not-an-object" });
 		expect(result.valid).toBe(false);
 		// The 'object' type rule short-circuits — no .name traversal.
 		expect(result.errors).toHaveLength(1);
@@ -36,7 +36,7 @@ describe("rune > nested object schemas", () => {
 				name: rules.string().trim(),
 			}),
 		});
-		const result = s.validate({ user: { name: "  Bob  " } });
+		const result = s.validateResult({ user: { name: "  Bob  " } });
 		expect(result.valid).toBe(true);
 		expect(result.data?.user).toEqual({ name: "Bob" });
 	});
@@ -47,25 +47,25 @@ describe("rune > array item validation", () => {
 		const s = schema({
 			tags: rules.any().array(rules.string().min(2)),
 		});
-		const ok = s.validate({ tags: ["hi", "hello"] });
+		const ok = s.validateResult({ tags: ["hi", "hello"] });
 		expect(ok.valid).toBe(true);
 
-		const bad = s.validate({ tags: ["hi", "x", "ok"] });
+		const bad = s.validateResult({ tags: ["hi", "x", "ok"] });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0].field).toBe("tags.1");
 	});
 
 	it("accepts arrays without an item-chain (just a type check)", () => {
 		const s = schema({ items: rules.any().array() });
-		expect(s.validate({ items: [1, "two", true] }).valid).toBe(true);
-		expect(s.validate({ items: "not-an-array" }).valid).toBe(false);
+		expect(s.validateResult({ items: [1, "two", true] }).valid).toBe(true);
+		expect(s.validateResult({ items: "not-an-array" }).valid).toBe(false);
 	});
 
 	it("returns a transformed copy in data when items have transforms", () => {
 		const s = schema({
 			tags: rules.any().array(rules.string().trim()),
 		});
-		const result = s.validate({ tags: ["  a  ", "b"] });
+		const result = s.validateResult({ tags: ["  a  ", "b"] });
 		expect(result.valid).toBe(true);
 		expect(result.data?.tags).toEqual(["a", "b"]);
 	});
@@ -74,9 +74,9 @@ describe("rune > array item validation", () => {
 describe("rune > rules.any() and chain edge cases", () => {
 	it("rules.any() with no rules accepts any non-null value", () => {
 		const s = schema({ x: rules.any() });
-		expect(s.validate({ x: 1 }).valid).toBe(true);
-		expect(s.validate({ x: "str" }).valid).toBe(true);
-		expect(s.validate({ x: { nested: true } }).valid).toBe(true);
+		expect(s.validateResult({ x: 1 }).valid).toBe(true);
+		expect(s.validateResult({ x: "str" }).valid).toBe(true);
+		expect(s.validateResult({ x: { nested: true } }).valid).toBe(true);
 	});
 
 	it("optional() lets null/undefined pass without error", () => {
@@ -84,14 +84,14 @@ describe("rune > rules.any() and chain edge cases", () => {
 			a: rules.string().optional(),
 			b: rules.number().optional(),
 		});
-		expect(s.validate({ a: null, b: undefined }).valid).toBe(true);
+		expect(s.validateResult({ a: null, b: undefined }).valid).toBe(true);
 	});
 
 	it("array as schema input is rejected at root (Array.isArray branch)", () => {
 		const s = schema({ x: rules.string() });
-		// `Schema.validate(data: unknown)` accepts unknown by design — no cast
+		// `Schema.validateResult(data: unknown)` accepts unknown by design — no cast
 		// needed for runtime-shape testing.
-		const result = s.validate([1, 2, 3]);
+		const result = s.validateResult([1, 2, 3]);
 		expect(result.valid).toBe(false);
 		expect(result.errors[0].field).toBe("_root");
 	});

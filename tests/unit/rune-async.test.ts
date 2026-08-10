@@ -21,11 +21,11 @@ describe("rune > async validation", () => {
 				.unique(async (value) => !taken.has(String(value))),
 		});
 
-		const ok = await s.validateAsync({ email: "new@x.io" });
+		const ok = await s.validateResultAsync({ email: "new@x.io" });
 		expect(ok.valid).toBe(true);
 		expect(ok.data).toEqual({ email: "new@x.io" });
 
-		const bad = await s.validateAsync({ email: "ada@x.io" });
+		const bad = await s.validateResultAsync({ email: "ada@x.io" });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]).toMatchObject({
 			field: "email",
@@ -38,8 +38,8 @@ describe("rune > async validation", () => {
 		const s = schema({
 			userId: rules.number().exists(async (value) => ids.has(Number(value))),
 		});
-		expect((await s.validateAsync({ userId: 2 })).valid).toBe(true);
-		const missing = await s.validateAsync({ userId: 99 });
+		expect((await s.validateResultAsync({ userId: 2 })).valid).toBe(true);
+		const missing = await s.validateResultAsync({ userId: 99 });
 		expect(missing.valid).toBe(false);
 		expect(missing.errors[0]).toMatchObject({ rule: "database.exists" });
 	});
@@ -55,7 +55,7 @@ describe("rune > async validation", () => {
 					return true;
 				}),
 		});
-		const res = await s.validateAsync({ email: "not-an-email" });
+		const res = await s.validateResultAsync({ email: "not-an-email" });
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("email");
 		expect(called).toBe(0); // the DB check never ran
@@ -68,15 +68,19 @@ describe("rune > async validation", () => {
 			});
 		});
 		const s = schema({ n: rules.number().useAsync(rule(10)) });
-		expect((await s.validateAsync({ n: 5 })).valid).toBe(true);
-		expect((await s.validateAsync({ n: 20 })).errors[0]?.rule).toBe("maxAsync");
+		expect((await s.validateResultAsync({ n: 5 })).valid).toBe(true);
+		expect((await s.validateResultAsync({ n: 20 })).errors[0]?.rule).toBe(
+			"maxAsync",
+		);
 	});
 
 	it("sync validate() throws on a schema with async rules (no silent bypass)", () => {
 		const s = schema({
 			email: rules.string().unique(async () => true),
 		});
-		expect(() => s.validate({ email: "x@y.io" })).toThrow(/validateAsync/);
+		expect(() => s.validateResult({ email: "x@y.io" })).toThrow(
+			/validateAsync/,
+		);
 	});
 
 	it("validateOrThrowAsync throws RuneValidationError on failure", async () => {
@@ -108,7 +112,7 @@ describe("rune > async validation at depth", () => {
 				email: rules.string().unique(async () => true),
 			}),
 		});
-		expect(() => s.validate({ user: { email: "x@y.io" } })).toThrow(
+		expect(() => s.validateResult({ user: { email: "x@y.io" } })).toThrow(
 			/validateAsync/,
 		);
 	});
@@ -117,7 +121,9 @@ describe("rune > async validation at depth", () => {
 		const s = schema({
 			emails: rules.array(rules.string().unique(async () => true)),
 		});
-		expect(() => s.validate({ emails: ["x@y.io"] })).toThrow(/validateAsync/);
+		expect(() => s.validateResult({ emails: ["x@y.io"] })).toThrow(
+			/validateAsync/,
+		);
 	});
 
 	it("validateAsync runs a unique() nested in an object", async () => {
@@ -131,10 +137,10 @@ describe("rune > async validation at depth", () => {
 			}),
 		});
 
-		const ok = await s.validateAsync({ user: { email: "new@x.io" } });
+		const ok = await s.validateResultAsync({ user: { email: "new@x.io" } });
 		expect(ok.valid).toBe(true);
 
-		const bad = await s.validateAsync({ user: { email: "ada@x.io" } });
+		const bad = await s.validateResultAsync({ user: { email: "ada@x.io" } });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]?.rule).toBe("database.unique");
 		expect(bad.errors[0]?.field).toBe("user.email");
@@ -151,7 +157,7 @@ describe("rune > async validation at depth", () => {
 			),
 		});
 
-		const res = await s.validateAsync({
+		const res = await s.validateResultAsync({
 			emails: ["a@x.io", "dupe@x.io", "b@x.io"],
 		});
 		expect(seen).toEqual(["a@x.io", "dupe@x.io", "b@x.io"]);
@@ -173,7 +179,9 @@ describe("rune > async validation at depth", () => {
 			}),
 		});
 
-		const res = await s.validateAsync({ user: { email: "not-an-email" } });
+		const res = await s.validateResultAsync({
+			user: { email: "not-an-email" },
+		});
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("email");
 		expect(called).toBe(false);

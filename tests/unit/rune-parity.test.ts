@@ -77,10 +77,10 @@ describe("rune parity > string rules reject invalid input", () => {
 	for (const c of cases) {
 		it(`${c.rule} rejects invalid + accepts valid`, () => {
 			const s = schema({ f: c.chain() });
-			const bad = s.validate({ f: c.bad });
+			const bad = s.validateResult({ f: c.bad });
 			expect(bad.valid).toBe(false);
 			expect(failingRules(bad)).toContain(c.rule);
-			expect(s.validate({ f: c.good }).valid).toBe(true);
+			expect(s.validateResult({ f: c.good }).valid).toBe(true);
 		});
 	}
 });
@@ -88,63 +88,63 @@ describe("rune parity > string rules reject invalid input", () => {
 describe("rune parity > number rules reject invalid input", () => {
 	it("negative rejects >= 0", () => {
 		const s = schema({ n: rules.number().negative() });
-		expect(s.validate({ n: 0 }).valid).toBe(false);
-		expect(s.validate({ n: 5 }).valid).toBe(false);
-		expect(s.validate({ n: -1 }).valid).toBe(true);
+		expect(s.validateResult({ n: 0 }).valid).toBe(false);
+		expect(s.validateResult({ n: 5 }).valid).toBe(false);
+		expect(s.validateResult({ n: -1 }).valid).toBe(true);
 	});
 	it("nonNegative rejects < 0", () => {
 		const s = schema({ n: rules.number().nonNegative() });
-		expect(s.validate({ n: -1 }).valid).toBe(false);
-		expect(s.validate({ n: 0 }).valid).toBe(true);
+		expect(s.validateResult({ n: -1 }).valid).toBe(false);
+		expect(s.validateResult({ n: 0 }).valid).toBe(true);
 	});
 	it("range rejects outside [min,max]", () => {
 		const s = schema({ n: rules.number().range(1, 10) });
-		expect(s.validate({ n: 0 }).valid).toBe(false);
-		expect(s.validate({ n: 11 }).valid).toBe(false);
-		expect(s.validate({ n: 5 }).valid).toBe(true);
+		expect(s.validateResult({ n: 0 }).valid).toBe(false);
+		expect(s.validateResult({ n: 11 }).valid).toBe(false);
+		expect(s.validateResult({ n: 5 }).valid).toBe(true);
 	});
 });
 
 describe("rune parity > in / notIn / enum", () => {
 	it("in rejects values outside the set", () => {
 		const s = schema({ c: rules.string().in(["red", "green"]) });
-		expect(s.validate({ c: "blue" }).valid).toBe(false);
-		expect(s.validate({ c: "red" }).valid).toBe(true);
+		expect(s.validateResult({ c: "blue" }).valid).toBe(false);
+		expect(s.validateResult({ c: "red" }).valid).toBe(true);
 	});
 	it("notIn rejects values inside the set", () => {
 		const s = schema({ c: rules.string().notIn(["admin", "root"]) });
-		expect(s.validate({ c: "admin" }).valid).toBe(false);
-		expect(s.validate({ c: "guest" }).valid).toBe(true);
+		expect(s.validateResult({ c: "admin" }).valid).toBe(false);
+		expect(s.validateResult({ c: "guest" }).valid).toBe(true);
 	});
 	it("enum rejects values outside the enum", () => {
 		const s = schema({ role: rules.enum(["user", "admin"] as const) });
-		expect(s.validate({ role: "superuser" }).valid).toBe(false);
-		expect(s.validate({ role: "admin" }).valid).toBe(true);
+		expect(s.validateResult({ role: "superuser" }).valid).toBe(false);
+		expect(s.validateResult({ role: "admin" }).valid).toBe(true);
 	});
 });
 
 describe("rune parity > optional / nullable presence semantics", () => {
 	it("optional treats both undefined and null as absent (rune's documented deviation)", () => {
 		const s = schema({ x: rules.string().minLength(2).optional() });
-		expect(s.validate({}).valid).toBe(true);
-		expect(s.validate({ x: null }).valid).toBe(true);
+		expect(s.validateResult({}).valid).toBe(true);
+		expect(s.validateResult({ x: null }).valid).toBe(true);
 	});
 	it("nullable allows null but NOT undefined (presence required)", () => {
 		const s = schema({ x: rules.string().nullable() });
-		expect(s.validate({ x: null }).valid).toBe(true);
-		expect(s.validate({}).valid).toBe(false);
+		expect(s.validateResult({ x: null }).valid).toBe(true);
+		expect(s.validateResult({}).valid).toBe(false);
 	});
 	it("nullish allows both", () => {
 		const s = schema({ x: rules.string().nullish() });
-		expect(s.validate({ x: null }).valid).toBe(true);
-		expect(s.validate({}).valid).toBe(true);
+		expect(s.validateResult({ x: null }).valid).toBe(true);
+		expect(s.validateResult({}).valid).toBe(true);
 	});
 });
 
 describe("rune parity > transform / parse change the output", () => {
 	it("parse pre-processes the raw value before validation", () => {
 		const s = schema({ n: rules.number().parse((v) => Number(v)) });
-		const r = s.validate({ n: "42" });
+		const r = s.validateResult({ n: "42" });
 		expect(r.valid).toBe(true);
 		if (r.valid) expect(r.data.n).toBe(42);
 	});
@@ -152,7 +152,7 @@ describe("rune parity > transform / parse change the output", () => {
 		const s = schema({
 			name: rules.string().transform((v) => String(v).toUpperCase()),
 		});
-		const r = s.validate({ name: "kaen" });
+		const r = s.validateResult({ name: "kaen" });
 		expect(r.valid).toBe(true);
 		if (r.valid) expect(r.data.name).toBe("KAEN");
 	});
@@ -187,7 +187,10 @@ describe("rune parity > SimpleMessagesProvider custom messages", () => {
 			{ username: "username" },
 		);
 		const s = schema({ username: rules.string().minLength(5) });
-		const r = s.validate({ username: "ab" }, { messagesProvider: provider });
+		const r = s.validateResult(
+			{ username: "ab" },
+			{ messagesProvider: provider },
+		);
 		expect(r.valid).toBe(false);
 		expect(r.errors[0].message).toContain("too short");
 	});
@@ -200,7 +203,7 @@ describe("rune parity > SimpleMessagesProvider custom messages", () => {
 describe("rune > bail defaults to VineJS behaviour", () => {
 	it("stops at the first failing rule of a field", () => {
 		const s = schema({ code: rules.string().minLength(5).alphaNumeric() });
-		const res = s.validate({ code: "a!" });
+		const res = s.validateResult({ code: "a!" });
 		expect(res.valid).toBe(false);
 		// Both rules fail, only the first is reported.
 		expect(res.errors.filter((e) => e.field === "code")).toHaveLength(1);
@@ -211,12 +214,12 @@ describe("rune > bail defaults to VineJS behaviour", () => {
 		const s = schema({
 			code: rules.string().bail(false).minLength(5).alphaNumeric(),
 		});
-		const rulesHit = s.validate({ code: "a!" }).errors.map((e) => e.rule);
+		const rulesHit = s.validateResult({ code: "a!" }).errors.map((e) => e.rule);
 		expect(rulesHit).toEqual(["minLength", "alphaNumeric"]);
 	});
 
 	it("does not bail across fields — every field still reports", () => {
 		const s = schema({ a: rules.string(), b: rules.string() });
-		expect(s.validate({ a: 1, b: 2 }).errors).toHaveLength(2);
+		expect(s.validateResult({ a: 1, b: 2 }).errors).toHaveLength(2);
 	});
 });

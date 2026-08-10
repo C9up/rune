@@ -28,7 +28,7 @@ describe("rune > audit 3 regressions", () => {
 				}),
 			]),
 		});
-		const res = await s.validateAsync({ id: "abc" });
+		const res = await s.validateResultAsync({ id: "abc" });
 		expect(checked, "the branch's unique() must actually run").toBe(true);
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("database.unique");
@@ -45,7 +45,7 @@ describe("rune > audit 3 regressions", () => {
 				}),
 			]),
 		});
-		const res = await s.validateAsync({ id: 42 });
+		const res = await s.validateResultAsync({ id: 42 });
 		expect(res.valid).toBe(true);
 		expect(losingRan, "the string branch never matched").toBe(false);
 	});
@@ -62,7 +62,7 @@ describe("rune > audit 3 regressions", () => {
 		const s = schema({
 			token: rules.any().optional().useAsync(mustBeProvided()),
 		});
-		const res = await s.validateAsync({});
+		const res = await s.validateResultAsync({});
 		expect(seen).toEqual([undefined]);
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("asyncRequired");
@@ -76,7 +76,7 @@ describe("rune > audit 3 regressions", () => {
 		const s = schema({
 			a: rules.any().object({ b: rules.any().use(plugin()) }),
 		});
-		const res = s.validate({ a: { b: 1 } });
+		const res = s.validateResult({ a: { b: 1 } });
 		expect(res.errors[0]?.field).toBe("a.b");
 		expect(typeof res.errors[0]?.field).toBe("string");
 	});
@@ -89,9 +89,9 @@ describe("rune > number/boolean coercion (VineJS)", () => {
 		expect(out.age).toBe(25);
 		expect(typeof out.age).toBe("number");
 		// Coercion is not laxity: a non-numeric string still fails.
-		expect(s.validate({ age: "abc" }).valid).toBe(false);
+		expect(s.validateResult({ age: "abc" }).valid).toBe(false);
 		// …and the coerced value is what the other rules see.
-		expect(s.validate({ age: "7" }).valid).toBe(false);
+		expect(s.validateResult({ age: "7" }).valid).toBe(false);
 	});
 
 	it("coerces the usual boolean spellings", () => {
@@ -108,19 +108,22 @@ describe("rune > number/boolean coercion (VineJS)", () => {
 		] as const) {
 			expect(s.validateOrThrow({ ok: input }).ok).toBe(expected);
 		}
-		expect(s.validate({ ok: "maybe" }).valid).toBe(false);
+		expect(s.validateResult({ ok: "maybe" }).valid).toBe(false);
 	});
 
 	it("strict mode refuses coercion", () => {
 		expect(
-			schema({ n: rules.number({ strict: true }) }).validate({ n: "25" }).valid,
-		).toBe(false);
-		expect(
-			schema({ b: rules.boolean({ strict: true }) }).validate({ b: "true" })
+			schema({ n: rules.number({ strict: true }) }).validateResult({ n: "25" })
 				.valid,
 		).toBe(false);
 		expect(
-			schema({ n: rules.number({ strict: true }) }).validate({ n: 25 }).valid,
+			schema({ b: rules.boolean({ strict: true }) }).validateResult({
+				b: "true",
+			}).valid,
+		).toBe(false);
+		expect(
+			schema({ n: rules.number({ strict: true }) }).validateResult({ n: 25 })
+				.valid,
 		).toBe(true);
 	});
 });
@@ -148,8 +151,10 @@ describe("rune > object composition and the Vine entrypoint shapes", () => {
 		expect(Object.keys(omitted.getProperties() ?? {})).toEqual(["id", "name"]);
 
 		const partial = schema({ user: shape().partial() });
-		expect(partial.validate({ user: {} }).valid).toBe(true);
-		expect(schema({ user: shape() }).validate({ user: {} }).valid).toBe(false);
+		expect(partial.validateResult({ user: {} }).valid).toBe(true);
+		expect(schema({ user: shape() }).validateResult({ user: {} }).valid).toBe(
+			false,
+		);
 	});
 
 	it("pick/omit/partial refuse a chain with no object shape", () => {
@@ -163,11 +168,11 @@ describe("rune > object composition and the Vine entrypoint shapes", () => {
 		expect(c.validateOrThrow({ n: 7 })).toEqual({ n: 7 });
 	});
 
-	it("the default export offers the one-shot Vine helpers", () => {
+	it("the default export offers the one-shot Vine helpers", async () => {
 		expect(
-			rune.validate({ schema: { n: rune.number() }, data: { n: "12" } }),
+			await rune.validate({ schema: { n: rune.number() }, data: { n: "12" } }),
 		).toEqual({ n: 12 });
-		const [err] = rune.tryValidate({
+		const [err] = await rune.tryValidate({
 			schema: { n: rune.number() },
 			data: { n: "abc" },
 		});
@@ -178,7 +183,7 @@ describe("rune > object composition and the Vine entrypoint shapes", () => {
 		rune.messagesProvider = new SimpleMessagesProvider({
 			number: "Doit être un nombre",
 		});
-		const res = schema({ n: rules.number() }).validate({ n: "abc" });
+		const res = schema({ n: rules.number() }).validateResult({ n: "abc" });
 		expect(res.errors[0]?.message).toBe("Doit être un nombre");
 		rune.messagesProvider = null;
 	});

@@ -3,7 +3,7 @@ import { bindHostResolver, RuneError, rules, schema } from "../../src/index.js";
 
 /** One valid / one invalid per rule — the invalid case is the one that matters. */
 const ok = (chain: () => ReturnType<typeof rules.string>, value: unknown) =>
-	schema({ v: chain() }).validate({ v: value }).valid;
+	schema({ v: chain() }).validateResult({ v: value }).valid;
 
 describe("rune > format rules (VineJS parity)", () => {
 	it("ulid / jwt / ascii / hexCode", () => {
@@ -98,30 +98,36 @@ describe("rune > format rules (VineJS parity)", () => {
 			oldPassword: rules.string(),
 			newPassword: rules.string().notSameAs("oldPassword"),
 		});
-		expect(s.validate({ oldPassword: "a", newPassword: "b" }).valid).toBe(true);
-		const bad = s.validate({ oldPassword: "a", newPassword: "a" });
+		expect(s.validateResult({ oldPassword: "a", newPassword: "b" }).valid).toBe(
+			true,
+		);
+		const bad = s.validateResult({ oldPassword: "a", newPassword: "a" });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]?.rule).toBe("notSameAs");
 	});
 
 	it("distinct, plain and keyed by a field", () => {
 		const plain = schema({ tags: rules.array(rules.string()).distinct() });
-		expect(plain.validate({ tags: ["a", "b"] }).valid).toBe(true);
-		expect(plain.validate({ tags: ["a", "a"] }).valid).toBe(false);
+		expect(plain.validateResult({ tags: ["a", "b"] }).valid).toBe(true);
+		expect(plain.validateResult({ tags: ["a", "a"] }).valid).toBe(false);
 
 		const keyed = schema({
 			users: rules
 				.array(rules.any().object({ id: rules.number() }))
 				.distinct("id"),
 		});
-		expect(keyed.validate({ users: [{ id: 1 }, { id: 2 }] }).valid).toBe(true);
-		expect(keyed.validate({ users: [{ id: 1 }, { id: 1 }] }).valid).toBe(false);
+		expect(keyed.validateResult({ users: [{ id: 1 }, { id: 2 }] }).valid).toBe(
+			true,
+		);
+		expect(keyed.validateResult({ users: [{ id: 1 }, { id: 1 }] }).valid).toBe(
+			false,
+		);
 	});
 
 	it("withoutDecimals rejects a fractional number", () => {
 		const s = schema({ n: rules.number().withoutDecimals() });
-		expect(s.validate({ n: 42 }).valid).toBe(true);
-		expect(s.validate({ n: 4.2 }).valid).toBe(false);
+		expect(s.validateResult({ n: 42 }).valid).toBe(true);
+		expect(s.validateResult({ n: 4.2 }).valid).toBe(false);
 	});
 });
 
@@ -196,8 +202,8 @@ describe("rune > format rule options (VineJS)", () => {
 					Array.isArray(field.parent) ? "CH" : String(field.parent.country),
 				),
 		});
-		expect(s.validate({ country: "CH", zip: "1201" }).valid).toBe(true);
-		expect(s.validate({ country: "CH", zip: "75001" }).valid).toBe(false);
+		expect(s.validateResult({ country: "CH", zip: "1201" }).valid).toBe(true);
+		expect(s.validateResult({ country: "CH", zip: "75001" }).valid).toBe(false);
 	});
 });
 
@@ -211,10 +217,10 @@ describe("rune > activeUrl", () => {
 			},
 		});
 		const s = schema({ site: rules.string().url().activeUrl() });
-		expect((await s.validateAsync({ site: "https://example.com" })).valid).toBe(
-			true,
-		);
-		const bad = await s.validateAsync({ site: "https://nope.invalid" });
+		expect(
+			(await s.validateResultAsync({ site: "https://example.com" })).valid,
+		).toBe(true);
+		const bad = await s.validateResultAsync({ site: "https://nope.invalid" });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]?.rule).toBe("activeUrl");
 		expect(seen).toEqual(["example.com", "nope.invalid"]);
@@ -225,7 +231,7 @@ describe("rune > activeUrl", () => {
 		bindHostResolver(null);
 		const s = schema({ site: rules.string().activeUrl() });
 		await expect(
-			s.validateAsync({ site: "https://example.com" }),
+			s.validateResultAsync({ site: "https://example.com" }),
 		).rejects.toBeInstanceOf(RuneError);
 	});
 });

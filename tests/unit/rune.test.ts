@@ -39,7 +39,7 @@ describe("rune > schema validation", () => {
 			age: rules.number().positive(),
 		});
 
-		const result = s.validate({
+		const result = s.validateResult({
 			name: "Kaen",
 			email: "kaen@c9up.com",
 			age: 28,
@@ -54,7 +54,7 @@ describe("rune > schema validation", () => {
 		// transformed value was dropped from `data` (the gate tested the raw
 		// input, which was undefined, instead of the transformed result).
 		const s = schema({ n: rules.number().parse(() => 42) });
-		const result = s.validate({});
+		const result = s.validateResult({});
 		expect(result.valid).toBe(true);
 		expect(result.data).toEqual({ n: 42 });
 	});
@@ -65,7 +65,7 @@ describe("rune > schema validation", () => {
 			email: rules.string().email(),
 		});
 
-		const result = s.validate({ name: "Ka", email: "not-an-email" });
+		const result = s.validateResult({ name: "Ka", email: "not-an-email" });
 		expect(result.valid).toBe(false);
 		expect(result.errors.length).toBe(2);
 		const fields = result.errors.map((e) => e.field).sort();
@@ -77,26 +77,26 @@ describe("rune > schema validation", () => {
 		// min(3).min(5): a length-4 string passes the 3 bound but must fail the 5.
 		// Before the fix both Rust entries got min=3, dropping the 5 (audit 2026-06-13).
 		const s = schema({ name: rules.string().min(3).min(5) });
-		expect(s.validate({ name: "abcd" }).valid).toBe(false); // len 4 < 5
-		expect(s.validate({ name: "abcde" }).valid).toBe(true); // len 5 ok
+		expect(s.validateResult({ name: "abcd" }).valid).toBe(false); // len 4 < 5
+		expect(s.validateResult({ name: "abcde" }).valid).toBe(true); // len 5 ok
 	});
 
 	it("reports missing required fields", () => {
 		const s = schema({ name: rules.string() });
-		const result = s.validate({});
+		const result = s.validateResult({});
 		expect(result.valid).toBe(false);
 		expect(result.errors[0].rule).toBe("required");
 	});
 
 	it("optional fields skip validation when absent", () => {
 		const s = schema({ bio: rules.string().optional() });
-		const result = s.validate({});
+		const result = s.validateResult({});
 		expect(result.valid).toBe(true);
 	});
 
 	it("applies transforms (trim)", () => {
 		const s = schema({ name: rules.string().trim().min(3) });
-		const result = s.validate({ name: "  Kaen  " });
+		const result = s.validateResult({ name: "  Kaen  " });
 		expect(result.valid).toBe(true);
 		expect(result.data?.name).toBe("Kaen");
 	});
@@ -105,39 +105,39 @@ describe("rune > schema validation", () => {
 describe("rune > rule types", () => {
 	it("string rule", () => {
 		const s = schema({ x: rules.string() });
-		expect(s.validate({ x: "hello" }).valid).toBe(true);
-		expect(s.validate({ x: 123 }).valid).toBe(false);
+		expect(s.validateResult({ x: "hello" }).valid).toBe(true);
+		expect(s.validateResult({ x: 123 }).valid).toBe(false);
 	});
 
 	it("number rule", () => {
 		const s = schema({ x: rules.number() });
-		expect(s.validate({ x: 42 }).valid).toBe(true);
-		expect(s.validate({ x: "nope" }).valid).toBe(false);
+		expect(s.validateResult({ x: 42 }).valid).toBe(true);
+		expect(s.validateResult({ x: "nope" }).valid).toBe(false);
 	});
 
 	it("boolean rule", () => {
 		const s = schema({ x: rules.boolean() });
-		expect(s.validate({ x: true }).valid).toBe(true);
-		expect(s.validate({ x: "yes" }).valid).toBe(false);
+		expect(s.validateResult({ x: true }).valid).toBe(true);
+		expect(s.validateResult({ x: "yes" }).valid).toBe(false);
 	});
 
 	it("positive rule", () => {
 		const s = schema({ x: rules.number().positive() });
-		expect(s.validate({ x: 5 }).valid).toBe(true);
-		expect(s.validate({ x: -1 }).valid).toBe(false);
-		expect(s.validate({ x: 0 }).valid).toBe(false);
+		expect(s.validateResult({ x: 5 }).valid).toBe(true);
+		expect(s.validateResult({ x: -1 }).valid).toBe(false);
+		expect(s.validateResult({ x: 0 }).valid).toBe(false);
 	});
 
 	it("email rule", () => {
 		const s = schema({ x: rules.string().email() });
-		expect(s.validate({ x: "a@b.com" }).valid).toBe(true);
-		expect(s.validate({ x: "nope" }).valid).toBe(false);
+		expect(s.validateResult({ x: "a@b.com" }).valid).toBe(true);
+		expect(s.validateResult({ x: "nope" }).valid).toBe(false);
 		// Audit 2026-06-13: reject interior whitespace to match the Rust engine —
 		// the old TS rule rejected only \r\n, silently accepting spaces/tabs so the
 		// same schema validated differently with vs without the native binary.
-		expect(s.validate({ x: "a b@c.com" }).valid).toBe(false);
-		expect(s.validate({ x: "a@b .com" }).valid).toBe(false);
-		expect(s.validate({ x: "a@b.com\t" }).valid).toBe(false);
+		expect(s.validateResult({ x: "a b@c.com" }).valid).toBe(false);
+		expect(s.validateResult({ x: "a@b .com" }).valid).toBe(false);
+		expect(s.validateResult({ x: "a@b.com\t" }).valid).toBe(false);
 	});
 
 	it("custom rule", () => {
@@ -150,8 +150,8 @@ describe("rune > rule types", () => {
 					"Invalid French phone",
 				),
 		});
-		expect(s.validate({ phone: "0612345678" }).valid).toBe(true);
-		expect(s.validate({ phone: "123" }).valid).toBe(false);
+		expect(s.validateResult({ phone: "0612345678" }).valid).toBe(true);
+		expect(s.validateResult({ phone: "123" }).valid).toBe(false);
 	});
 
 	it("custom error message", () => {
@@ -161,7 +161,7 @@ describe("rune > rule types", () => {
 				.email()
 				.message("Please enter a valid email address"),
 		});
-		const result = s.validate({ email: "bad" });
+		const result = s.validateResult({ email: "bad" });
 		expect(result.errors[0].message).toBe("Please enter a valid email address");
 	});
 
@@ -175,11 +175,11 @@ describe("rune > rule types", () => {
 				.message("Name too long"),
 		});
 
-		const tooShort = s.validate({ name: "abc" });
+		const tooShort = s.validateResult({ name: "abc" });
 		expect(tooShort.valid).toBe(false);
 		expect(tooShort.errors[0].message).toBe("Name too short");
 
-		const tooLong = s.validate({ name: "abcdefghijkl" });
+		const tooLong = s.validateResult({ name: "abcdefghijkl" });
 		expect(tooLong.valid).toBe(false);
 		expect(tooLong.errors[0].message).toBe("Name too long");
 	});
@@ -188,38 +188,41 @@ describe("rune > rule types", () => {
 describe("rune > security & edge cases", () => {
 	it("rejects email with newline (header injection)", () => {
 		const s = schema({ email: rules.string().email() });
-		expect(s.validate({ email: "user@example.com\n" }).valid).toBe(false);
+		expect(s.validateResult({ email: "user@example.com\n" }).valid).toBe(false);
 		expect(
-			s.validate({ email: "user@example.com\r\nBcc: evil@hacker.com" }).valid,
+			s.validateResult({ email: "user@example.com\r\nBcc: evil@hacker.com" })
+				.valid,
 		).toBe(false);
 	});
 
 	it("rejects Infinity as number", () => {
 		const s = schema({ x: rules.number() });
-		expect(s.validate({ x: Infinity }).valid).toBe(false);
-		expect(s.validate({ x: -Infinity }).valid).toBe(false);
+		expect(s.validateResult({ x: Infinity }).valid).toBe(false);
+		expect(s.validateResult({ x: -Infinity }).valid).toBe(false);
 	});
 
 	it("rejects Infinity in positive", () => {
 		const s = schema({ x: rules.number().positive() });
-		expect(s.validate({ x: Infinity }).valid).toBe(false);
+		expect(s.validateResult({ x: Infinity }).valid).toBe(false);
 	});
 
 	it("rejects NaN", () => {
 		const s = schema({ x: rules.number() });
-		expect(s.validate({ x: NaN }).valid).toBe(false);
+		expect(s.validateResult({ x: NaN }).valid).toBe(false);
 	});
 
 	it("handles null input to schema.validate", () => {
 		const s = schema({ name: rules.string() });
-		const result = s.validate(null as unknown as Record<string, unknown>);
+		const result = s.validateResult(null as unknown as Record<string, unknown>);
 		expect(result.valid).toBe(false);
 		expect(result.errors[0].field).toBe("_root");
 	});
 
 	it("handles undefined input to schema.validate", () => {
 		const s = schema({ name: rules.string() });
-		const result = s.validate(undefined as unknown as Record<string, unknown>);
+		const result = s.validateResult(
+			undefined as unknown as Record<string, unknown>,
+		);
 		expect(result.valid).toBe(false);
 	});
 
@@ -235,7 +238,7 @@ describe("rune > security & edge cases", () => {
 				.string()
 				.custom("slug", (v) => typeof v === "string" && /^[a-z-]+$/.test(v)),
 		});
-		const result = s.validate({ x: "NOT_A_SLUG" });
+		const result = s.validateResult({ x: "NOT_A_SLUG" });
 		expect(result.errors[0].message).toBe("Failed custom rule: slug");
 	});
 });
@@ -250,10 +253,10 @@ describe("rune > translator integration", () => {
 		bindRosetta(i18n);
 
 		const s = schema({ email: rules.string().email() });
-		const result = s.validate({});
+		const result = s.validateResult({});
 		expect(result.errors[0].message).toBe("email est requis");
 
-		const invalid = s.validate({ email: "bad" });
+		const invalid = s.validateResult({ email: "bad" });
 		expect(invalid.errors[0].message).toBe("Email invalide");
 	});
 
@@ -267,7 +270,7 @@ describe("rune > translator integration", () => {
 			name: rules.string().min(5).message("Custom min message"),
 		});
 
-		const result = s.validate({ name: "abc" });
+		const result = s.validateResult({ name: "abc" });
 		expect(result.errors[0].message).toBe("Custom min message");
 	});
 });
@@ -309,7 +312,7 @@ describe("rune > Rust↔TS parity (conformance)", () => {
 
 	function bothEngines(
 		s: {
-			validate(d: unknown): {
+			validateResult(d: unknown): {
 				valid: boolean;
 				errors: Array<{ field: string; rule: string }>;
 			};
@@ -317,9 +320,9 @@ describe("rune > Rust↔TS parity (conformance)", () => {
 		data: unknown,
 	) {
 		setValidationTranslator(undefined); // → native engine (when available)
-		const native = s.validate(data);
+		const native = s.validateResult(data);
 		setValidationTranslator((key) => key); // → TS fallback path
-		const ts = s.validate(data);
+		const ts = s.validateResult(data);
 		setValidationTranslator(undefined);
 		return { native, ts };
 	}
@@ -553,7 +556,7 @@ describe("STANDARD_RULES native-routing safety (bug-3262)", () => {
 			handle: rules.string().minLength(5),
 			id: rules.string().uuid(),
 		});
-		const result = s.validate({ handle: "abc", id: "not-a-uuid" });
+		const result = s.validateResult({ handle: "abc", id: "not-a-uuid" });
 		expect(result.valid).toBe(false);
 		const failed = result.errors.map((e) => e.rule);
 		expect(failed).toContain("minLength");
@@ -565,7 +568,7 @@ describe("STANDARD_RULES native-routing safety (bug-3262)", () => {
 			handle: rules.string().minLength(5),
 			id: rules.string().uuid(),
 		});
-		const result = s.validate({
+		const result = s.validateResult({
 			handle: "abcdef",
 			id: "123e4567-e89b-12d3-a456-426614174000",
 		});

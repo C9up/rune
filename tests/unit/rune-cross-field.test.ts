@@ -21,7 +21,7 @@ describe("rune > cross-field (.use)", () => {
 			password: rules.string().min(8),
 			passwordConfirmation: rules.string().use(sameAs("password")),
 		});
-		const r = s.validate({
+		const r = s.validateResult({
 			password: "hunter2!",
 			passwordConfirmation: "hunter2!",
 		});
@@ -33,7 +33,7 @@ describe("rune > cross-field (.use)", () => {
 			password: rules.string().min(8),
 			passwordConfirmation: rules.string().use(sameAs("password")),
 		});
-		const r = s.validate({
+		const r = s.validateResult({
 			password: "hunter2!",
 			passwordConfirmation: "nope",
 		});
@@ -60,8 +60,8 @@ describe("rune > cross-field (.use)", () => {
 			},
 		);
 		const s = schema({ n: rules.number().use(between({ min: 1, max: 10 })) });
-		expect(s.validate({ n: 5 }).valid).toBe(true);
-		const bad = s.validate({ n: 50 });
+		expect(s.validateResult({ n: 5 }).valid).toBe(true);
+		const bad = s.validateResult({ n: 50 });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]).toMatchObject({ rule: "between", field: "n" });
 	});
@@ -71,8 +71,8 @@ describe("rune > cross-field (.use)", () => {
 			if (value === "") field.report("Must not be empty", "notEmpty");
 		});
 		const s = schema({ s: rules.string().use(notEmpty()) });
-		expect(s.validate({ s: "x" }).valid).toBe(true);
-		expect(s.validate({ s: "" }).valid).toBe(false);
+		expect(s.validateResult({ s: "x" }).valid).toBe(true);
+		expect(s.validateResult({ s: "" }).valid).toBe(false);
 	});
 
 	it("runs on the post-transform value (after trim)", () => {
@@ -82,7 +82,7 @@ describe("rune > cross-field (.use)", () => {
 		const s = schema({
 			name: rules.string().trim().use(trimmedIsBob()),
 		});
-		expect(s.validate({ name: "  bob  " }).valid).toBe(true);
+		expect(s.validateResult({ name: "  bob  " }).valid).toBe(true);
 	});
 
 	it("field.isValid gates on prior failures", () => {
@@ -94,10 +94,10 @@ describe("rune > cross-field (.use)", () => {
 			age: rules.number().min(18).use(secondary()),
 		});
 		// min fails → isValid=false → the use-rule skips itself.
-		const bad = s.validate({ age: 5 });
+		const bad = s.validateResult({ age: 5 });
 		expect(bad.errors.map((e) => e.rule)).toEqual(["min"]);
 		// min passes → isValid=true → the use-rule fires.
-		const ok = s.validate({ age: 20 });
+		const ok = s.validateResult({ age: 20 });
 		expect(ok.errors.map((e) => e.rule)).toContain("secondary");
 	});
 
@@ -107,7 +107,7 @@ describe("rune > cross-field (.use)", () => {
 			seen = field.meta;
 		});
 		const s = schema({ x: rules.string().use(capture()) });
-		s.validate({ x: "a" }, { meta: { tenant: 42 } });
+		s.validateResult({ x: "a" }, { meta: { tenant: 42 } });
 		expect(seen).toEqual({ tenant: 42 });
 	});
 });
@@ -126,7 +126,7 @@ describe("rune > cross-field nested & arrays (parent vs data)", () => {
 			user: rules.any().object({ name: rules.string().use(capture()) }),
 		});
 		const input = { user: { name: "bob" } };
-		s.validate(input);
+		s.validateResult(input);
 		expect(data).toBe(input); // root is the exact input object
 		expect(parent).toEqual({ name: "bob" }); // immediate parent (validated copy)
 		expect(path).toBe("user.name");
@@ -151,8 +151,8 @@ describe("rune > cross-field nested & arrays (parent vs data)", () => {
 				end: rules.number().use(endAfterStart()),
 			}),
 		});
-		expect(s.validate({ range: { start: 1, end: 5 } }).valid).toBe(true);
-		const bad = s.validate({ range: { start: 5, end: 1 } });
+		expect(s.validateResult({ range: { start: 1, end: 5 } }).valid).toBe(true);
+		const bad = s.validateResult({ range: { start: 5, end: 1 } });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]).toMatchObject({
 			field: "range.end",
@@ -168,7 +168,7 @@ describe("rune > cross-field nested & arrays (parent vs data)", () => {
 		const s = schema({
 			tags: rules.any().array(rules.string().use(capture())),
 		});
-		s.validate({ tags: ["a", "b"] });
+		s.validateResult({ tags: ["a", "b"] });
 		expect(Array.isArray(parent)).toBe(true);
 		expect(parent).toEqual(["a", "b"]);
 	});
@@ -187,9 +187,11 @@ describe("rune > .use coexists with legacy rules", () => {
 				.use(sameAs("codeConfirm")),
 			codeConfirm: rules.string(),
 		});
-		expect(s.validate({ code: "ABC", codeConfirm: "ABC" }).valid).toBe(true);
+		expect(s.validateResult({ code: "ABC", codeConfirm: "ABC" }).valid).toBe(
+			true,
+		);
 		// custom (not upper) + use (mismatch) both fire.
-		const bad = s.validate({ code: "abc", codeConfirm: "xyz" });
+		const bad = s.validateResult({ code: "abc", codeConfirm: "xyz" });
 		const codeRules = bad.errors
 			.filter((e) => e.field === "code")
 			.map((e) => e.rule);
@@ -212,7 +214,7 @@ describe("rune > message() targeting across rule registers", () => {
 				.sameAs("password")
 				.message("Les mots de passe diffèrent"),
 		});
-		const res = s.validate({ password: "a", confirm: "b" });
+		const res = s.validateResult({ password: "a", confirm: "b" });
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("sameAs");
 		expect(res.errors[0]?.message).toBe("Les mots de passe diffèrent");
@@ -229,7 +231,7 @@ describe("rune > message() targeting across rule registers", () => {
 				.message("Confirmation invalide"),
 		});
 		// Too short AND different: minLength keeps its own default message.
-		const res = s.validate({ password: "longenough", confirm: "x" });
+		const res = s.validateResult({ password: "longenough", confirm: "x" });
 		const byRule = Object.fromEntries(
 			res.errors.map((e) => [e.rule, e.message]),
 		);
@@ -244,7 +246,7 @@ describe("rune > message() targeting across rule registers", () => {
 				.unique(async () => false)
 				.message("Cet email est déjà pris"),
 		});
-		const res = await s.validateAsync({ email: "a@b.io" });
+		const res = await s.validateResultAsync({ email: "a@b.io" });
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.message).toBe("Cet email est déjà pris");
 	});

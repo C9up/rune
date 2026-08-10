@@ -88,7 +88,7 @@ const rune = {
 		schema: T | RuleChain;
 		data: unknown;
 	}) {
-		return create(options.schema as T).validateOrThrow(options.data);
+		return create(options.schema as T).validate(options.data);
 	},
 	/** One-shot non-throwing validation, VineJS `vine.tryValidate`. */
 	tryValidate<T extends Record<string, RuleChain>>(options: {

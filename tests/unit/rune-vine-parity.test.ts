@@ -5,6 +5,7 @@ import rune, {
 	create,
 	createRule,
 	RuneError,
+	RuneValidationError,
 	rules,
 	schema,
 } from "../../src/index.js";
@@ -24,13 +25,13 @@ describe("rune > public API (VineJS shape)", () => {
 		expect(v.validateOrThrow({ n: 4 })).toEqual({ n: 4 });
 	});
 
-	it("tryValidate returns a tuple instead of throwing", () => {
+	it("tryValidate returns a tuple instead of throwing", async () => {
 		const v = schema({ email: rules.string().email() });
-		const [err, data] = v.tryValidate({ email: "bad" });
+		const [err, data] = await v.tryValidate({ email: "bad" });
 		expect(data).toBeNull();
 		expect(err?.messages[0]?.rule).toBe("email");
 
-		const [err2, data2] = v.tryValidate({ email: "a@b.io" });
+		const [err2, data2] = await v.tryValidate({ email: "a@b.io" });
 		expect(err2).toBeNull();
 		expect(data2).toEqual({ email: "a@b.io" });
 	});
@@ -55,34 +56,34 @@ describe("rune > new schema types", () => {
 		for (const ok of [true, 1, "1", "on", "yes", "true"]) {
 			expect(v.validateOrThrow({ cgu: ok }).cgu).toBe(true);
 		}
-		expect(v.validate({ cgu: "no" }).valid).toBe(false);
+		expect(v.validateResult({ cgu: "no" }).valid).toBe(false);
 	});
 
 	it("record() validates every value of an open-keyed object", () => {
 		const v = schema({ counts: rules.record(rules.number().positive()) });
-		expect(v.validate({ counts: { a: 1, b: 2 } }).valid).toBe(true);
-		const bad = v.validate({ counts: { a: 1, b: -3 } });
+		expect(v.validateResult({ counts: { a: 1, b: 2 } }).valid).toBe(true);
+		const bad = v.validateResult({ counts: { a: 1, b: -3 } });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]?.field).toBe("counts.b");
 	});
 
 	it("tuple() pins each position and rejects a wrong length", () => {
 		const v = schema({ point: rules.tuple([rules.number(), rules.string()]) });
-		expect(v.validate({ point: [1, "a"] }).valid).toBe(true);
-		expect(v.validate({ point: ["a", 1] }).valid).toBe(false);
+		expect(v.validateResult({ point: [1, "a"] }).valid).toBe(true);
+		expect(v.validateResult({ point: ["a", 1] }).valid).toBe(false);
 		// An extra item must not be silently ignored.
-		expect(v.validate({ point: [1, "a", 99] }).valid).toBe(false);
+		expect(v.validateResult({ point: [1, "a", 99] }).valid).toBe(false);
 	});
 
 	it("union() passes on the first matching branch", () => {
 		const v = schema({
 			id: rules.union([rules.number(), rules.string().uuid()]),
 		});
-		expect(v.validate({ id: 42 }).valid).toBe(true);
+		expect(v.validateResult({ id: 42 }).valid).toBe(true);
 		expect(
-			v.validate({ id: "0191e2a0-0000-7000-8000-000000000000" }).valid,
+			v.validateResult({ id: "0191e2a0-0000-7000-8000-000000000000" }).valid,
 		).toBe(true);
-		const bad = v.validate({ id: "not-a-uuid" });
+		const bad = v.validateResult({ id: "not-a-uuid" });
 		expect(bad.valid).toBe(false);
 		expect(bad.errors[0]?.rule).toBe("union");
 	});
@@ -104,7 +105,7 @@ describe("rune > createRule implicit + FieldContext", () => {
 		const v = schema({
 			a: rules.any().optional().use(plain()).use(implicit()),
 		});
-		const res = v.validate({});
+		const res = v.validateResult({});
 		expect(seen).toEqual(["implicit:undefined"]);
 		expect(res.errors[0]?.rule).toBe("customRequired");
 	});
@@ -144,8 +145,12 @@ describe("rune > unique/exists Lucid options form", () => {
 		const v = schema({
 			email: rules.string().unique({ table: "users", where: { tenant_id: 3 } }),
 		});
-		expect((await v.validateAsync({ email: "free@x.io" })).valid).toBe(true);
-		expect((await v.validateAsync({ email: "taken@x.io" })).valid).toBe(false);
+		expect((await v.validateResultAsync({ email: "free@x.io" })).valid).toBe(
+			true,
+		);
+		expect((await v.validateResultAsync({ email: "taken@x.io" })).valid).toBe(
+			false,
+		);
 		expect(seen[0]).toMatchObject({
 			table: "users",
 			column: "email",
@@ -157,9 +162,9 @@ describe("rune > unique/exists Lucid options form", () => {
 	it("fails loudly when no resolver is bound — never silently passes", async () => {
 		bindDatabase(null);
 		const v = schema({ email: rules.string().unique({ table: "users" }) });
-		await expect(v.validateAsync({ email: "a@b.io" })).rejects.toBeInstanceOf(
-			RuneError,
-		);
+		await expect(
+			v.validateResultAsync({ email: "a@b.io" }),
+		).rejects.toBeInstanceOf(RuneError);
 	});
 });
 
@@ -193,8 +198,8 @@ describe("rune > string mutations and extra formats", () => {
 
 	it("passport checks per country and fails closed on an unknown one", () => {
 		const v = schema({ p: rules.string().passport({ countryCode: "CH" }) });
-		expect(v.validate({ p: "X1234567" }).valid).toBe(true);
-		expect(v.validate({ p: "12345" }).valid).toBe(false);
+		expect(v.validateResult({ p: "X1234567" }).valid).toBe(true);
+		expect(v.validateResult({ p: "12345" }).valid).toBe(false);
 		expect(() => rules.string().passport({ countryCode: "ZZ" })).toThrow(
 			RuneError,
 		);
@@ -204,24 +209,102 @@ describe("rune > string mutations and extra formats", () => {
 describe("rune > date extras", () => {
 	it("equals / afterOrSameAs / beforeOrSameAs", () => {
 		expect(
-			schema({ d: rules.date().equals("2026-06-25") }).validate({
+			schema({ d: rules.date().equals("2026-06-25") }).validateResult({
 				d: "2026-06-25",
 			}).valid,
 		).toBe(true);
 		expect(
-			schema({ d: rules.date().equals("2026-06-25") }).validate({
+			schema({ d: rules.date().equals("2026-06-25") }).validateResult({
 				d: "2026-06-26",
 			}).valid,
 		).toBe(false);
 
 		const v = schema({ a: rules.date(), b: rules.date().afterOrSameAs("a") });
-		expect(v.validate({ a: "2026-06-25", b: "2026-06-25" }).valid).toBe(true);
-		expect(v.validate({ a: "2026-06-25", b: "2026-06-24" }).valid).toBe(false);
+		expect(v.validateResult({ a: "2026-06-25", b: "2026-06-25" }).valid).toBe(
+			true,
+		);
+		expect(v.validateResult({ a: "2026-06-25", b: "2026-06-24" }).valid).toBe(
+			false,
+		);
 	});
 
 	it("sameAs compares instants on a date chain, not references", () => {
 		const v = schema({ a: rules.date(), b: rules.date().sameAs("a") });
-		expect(v.validate({ a: "2026-06-25", b: "2026-06-25" }).valid).toBe(true);
-		expect(v.validate({ a: "2026-06-25", b: "2026-06-26" }).valid).toBe(false);
+		expect(v.validateResult({ a: "2026-06-25", b: "2026-06-25" }).valid).toBe(
+			true,
+		);
+		expect(v.validateResult({ a: "2026-06-25", b: "2026-06-26" }).valid).toBe(
+			false,
+		);
+	});
+});
+
+/**
+ * `validate()` now IS the VineJS contract: async, returns the payload, throws.
+ * The never-throwing forms rune also offers are named for what they do.
+ */
+describe("rune > validate() follows the VineJS contract", () => {
+	it("resolves to the payload and throws on failure", async () => {
+		const v = schema({ email: rules.string().email() });
+		await expect(v.validate({ email: "a@b.io" })).resolves.toEqual({
+			email: "a@b.io",
+		});
+		await expect(v.validate({ email: "bad" })).rejects.toBeInstanceOf(
+			RuneValidationError,
+		);
+	});
+
+	it("handles a schema with async rules without the caller opting in", async () => {
+		const v = schema({ email: rules.string().unique(async () => false) });
+		// The old sync entry point would have thrown "call validateAsync instead".
+		await expect(v.validate({ email: "a@b.io" })).rejects.toBeInstanceOf(
+			RuneValidationError,
+		);
+	});
+
+	it("validateResult stays synchronous and never throws", () => {
+		const v = schema({ email: rules.string().email() });
+		const res = v.validateResult({ email: "bad" });
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.rule).toBe("email");
+	});
+});
+
+describe("rune > union.if / union.else (VineJS parity)", () => {
+	const shape = () =>
+		rules.union([
+			rules.union.if(
+				(v) => typeof v === "object" && v !== null && "email" in v,
+				rules.any().object({ email: rules.string().email() }),
+			),
+			rules.union.else(rules.any().object({ phone: rules.string().mobile() })),
+		]);
+
+	it("selects the guarded branch and reports ITS errors, not a bare 'union'", () => {
+		const v = schema({ contact: shape() });
+		expect(v.validateResult({ contact: { email: "a@b.io" } }).valid).toBe(true);
+
+		const bad = v.validateResult({ contact: { email: "nope" } });
+		expect(bad.valid).toBe(false);
+		// The point of the guarded form: a diagnosable error.
+		expect(bad.errors[0]?.rule).toBe("email");
+		expect(bad.errors[0]?.field).toBe("contact.email");
+	});
+
+	it("falls back to union.else when no predicate matches", () => {
+		const v = schema({ contact: shape() });
+		expect(v.validateResult({ contact: { phone: "+41791234567" } }).valid).toBe(
+			true,
+		);
+		const bad = v.validateResult({ contact: { phone: "nope" } });
+		expect(bad.errors[0]?.rule).toBe("mobile");
+	});
+
+	it("keeps the bare-chain form working", () => {
+		const v = schema({
+			id: rules.union([rules.number(), rules.string().uuid()]),
+		});
+		expect(v.validateResult({ id: 42 }).valid).toBe(true);
+		expect(v.validateResult({ id: "nope" }).errors[0]?.rule).toBe("union");
 	});
 });
