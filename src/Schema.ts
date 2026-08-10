@@ -179,14 +179,14 @@ export function createRule<Options>(
 	ruleOptions?: CreateRuleOptions,
 ): (options: Options) => CompiledRule {
 	if (ruleOptions?.isAsync) {
-		// A sync rule whose validator returns a Promise is a rule nobody awaits.
-		// Vine expresses "async" as an option, so honour it by building the async
-		// rule instead of quietly dropping the await.
-		throw new RuneError(
-			"ASYNC_RULE_MISMATCH",
-			"createRule(fn, { isAsync: true }) builds a rule that must be awaited.",
-			{ hint: "Use createAsyncRule(fn) — it is the same contract, awaited." },
+		// VineJS expresses "async" as an option on createRule, so honour it by
+		// BUILDING the async rule rather than refusing: `.use()` routes an
+		// async-marked rule to the awaited register.
+		const asyncBuilder = createAsyncRule(
+			validator as unknown as AsyncRuleValidator<Options>,
+			{ ...ruleOptions, isAsync: undefined },
 		);
+		return asyncBuilder as unknown as (options: Options) => CompiledRule;
 	}
 	return (options: Options): CompiledRule => ({
 		__rune: "rule",
@@ -264,6 +264,11 @@ export interface ValidateOptions {
 	 * provider takes precedence over a globally bound translator).
 	 */
 	messagesProvider?: MessagesProviderContract;
+	/**
+	 * Receives every error as it is reported (VineJS `errorReporter`). Purely an
+	 * observer: the result is unchanged, so a reporter can never mask a failure.
+	 */
+	errorReporter?: (error: ValidationError) => void;
 }
 
 export interface ValidationSchema<T = Record<string, unknown>> {
@@ -315,6 +320,7 @@ interface RunContext {
 	parent: Record<string, unknown> | unknown[];
 	meta: Record<string, unknown>;
 	messagesProvider?: MessagesProviderContract;
+	errorReporter?: (error: ValidationError) => void;
 }
 
 /**
@@ -519,6 +525,31 @@ export interface FileLike {
 	name?: string;
 }
 
+/** Byte multipliers for the size spellings Adonis accepts. */
+const BYTE_UNITS: Record<string, number> = {
+	b: 1,
+	kb: 1024,
+	mb: 1024 ** 2,
+	gb: 1024 ** 3,
+	tb: 1024 ** 4,
+};
+
+/**
+ * Parse a size limit — a byte count, or Adonis's `"2mb"` / `"512kb"` spelling.
+ * Throws on an unreadable unit rather than falling back to "unlimited": a cap
+ * that silently stops capping is worse than no cap at all.
+ */
+export function parseByteSize(size: number | string): number {
+	if (typeof size === "number") return size;
+	const match = /^\s*(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|tb)\s*$/i.exec(size);
+	if (!match) {
+		throw new RuneError("INVALID_SIZE", `file(): cannot read size '${size}'.`, {
+			hint: 'Use a byte count, or "2mb" / "512kb" / "1gb".',
+		});
+	}
+	return Math.round(Number(match[1]) * BYTE_UNITS[match[2].toLowerCase()]);
+}
+
 /** Structural guard for {@link FileLike}. */
 function isFileLike(value: unknown): value is FileLike {
 	return (
@@ -539,6 +570,12 @@ function fileExtension(file: FileLike): string | null {
 	const dot = name.lastIndexOf(".");
 	return dot > 0 ? name.slice(dot + 1).toLowerCase() : null;
 }
+
+/**
+ * What a `parse()` callback receives besides the value — VineJS's
+ * `ParseFn = (value, ctx: Pick<FieldContext, 'data' | 'parent' | 'meta'>)`.
+ */
+export type ParseContext = Pick<FieldContext, "data" | "parent" | "meta">;
 
 /** A union branch guarded by a predicate — `vine.union.if(...)`. */
 export interface ConditionalBranch {
@@ -846,7 +883,14 @@ export function schema(
 			options?.messagesProvider ?? globalMessagesProvider ?? undefined;
 		if (!hasCustomRules && !validationTranslator && !provider) {
 			if (isNativeAvailable()) {
-				return validateWithRust(fields, data);
+				const native = validateWithRust(fields, data);
+				// Report here too: the native path returns before the TS traversal,
+				// so instrumenting only the latter left the reporter silent exactly
+				// when the fast path was taken.
+				if (options?.errorReporter) {
+					for (const error of native.errors) options.errorReporter(error);
+				}
+				return native;
 			}
 			// This schema would have used the native engine, but it isn't loaded —
 			// surface the platform-dependent TS fallback once instead of diverging
@@ -860,6 +904,7 @@ export function schema(
 			data,
 			parent: data,
 			meta: options?.meta ?? {},
+			errorReporter: options?.errorReporter,
 			messagesProvider: provider,
 		};
 
@@ -875,6 +920,9 @@ export function schema(
 			}
 		}
 
+		if (options?.errorReporter) {
+			for (const error of errors) options.errorReporter(error);
+		}
 		if (errors.length === 0) {
 			return { valid: true, errors, data: validated };
 		}
@@ -913,6 +961,7 @@ export function schema(
 			data,
 			parent: data,
 			meta: options?.meta ?? {},
+			errorReporter: options?.errorReporter,
 			messagesProvider:
 				options?.messagesProvider ?? globalMessagesProvider ?? undefined,
 		};
@@ -945,6 +994,9 @@ export function schema(
 			}
 		}
 
+		if (options?.errorReporter) {
+			for (const error of errors) options.errorReporter(error);
+		}
 		if (errors.length === 0) {
 			return { valid: true, errors, data: validated };
 		}
@@ -1131,7 +1183,7 @@ export class RuleChain<Output = unknown> {
 		name: string;
 		fn: (value: unknown, field: FieldContext) => unknown;
 	}> = [];
-	#preTransforms: Array<(value: unknown) => unknown> = [];
+	#preTransforms: Array<(value: unknown, ctx: ParseContext) => unknown> = [];
 	/**
 	 * Type coercions (VineJS accepts `"32"` for a number). Kept OUT of
 	 * `#preTransforms` on purpose: a pre-transform forces the TS path, and the
@@ -1143,6 +1195,7 @@ export class RuleChain<Output = unknown> {
 	#dateFormats: DateFormat[] | null = null;
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
+	#allowUnknown = false;
 	#recordValueChain: RuleChain | null = null;
 	#tupleChains: RuleChain[] | null = null;
 	#unionChains: ConditionalBranch[] | null = null;
@@ -1211,7 +1264,9 @@ export class RuleChain<Output = unknown> {
 		return this.#bail;
 	}
 	/** Public read access to `.parse()` pre-transforms (kept off the native path). */
-	get preTransforms(): ReadonlyArray<(value: unknown) => unknown> {
+	get preTransforms(): ReadonlyArray<
+		(value: unknown, ctx: ParseContext) => unknown
+	> {
 		return this.#preTransforms;
 	}
 	/** Whether this chain carries a `requiredWhen`-family condition. */
@@ -1234,6 +1289,7 @@ export class RuleChain<Output = unknown> {
 		next.#transforms = [...this.#transforms];
 		next.#dateFormats = this.#dateFormats;
 		next.#coercions = [...this.#coercions];
+		next.#allowUnknown = this.#allowUnknown;
 		next.#recordValueChain = this.#recordValueChain;
 		next.#tupleChains = this.#tupleChains;
 		next.#unionChains = this.#unionChains;
@@ -1527,6 +1583,16 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
+	/**
+	 * Keep keys the object shape does not declare (VineJS
+	 * `allowUnknownProperties`). Off by default: dropping undeclared keys is what
+	 * makes a validated payload safe to hand to a mass assignment.
+	 */
+	allowUnknownProperties(): this {
+		this.#allowUnknown = true;
+		return this;
+	}
+
 	/** The nested shape declared by `object()`, if any (VineJS `getProperties`). */
 	getProperties(): Record<string, RuleChain> | null {
 		return this.#nestedSchema ? { ...this.#nestedSchema } : null;
@@ -1677,15 +1743,20 @@ export class RuleChain<Output = unknown> {
 	 * `size` is a byte count; `extnames` are compared lowercase, without the dot.
 	 */
 	file(options?: {
-		size?: number;
+		size?: number | string;
 		extnames?: readonly string[];
 	}): RuleChain<FileLike> {
+		// Adonis documents `size: '2mb'`; a numeric-only option meant a
+		// transcribed validator either failed the typecheck or, in JS, silently
+		// stopped capping.
+		const maxBytes =
+			options?.size === undefined ? undefined : parseByteSize(options.size);
 		this.#pushRule({
 			name: "file",
 			args: options ? { ...options } : undefined,
 			validate: (v) => {
 				if (!isFileLike(v)) return false;
-				if (options?.size !== undefined && v.size > options.size) return false;
+				if (maxBytes !== undefined && v.size > maxBytes) return false;
 				if (options?.extnames) {
 					const ext = fileExtension(v);
 					if (ext === null) return false;
@@ -2037,17 +2108,29 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Array items must be unique — optionally compared on `field` (VineJS `distinct`). */
-	distinct(field?: string): this {
+	distinct(field?: string | string[]): this {
 		this.#pushRule({
 			name: "distinct",
 			args: { field },
 			validate: (v) => {
 				if (!Array.isArray(v)) return false;
-				const keys = v.map((item) =>
-					field !== undefined && isPlainObject(item)
-						? JSON.stringify(item[field])
-						: JSON.stringify(item),
-				);
+				const fieldList = field === undefined ? null : [field].flat();
+				const keys: string[] = [];
+				for (const item of v) {
+					if (fieldList === null) {
+						keys.push(JSON.stringify(item));
+						continue;
+					}
+					if (!isPlainObject(item)) continue;
+					// VineJS skips an item missing the key(s): two absent values are
+					// not a duplicate of each other.
+					if (
+						fieldList.some((k) => item[k] === undefined || item[k] === null)
+					) {
+						continue;
+					}
+					keys.push(JSON.stringify(fieldList.map((k) => item[k])));
+				}
 				return new Set(keys).size === keys.length;
 			},
 			message: field
@@ -2063,6 +2146,30 @@ export class RuleChain<Output = unknown> {
 			name: "nonPositive",
 			validate: (v) => typeof v === "number" && v <= 0,
 			message: "Must be zero or negative",
+		});
+		return this;
+	}
+
+	/** Array must hold at least one item (VineJS `notEmpty`). */
+	notEmpty(): this {
+		this.#pushRule({
+			name: "notEmpty",
+			validate: (v) => Array.isArray(v) && v.length > 0,
+			message: "Must not be empty",
+		});
+		return this;
+	}
+
+	/** Drop `null`, `undefined` and `""` items before the item rules run. */
+	compact(): this {
+		this.#transforms.push({
+			name: "compact",
+			fn: (value) =>
+				Array.isArray(value)
+					? value.filter(
+							(item) => item !== null && item !== undefined && item !== "",
+						)
+					: value,
 		});
 		return this;
 	}
@@ -2257,12 +2364,14 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Number must fall within `[min, max]` (inclusive). */
-	range(min: number, max: number): this {
+	range(bounds: [min: number, max: number]): this {
+		// VineJS signature is a TUPLE (`range([18, 60])`); the two-argument form
+		// silently dropped `max` when an Adonis validator was transcribed as-is.
+		const [min, max] = bounds;
 		this.#pushRule({
 			name: "range",
 			args: { min, max },
-			validate: (v) =>
-				typeof v === "number" && Number.isFinite(v) && v >= min && v <= max,
+			validate: (v) => typeof v === "number" && v >= min && v <= max,
 			message: `Must be between ${min} and ${max}`,
 		});
 		return this;
@@ -2375,7 +2484,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Pre-validation transform of the raw input (VineJS `parse`). */
-	parse(fn: (value: unknown) => unknown): this {
+	parse(fn: (value: unknown, ctx: ParseContext) => unknown): this {
 		this.#preTransforms.push(fn);
 		return this;
 	}
@@ -2399,7 +2508,12 @@ export class RuleChain<Output = unknown> {
 	 * receives a {@link FieldContext} with the root `data` and `parent`, so it can
 	 * validate across fields. Runs after this field's type/value rules.
 	 */
-	use(rule: CompiledRule): this {
+	use(rule: CompiledRule | AsyncCompiledRule): this {
+		// A rule built with `{ isAsync: true }` arrives here (VineJS has one
+		// `use`); routing it to the sync register would drop the await.
+		if (rule.__rune === "asyncRule") {
+			return this.useAsync(rule);
+		}
 		if (rule?.__rune !== "rule" || typeof rule.run !== "function") {
 			throw new RuneError(
 				"INVALID_RULE",
@@ -2642,10 +2756,17 @@ export class RuleChain<Output = unknown> {
 		ctx: RunContext = EMPTY_RUN_CONTEXT,
 		pending?: PendingAsync[],
 	): { errors: ValidationError[]; transformed: unknown } {
-		// 0. Pre-validation parse() transforms run on the raw value first.
+		// 0. Pre-validation parse() transforms run on the raw value first. VineJS
+		//    hands them `(value, { data, parent, meta })` — without the context a
+		//    parser cannot look at a sibling, which is half its purpose.
 		let value = rawValue;
+		const parseCtx: ParseContext = {
+			data: ctx.data,
+			parent: ctx.parent,
+			meta: ctx.meta,
+		};
 		for (const pre of this.#preTransforms) {
-			value = pre(value);
+			value = pre(value, parseCtx);
 		}
 
 		if (value === undefined) {
@@ -2711,13 +2832,21 @@ export class RuleChain<Output = unknown> {
 
 		// 4. Nested object validation (only if type check passed — not arrays)
 		if (this.#nestedSchema && isPlainObject(transformed)) {
-			const obj: Record<string, unknown> = { ...transformed };
+			// Start from the DECLARED keys only. Spreading the input kept every
+			// undeclared key, so the mass-assignment guarantee that holds at the
+			// top level silently stopped holding one level down:
+			// `object({ name })` let an `isAdmin` through. `allowUnknownProperties()`
+			// is the opt-in, as in VineJS.
+			const source: Record<string, unknown> = transformed;
+			const obj: Record<string, unknown> = this.#allowUnknown
+				? { ...source }
+				: {};
 			transformed = obj;
 			for (const [nestedField, chain] of Object.entries(this.#nestedSchema)) {
 				const nestedResult = chain._validateWithTransform(
 					`${field}.${nestedField}`,
-					obj[nestedField],
-					{ ...ctx, parent: obj },
+					source[nestedField],
+					{ ...ctx, parent: source },
 					pending,
 				);
 				errors.push(...nestedResult.errors);
@@ -3135,7 +3264,7 @@ export const rules = {
 		new RuleChain().date(options),
 	accepted: (): RuleChain<true> => new RuleChain().accepted(),
 	file: (options?: {
-		size?: number;
+		size?: number | string;
 		extnames?: readonly string[];
 	}): RuleChain<FileLike> => new RuleChain().file(options),
 	record: <Item extends RuleChain>(
@@ -3149,8 +3278,16 @@ export const rules = {
 	union: Object.assign(
 		(chains: readonly UnionBranch[]): RuleChain =>
 			new RuleChain().union(chains),
-		{ if: unionIf, else: unionElse },
+		// `otherwise` is VineJS's spelling of the fallback branch; `else` stays
+		// because it reads better in some call styles.
+		{ if: unionIf, else: unionElse, otherwise: unionElse },
 	),
+	/**
+	 * Union discriminated by the value's TYPE (VineJS `unionOfTypes`): the first
+	 * branch whose own type rule accepts the value wins.
+	 */
+	unionOfTypes: (chains: readonly RuleChain[]): RuleChain =>
+		new RuleChain().union(chains),
 	object: <Sh extends Record<string, RuleChain>>(
 		shape: Sh,
 	): RuleChain<Infer<Sh>> => new RuleChain().object(shape),

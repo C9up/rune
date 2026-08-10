@@ -525,12 +525,12 @@ describe("rune > Rust↔TS parity (conformance)", () => {
 		},
 		{
 			label: "range below min fails",
-			fields: { n: rules.number().range(1, 10) },
+			fields: { n: rules.number().range([1, 10]) },
 			data: { n: 0 },
 		},
 		{
 			label: "range within bounds passes",
-			fields: { n: rules.number().range(1, 10) },
+			fields: { n: rules.number().range([1, 10]) },
 			data: { n: 5 },
 		},
 	];

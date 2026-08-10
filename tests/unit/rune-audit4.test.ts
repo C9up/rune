@@ -86,8 +86,27 @@ describe("rune > audit 4", () => {
 		expect(() => v.validateResult({ name: "Ada" })).toThrow(TypeError);
 	});
 
-	it("createRule refuses the isAsync flag instead of dropping the await", () => {
-		expect(() => createRule(() => {}, { isAsync: true })).toThrow(RuneError);
+	it("createRule({ isAsync: true }) builds an awaited rule usable via .use()", async () => {
+		// VineJS expresses async as an option on createRule; honouring it means
+		// BUILDING the async rule, and `.use()` routing it to the awaited register.
+		let ran = false;
+		const slow = createRule(
+			async (_v, _o, field) => {
+				await Promise.resolve();
+				ran = true;
+				field.report("nope", "asyncViaUse");
+			},
+			{ isAsync: true },
+		);
+
+		const v = schema({ a: rules.string().use(slow()) });
+		// Sync entry point must refuse rather than skip the awaited rule.
+		expect(() => v.validateResult({ a: "x" })).toThrow(
+			/validateAsync|validateResultAsync/,
+		);
+		const res = await v.validateResultAsync({ a: "x" });
+		expect(ran).toBe(true);
+		expect(res.errors[0]?.rule).toBe("asyncViaUse");
 	});
 
 	it("the one-shot helpers forward meta", () => {

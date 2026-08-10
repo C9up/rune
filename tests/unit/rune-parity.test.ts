@@ -98,7 +98,7 @@ describe("rune parity > number rules reject invalid input", () => {
 		expect(s.validateResult({ n: 0 }).valid).toBe(true);
 	});
 	it("range rejects outside [min,max]", () => {
-		const s = schema({ n: rules.number().range(1, 10) });
+		const s = schema({ n: rules.number().range([1, 10]) });
 		expect(s.validateResult({ n: 0 }).valid).toBe(false);
 		expect(s.validateResult({ n: 11 }).valid).toBe(false);
 		expect(s.validateResult({ n: 5 }).valid).toBe(true);
