@@ -13,6 +13,8 @@ import {
 import type { RuneErrorNode } from "./errors.js";
 import { RuneError, RuneValidationError } from "./errors.js";
 import {
+	type AlphaOptions,
+	alphaPattern,
 	escapeHtml,
 	isAscii,
 	isCoordinates,
@@ -22,16 +24,20 @@ import {
 	isIpAddress,
 	isJwt,
 	isMobile,
+	isMobileForLocale,
 	isPassport,
 	isPostalCode,
 	isUlid,
+	isUrlWithOptions,
 	type NormalizeEmailOptions,
 	type NormalizeUrlOptions,
 	normalizeEmail,
 	normalizeUrl,
+	SUPPORTED_MOBILE_LOCALES,
 	SUPPORTED_PASSPORTS,
 	SUPPORTED_POSTAL_CODES,
 	toCamelCase,
+	type UrlOptions,
 } from "./formats.js";
 import type { MessagesProviderContract } from "./MessagesProvider.js";
 import { toWildcardPath } from "./MessagesProvider.js";
@@ -315,6 +321,19 @@ let dateOutputTransform: ((value: Date) => unknown) | null = null;
  * passed per call still wins — global is the fallback, not an override.
  */
 let globalMessagesProvider: MessagesProviderContract | null = null;
+
+/** Host lookup seam backing `activeUrl()` — see that rule's note on why. */
+export interface HostResolver {
+	/** Resolve `true` when the hostname resolves (DNS, or whatever you decide). */
+	resolves(hostname: string): Promise<boolean>;
+}
+
+let hostResolver: HostResolver | null = null;
+
+/** Bind (or clear, with `null`) the resolver backing `activeUrl()`. */
+export function bindHostResolver(resolver: HostResolver | null): void {
+	hostResolver = resolver;
+}
 
 /** Bind (or clear) the process-wide messages provider. */
 export function setGlobalMessagesProvider(
@@ -1271,9 +1290,16 @@ export class RuleChain<Output = unknown> {
 	): this {
 		this.#pushRule({
 			name,
-			args: { operand },
+			// A callable operand is resolved per validation, not once at build
+			// time — otherwise `after(() => Date.now())` would freeze the boundary
+			// at the moment the schema was declared (VineJS allows the callback).
+			args: typeof operand === "function" ? undefined : { operand },
 			validate: (v) => {
-				const other = resolveOperand(operand);
+				const other = resolveOperand(
+					typeof operand === "function"
+						? (operand as () => unknown)()
+						: operand,
+				);
 				if (!(v instanceof Date) || other === null) return false;
 				return cmp(v.getTime(), other.getTime());
 			},
@@ -1564,11 +1590,49 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must be a valid URL (TS-only — uses the WHATWG URL parser). */
-	url(): this {
+	url(options?: UrlOptions): this {
 		this.#pushRule({
 			name: "url",
-			validate: (v) => typeof v === "string" && isValidUrl(v),
+			args: options ? { ...options } : undefined,
+			validate: (v) =>
+				typeof v === "string" &&
+				(options ? isUrlWithOptions(v, options) : isValidUrl(v)),
 			message: "Must be a valid URL",
+		});
+		return this;
+	}
+
+	/**
+	 * The host must actually resolve (VineJS `activeUrl`).
+	 *
+	 * The only rule needing the network, which rune cannot do and stay agnostic
+	 * and zero-dependency — so it runs through a resolver bound once at boot,
+	 * exactly like `unique()`. Async by nature: run the schema with
+	 * `validateAsync`. Unbound it THROWS, rather than passing a host nobody
+	 * checked.
+	 */
+	activeUrl(): this {
+		this.#pushAsync({
+			__rune: "asyncRule",
+			async run(value: unknown, field: FieldContext): Promise<void> {
+				if (!hostResolver) {
+					throw new RuneError(
+						"NO_HOST_RESOLVER",
+						"activeUrl() needs a host resolver.",
+						{ hint: "Call bindHostResolver(resolver) once at boot." },
+					);
+				}
+				let host: string;
+				try {
+					host = new URL(String(value)).hostname;
+				} catch {
+					field.report("Must be a valid URL", "activeUrl");
+					return;
+				}
+				if (!(await hostResolver.resolves(host))) {
+					field.report("Must be an active URL", "activeUrl");
+				}
+			},
 		});
 		return this;
 	}
@@ -1645,11 +1709,27 @@ export class RuleChain<Output = unknown> {
 	 * Must be a mobile number in E.164 form. Named deviation from VineJS: rune
 	 * carries no per-locale numbering plans, so there is no `locale` option.
 	 */
-	mobile(): this {
+	mobile(options?: { locale?: string | string[] }): this {
+		const locales = options?.locale ? [options.locale].flat() : null;
+		for (const locale of locales ?? []) {
+			if (isMobileForLocale("", locale) === null) {
+				throw new RuneError(
+					"UNSUPPORTED_LOCALE",
+					`mobile(): no numbering plan for locale '${locale}'.`,
+					{
+						hint: `Supported: ${SUPPORTED_MOBILE_LOCALES.join(", ")}. Omit the locale for E.164, or use .regex().`,
+					},
+				);
+			}
+		}
 		return this.#stringRule(
 			"mobile",
-			isMobile,
+			(v) =>
+				locales
+					? locales.some((locale) => isMobileForLocale(v, locale) === true)
+					: isMobile(v),
 			"Must be a valid mobile number",
+			locales ? { locale: locales } : undefined,
 		);
 	}
 
@@ -1657,22 +1737,46 @@ export class RuleChain<Output = unknown> {
 	 * Must be a postal code for `countryCode`. Throws for a country rune has no
 	 * pattern for, rather than accepting the value unchecked.
 	 */
-	postalCode(options: { countryCode: string }): this {
-		const { countryCode } = options;
-		if (isPostalCode("", countryCode) === null) {
-			throw new RuneError(
-				"UNSUPPORTED_COUNTRY",
-				`postalCode(): no pattern for country '${countryCode}'.`,
-				{
-					hint: `Supported: ${SUPPORTED_POSTAL_CODES.join(", ")}. Use .regex() for others.`,
+	postalCode(
+		options:
+			| { countryCode: string | string[] }
+			| ((field: FieldContext) => string | string[]),
+	): this {
+		// The callback form resolves per validation (VineJS lets the country come
+		// from a sibling field), so its countries cannot be checked up front.
+		if (typeof options === "function") {
+			this.#pushUse({
+				__rune: "rule",
+				run: (value, field) => {
+					if (typeof value !== "string") return;
+					const countries = [options(field)].flat();
+					if (!countries.some((c) => isPostalCode(value, c) === true)) {
+						field.report(
+							`Must be a valid ${countries.join("/")} postal code`,
+							"postalCode",
+						);
+					}
 				},
-			);
+			});
+			return this;
+		}
+		const countries = [options.countryCode].flat();
+		for (const country of countries) {
+			if (isPostalCode("", country) === null) {
+				throw new RuneError(
+					"UNSUPPORTED_COUNTRY",
+					`postalCode(): no pattern for country '${country}'.`,
+					{
+						hint: `Supported: ${SUPPORTED_POSTAL_CODES.join(", ")}. Use .regex() for others.`,
+					},
+				);
+			}
 		}
 		return this.#stringRule(
 			"postalCode",
-			(v) => isPostalCode(v, countryCode) === true,
-			`Must be a valid ${countryCode.toUpperCase()} postal code`,
-			{ countryCode },
+			(v) => countries.some((c) => isPostalCode(v, c) === true),
+			`Must be a valid ${countries.join("/").toUpperCase()} postal code`,
+			{ countryCode: countries },
 		);
 	}
 
@@ -1809,22 +1913,24 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must contain only ASCII letters. */
-	alpha(): this {
+	alpha(options?: AlphaOptions): this {
+		const pattern = alphaPattern("a-zA-Z", options);
 		this.#pushRule({
 			name: "alpha",
-			validate: (v) =>
-				typeof v === "string" && v.length > 0 && /^[a-zA-Z]+$/.test(v),
+			args: options ? { ...options } : undefined,
+			validate: (v) => typeof v === "string" && v.length > 0 && pattern.test(v),
 			message: "Must contain only letters",
 		});
 		return this;
 	}
 
 	/** Must contain only ASCII letters and digits. */
-	alphaNumeric(): this {
+	alphaNumeric(options?: AlphaOptions): this {
+		const pattern = alphaPattern("a-zA-Z0-9", options);
 		this.#pushRule({
 			name: "alphaNumeric",
-			validate: (v) =>
-				typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9]+$/.test(v),
+			args: options ? { ...options } : undefined,
+			validate: (v) => typeof v === "string" && v.length > 0 && pattern.test(v),
 			message: "Must contain only letters and numbers",
 		});
 		return this;

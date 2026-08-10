@@ -76,6 +76,29 @@ pub struct FieldSchema {
 }
 
 /// serde default for [`FieldSchema::bail`] — VineJS bails per field by default.
+/// Character check backing `alpha` / `alphaNumeric`, honouring the VineJS
+/// options. These rules are in STANDARD_RULES, so a schema using them is routed
+/// here — implementing the options only on the TS side would have made them
+/// silently inert whenever the native binary was loadable.
+fn alpha_matches(value: &str, params: &serde_json::Value, numeric: bool) -> bool {
+    let flag = |name: &str| {
+        params
+            .get(name)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    let allow_spaces = flag("allowSpaces");
+    let allow_underscores = flag("allowUnderscores");
+    let allow_dashes = flag("allowDashes");
+    value.chars().all(|c| {
+        c.is_ascii_alphabetic()
+            || (numeric && c.is_ascii_digit())
+            || (allow_spaces && c == ' ')
+            || (allow_underscores && c == '_')
+            || (allow_dashes && c == '-')
+    })
+}
+
 fn default_bail() -> bool {
     true
 }
@@ -368,11 +391,11 @@ fn validate_rule(
             _ => return Some(err(field, "uuid", "Must be a valid UUID")),
         },
         "alpha" => match value.as_str() {
-            Some(s) if !s.is_empty() && ALPHA_RE.is_match(s) => {}
+            Some(s) if !s.is_empty() && alpha_matches(s, params, false) => {}
             _ => return Some(err(field, "alpha", "Must contain only letters")),
         },
         "alphaNumeric" => match value.as_str() {
-            Some(s) if !s.is_empty() && ALPHANUMERIC_RE.is_match(s) => {}
+            Some(s) if !s.is_empty() && alpha_matches(s, params, true) => {}
             _ => return Some(err(field, "alphaNumeric", "Must contain only letters and numbers")),
         },
         "startsWith" => {

@@ -227,3 +227,76 @@ export function isPassport(v: string, countryCode: string): boolean | null {
 	const re = PASSPORTS[countryCode.toUpperCase()];
 	return re === undefined ? null : re.test(v.trim());
 }
+
+/** Options accepted by `alpha()` / `alphaNumeric()` (VineJS spelling). */
+export interface AlphaOptions {
+	allowSpaces?: boolean;
+	allowUnderscores?: boolean;
+	allowDashes?: boolean;
+}
+
+/** Build the character class for `alpha`/`alphaNumeric` from its options. */
+export function alphaPattern(base: string, options: AlphaOptions = {}): RegExp {
+	let extra = "";
+	if (options.allowSpaces) extra += " ";
+	if (options.allowUnderscores) extra += "_";
+	if (options.allowDashes) extra += "\\-";
+	return new RegExp(`^[${base}${extra}]+$`);
+}
+
+/** Options accepted by `url()` — the validator.js names VineJS forwards. */
+export interface UrlOptions {
+	/** Require an explicit scheme. Defaults to `true`, like validator.js. */
+	requireProtocol?: boolean;
+	/** Allowed schemes, without the colon. Defaults to http/https. */
+	protocols?: string[];
+	/** Require a dotted host (rejects `http://localhost`). Defaults to `true`. */
+	requireTld?: boolean;
+	/** Allow `_` in the host. */
+	allowUnderscores?: boolean;
+}
+
+export function isUrlWithOptions(
+	value: string,
+	options: UrlOptions = {},
+): boolean {
+	const requireProtocol = options.requireProtocol !== false;
+	const protocols = options.protocols ?? ["http", "https"];
+	const candidate =
+		requireProtocol || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
+			? value
+			: `https://${value}`;
+	let url: URL;
+	try {
+		url = new URL(candidate);
+	} catch {
+		return false;
+	}
+	if (requireProtocol && !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
+	if (!protocols.includes(url.protocol.replace(/:$/, ""))) return false;
+	if (url.hostname.length === 0) return false;
+	if (!options.allowUnderscores && url.hostname.includes("_")) return false;
+	if (options.requireTld !== false && !url.hostname.includes(".")) return false;
+	return true;
+}
+
+/**
+ * Mobile numbering plans. Named subset of VineJS's `locale` table, same
+ * fail-closed contract as the postal codes: an unknown locale returns `null`.
+ */
+const MOBILE_LOCALES: Record<string, RegExp> = {
+	"fr-CH": /^(?:\+41|0)7[5-9]\d{7}$/,
+	"fr-FR": /^(?:\+33|0)[67]\d{8}$/,
+	"en-US": /^(?:\+1)?[2-9]\d{9}$/,
+	"en-GB": /^(?:\+44|0)7\d{9}$/,
+	"de-DE": /^(?:\+49|0)1[5-7]\d{8,9}$/,
+	"it-IT": /^(?:\+39)?3\d{8,9}$/,
+};
+
+export const SUPPORTED_MOBILE_LOCALES = Object.keys(MOBILE_LOCALES);
+
+export function isMobileForLocale(v: string, locale: string): boolean | null {
+	const re = MOBILE_LOCALES[locale];
+	if (re === undefined) return null;
+	return re.test(v.replace(/[ .-]/g, ""));
+}

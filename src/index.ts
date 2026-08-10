@@ -7,8 +7,10 @@
 export type { DateFormat } from "./date.js";
 export { RuneError, RuneValidationError } from "./errors.js";
 export type {
+	AlphaOptions,
 	NormalizeEmailOptions,
 	NormalizeUrlOptions,
+	UrlOptions,
 } from "./formats.js";
 export type { MessagesProviderContract } from "./MessagesProvider.js";
 export { SimpleMessagesProvider } from "./MessagesProvider.js";
@@ -33,6 +35,7 @@ export type {
 } from "./Schema.js";
 export {
 	bindDatabase,
+	bindHostResolver,
 	bindRosetta,
 	compile,
 	create,

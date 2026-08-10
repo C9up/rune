@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RuneError, rules, schema } from "../../src/index.js";
+import { bindHostResolver, RuneError, rules, schema } from "../../src/index.js";
 
 /** One valid / one invalid per rule — the invalid case is the one that matters. */
 const ok = (chain: () => ReturnType<typeof rules.string>, value: unknown) =>
@@ -122,5 +122,110 @@ describe("rune > format rules (VineJS parity)", () => {
 		const s = schema({ n: rules.number().withoutDecimals() });
 		expect(s.validate({ n: 42 }).valid).toBe(true);
 		expect(s.validate({ n: 4.2 }).valid).toBe(false);
+	});
+});
+
+describe("rune > format rule options (VineJS)", () => {
+	it("alpha / alphaNumeric honour allowSpaces, underscores and dashes", () => {
+		expect(ok(() => rules.string().alpha(), "abc def")).toBe(false);
+		expect(
+			ok(() => rules.string().alpha({ allowSpaces: true }), "abc def"),
+		).toBe(true);
+		expect(
+			ok(() => rules.string().alphaNumeric({ allowUnderscores: true }), "a_1"),
+		).toBe(true);
+		expect(
+			ok(() => rules.string().alphaNumeric({ allowDashes: true }), "a-1"),
+		).toBe(true);
+		// An option must not open the others.
+		expect(
+			ok(() => rules.string().alphaNumeric({ allowDashes: true }), "a_1"),
+		).toBe(false);
+	});
+
+	it("url honours the validator.js-style options", () => {
+		expect(
+			ok(() => rules.string().url({ requireProtocol: false }), "example.com"),
+		).toBe(true);
+		expect(
+			ok(() => rules.string().url({ requireProtocol: true }), "example.com"),
+		).toBe(false);
+		expect(
+			ok(
+				() => rules.string().url({ protocols: ["https"] }),
+				"http://example.com",
+			),
+		).toBe(false);
+		expect(
+			ok(() => rules.string().url({ requireTld: false }), "http://localhost"),
+		).toBe(true);
+		expect(
+			ok(() => rules.string().url({ requireTld: true }), "http://localhost"),
+		).toBe(false);
+	});
+
+	it("mobile accepts a locale and fails closed on an unknown one", () => {
+		expect(
+			ok(() => rules.string().mobile({ locale: "fr-CH" }), "+41791234567"),
+		).toBe(true);
+		// Valid E.164, wrong country for the requested plan.
+		expect(
+			ok(() => rules.string().mobile({ locale: "fr-CH" }), "+33612345678"),
+		).toBe(false);
+		expect(
+			ok(
+				() => rules.string().mobile({ locale: ["fr-CH", "fr-FR"] }),
+				"+33612345678",
+			),
+		).toBe(true);
+		expect(() => rules.string().mobile({ locale: "xx-XX" })).toThrow(RuneError);
+	});
+
+	it("postalCode accepts several countries and a callback", () => {
+		expect(
+			ok(
+				() => rules.string().postalCode({ countryCode: ["CH", "FR"] }),
+				"75001",
+			),
+		).toBe(true);
+		const s = schema({
+			country: rules.string(),
+			zip: rules
+				.string()
+				.postalCode((field) =>
+					Array.isArray(field.parent) ? "CH" : String(field.parent.country),
+				),
+		});
+		expect(s.validate({ country: "CH", zip: "1201" }).valid).toBe(true);
+		expect(s.validate({ country: "CH", zip: "75001" }).valid).toBe(false);
+	});
+});
+
+describe("rune > activeUrl", () => {
+	it("routes through the bound host resolver", async () => {
+		const seen: string[] = [];
+		bindHostResolver({
+			async resolves(host) {
+				seen.push(host);
+				return host === "example.com";
+			},
+		});
+		const s = schema({ site: rules.string().url().activeUrl() });
+		expect((await s.validateAsync({ site: "https://example.com" })).valid).toBe(
+			true,
+		);
+		const bad = await s.validateAsync({ site: "https://nope.invalid" });
+		expect(bad.valid).toBe(false);
+		expect(bad.errors[0]?.rule).toBe("activeUrl");
+		expect(seen).toEqual(["example.com", "nope.invalid"]);
+		bindHostResolver(null);
+	});
+
+	it("throws when no resolver is bound rather than passing an unchecked host", async () => {
+		bindHostResolver(null);
+		const s = schema({ site: rules.string().activeUrl() });
+		await expect(
+			s.validateAsync({ site: "https://example.com" }),
+		).rejects.toBeInstanceOf(RuneError);
 	});
 });

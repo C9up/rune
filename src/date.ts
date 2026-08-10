@@ -69,11 +69,22 @@ export function parseIso(value: string): Date | null {
 /** Token grammar for custom formats — longest tokens first so `YYYY` beats `YY`. */
 const TOKENS: Array<[string, string]> = [
 	["YYYY", "(\\d{4})"],
+	["YY", "(\\d{2})"],
 	["MM", "(\\d{2})"],
+	["M", "(\\d{1,2})"],
 	["DD", "(\\d{2})"],
+	["D", "(\\d{1,2})"],
 	["HH", "(\\d{2})"],
+	["H", "(\\d{1,2})"],
+	["hh", "(\\d{2})"],
+	["h", "(\\d{1,2})"],
 	["mm", "(\\d{2})"],
+	["m", "(\\d{1,2})"],
 	["ss", "(\\d{2})"],
+	["s", "(\\d{1,2})"],
+	["SSS", "(\\d{3})"],
+	["A", "(AM|PM)"],
+	["a", "(am|pm)"],
 ];
 
 /** Parse `value` against a token format such as `DD/MM/YYYY`. */
@@ -82,6 +93,17 @@ export function parseWithFormat(value: string, format: string): Date | null {
 	let pattern = "";
 	let i = 0;
 	while (i < format.length) {
+		// `[…]` escapes a literal run, so `[at] HH:mm` does not read the `a` as a
+		// meridiem token.
+		if (format[i] === "[") {
+			const close = format.indexOf("]", i);
+			if (close === -1) return null;
+			pattern += format
+				.slice(i + 1, close)
+				.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			i = close + 1;
+			continue;
+		}
 		const token = TOKENS.find(([t]) => format.startsWith(t, i));
 		if (token) {
 			order.push(token[0]);
@@ -95,23 +117,48 @@ export function parseWithFormat(value: string, format: string): Date | null {
 	const m = new RegExp(`^${pattern}$`).exec(value.trim());
 	if (!m) return null;
 	const part: Record<string, number> = {};
+	let meridiem: "am" | "pm" | null = null;
 	order.forEach((t, idx) => {
-		part[t] = Number(m[idx + 1]);
+		const raw = m[idx + 1];
+		if (t === "A" || t === "a") {
+			meridiem = raw.toLowerCase() as "am" | "pm";
+			return;
+		}
+		part[t] = Number(raw);
 	});
-	if (
-		part.YYYY === undefined ||
-		part.MM === undefined ||
-		part.DD === undefined
-	) {
+
+	// A two-digit year follows the Day.js pivot: 00-68 → 2000s, 69-99 → 1900s.
+	const year =
+		part.YYYY ??
+		(part.YY === undefined
+			? undefined
+			: part.YY <= 68
+				? 2000 + part.YY
+				: 1900 + part.YY);
+	const month = part.MM ?? part.M;
+	const day = part.DD ?? part.D;
+	if (year === undefined || month === undefined || day === undefined) {
 		return null;
 	}
+
+	let hour = part.HH ?? part.H ?? part.hh ?? part.h ?? 0;
+	if (meridiem !== null) {
+		const twelveHour = part.hh ?? part.h;
+		if (twelveHour === undefined || twelveHour < 1 || twelveHour > 12) {
+			return null;
+		}
+		hour = twelveHour % 12;
+		if (meridiem === "pm") hour += 12;
+	}
+
 	return buildDate(
-		part.YYYY,
-		part.MM,
-		part.DD,
-		part.HH ?? 0,
-		part.mm ?? 0,
-		part.ss ?? 0,
+		year,
+		month,
+		day,
+		hour,
+		part.mm ?? part.m ?? 0,
+		part.ss ?? part.s ?? 0,
+		part.SSS ?? 0,
 	);
 }
 

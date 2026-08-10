@@ -129,3 +129,50 @@ describe("rune > date", () => {
 		expect(s.validateOrThrow({}).at).toBeUndefined();
 	});
 });
+
+describe("rune > date grammar and callable operands", () => {
+	it("parses the Day.js tokens VineJS formats use", () => {
+		const cases: Array<[string, string, [number, number, number]]> = [
+			["D/M/YYYY", "5/6/2026", [2026, 5, 5]],
+			["YY-MM-DD", "26-06-25", [2026, 5, 25]],
+			["YY-MM-DD", "95-06-25", [1995, 5, 25]],
+		];
+		for (const [format, input, [y, m, d]] of cases) {
+			const out = schema({
+				at: rules.date({ formats: [format] }),
+			}).validateOrThrow({ at: input });
+			expect(out.at.getFullYear(), format).toBe(y);
+			expect(out.at.getMonth(), format).toBe(m);
+			expect(out.at.getDate(), format).toBe(d);
+		}
+	});
+
+	it("handles 12-hour clocks with a meridiem", () => {
+		const s = schema({ at: rules.date({ formats: ["YYYY-MM-DD hh:mm A"] }) });
+		expect(s.validateOrThrow({ at: "2026-06-25 01:30 PM" }).at.getHours()).toBe(
+			13,
+		);
+		expect(s.validateOrThrow({ at: "2026-06-25 12:00 AM" }).at.getHours()).toBe(
+			0,
+		);
+		// 13 on a 12-hour clock is not a time.
+		expect(s.validate({ at: "2026-06-25 13:00 PM" }).valid).toBe(false);
+	});
+
+	it("escapes a literal run with [...]", () => {
+		const s = schema({
+			at: rules.date({ formats: ["YYYY-MM-DD [at] HH:mm"] }),
+		});
+		expect(s.validate({ at: "2026-06-25 at 10:30" }).valid).toBe(true);
+		expect(s.validate({ at: "2026-06-25 pm 10:30" }).valid).toBe(false);
+	});
+
+	it("resolves a callable operand at validation time, not at declaration", () => {
+		let boundary = "2026-01-01";
+		const s = schema({ at: rules.date().after(() => boundary) });
+		expect(s.validate({ at: "2026-06-25" }).valid).toBe(true);
+		boundary = "2027-01-01";
+		// The boundary moved, so the same input is now refused.
+		expect(s.validate({ at: "2026-06-25" }).valid).toBe(false);
+	});
+});
