@@ -138,6 +138,12 @@ export function escapeHtml(v: string): string {
 
 /** Options accepted by `normalizeEmail` (subset of VineJS's). */
 export interface NormalizeEmailOptions {
+	/** validator.js spelling — takes precedence over the camelCase alias. */
+	all_lowercase?: boolean;
+	/** validator.js spelling. */
+	gmail_remove_dots?: boolean;
+	/** validator.js spelling. */
+	gmail_remove_subaddress?: boolean;
 	/** Lowercase the whole address. Defaults to `true`, like VineJS. */
 	allLowercase?: boolean;
 	/** Strip dots from a Gmail local part (`a.b@gmail.com` → `ab@gmail.com`). */
@@ -158,11 +164,15 @@ export function normalizeEmail(
 	let domain = value.slice(at + 1);
 	// The domain is case-insensitive per RFC 1035, so it is always lowercased.
 	domain = domain.toLowerCase();
-	if (options.allLowercase !== false) local = local.toLowerCase();
+	const allLowercase = options.all_lowercase ?? options.allLowercase;
+	const removeSubaddress =
+		options.gmail_remove_subaddress ?? options.gmailRemoveSubaddress;
+	const removeDots = options.gmail_remove_dots ?? options.gmailRemoveDots;
+	if (allLowercase !== false) local = local.toLowerCase();
 	if (GMAIL_DOMAINS.has(domain)) {
-		if (options.gmailRemoveSubaddress) local = local.split("+")[0];
-		if (options.gmailRemoveDots) local = local.replace(/\./g, "");
-	} else if (options.gmailRemoveSubaddress) {
+		if (removeSubaddress) local = local.split("+")[0];
+		if (removeDots) local = local.replace(/\./g, "");
+	} else if (removeSubaddress) {
 		local = local.split("+")[0];
 	}
 	return `${local}@${domain}`;
@@ -246,6 +256,12 @@ export function alphaPattern(base: string, options: AlphaOptions = {}): RegExp {
 
 /** Options accepted by `url()` — the validator.js names VineJS forwards. */
 export interface UrlOptions {
+	/** validator.js spelling — takes precedence over the camelCase alias. */
+	require_protocol?: boolean;
+	/** validator.js spelling. */
+	require_tld?: boolean;
+	/** validator.js spelling. */
+	allow_underscores?: boolean;
 	/** Require an explicit scheme. Defaults to `true`, like validator.js. */
 	requireProtocol?: boolean;
 	/** Allowed schemes, without the colon. Defaults to http/https. */
@@ -260,7 +276,11 @@ export function isUrlWithOptions(
 	value: string,
 	options: UrlOptions = {},
 ): boolean {
-	const requireProtocol = options.requireProtocol !== false;
+	// VineJS forwards validator.js options verbatim, so a transcribed Adonis
+	// validator arrives in snake_case. Both spellings are honoured, snake_case
+	// first, so neither form is silently ignored.
+	const requireProtocol =
+		(options.require_protocol ?? options.requireProtocol) !== false;
 	const protocols = options.protocols ?? ["http", "https"];
 	const candidate =
 		requireProtocol || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
@@ -275,8 +295,11 @@ export function isUrlWithOptions(
 	if (requireProtocol && !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
 	if (!protocols.includes(url.protocol.replace(/:$/, ""))) return false;
 	if (url.hostname.length === 0) return false;
-	if (!options.allowUnderscores && url.hostname.includes("_")) return false;
-	if (options.requireTld !== false && !url.hostname.includes(".")) return false;
+	const allowUnderscores =
+		options.allow_underscores ?? options.allowUnderscores ?? false;
+	if (!allowUnderscores && url.hostname.includes("_")) return false;
+	const requireTld = (options.require_tld ?? options.requireTld) !== false;
+	if (requireTld && !url.hostname.includes(".")) return false;
 	return true;
 }
 

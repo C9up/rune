@@ -49,7 +49,7 @@ export {
 } from "./Schema.js";
 
 import type { MessagesProviderContract } from "./MessagesProvider.js";
-import type { RuleChain } from "./Schema.js";
+import type { RuleChain, ValidateOptions } from "./Schema.js";
 import {
 	bindDatabase,
 	bindHostResolver,
@@ -67,6 +67,19 @@ import {
 	setGlobalMessagesProvider,
 	setValidationTranslator,
 } from "./Schema.js";
+
+/**
+ * A validator whose entry points REQUIRE `{ meta }`.
+ *
+ * VineJS refuses `validate(data)` once `withMetaData<T>()` declared metadata as
+ * required; keeping `meta` optional meant the guard existed at runtime but the
+ * compiler still waved the missing-metadata call through.
+ */
+type WithRequiredMeta<V, M> = {
+	[K in keyof V]: V[K] extends (data: infer D, options?: infer O) => infer R
+		? (data: D, options: Omit<O & object, "meta"> & { meta: M }) => R
+		: V[K];
+};
 
 /**
  * Default export, mirroring `import vine from '@vinejs/vine'`.
@@ -100,29 +113,51 @@ const rune = {
 	get convertEmptyStringsToNull(): boolean {
 		return getConvertEmptyStringsToNull();
 	},
+	/**
+	 * Predicate helpers VineJS exposes as `vine.helpers`, for writing custom
+	 * rules without reimplementing the same three checks each time.
+	 */
+	helpers: {
+		/** `true` for `true`, `1`, `"1"`, `"true"`, `"on"`, `"yes"`. */
+		isTrue: (value: unknown): boolean =>
+			value === true ||
+			value === 1 ||
+			(typeof value === "string" &&
+				["1", "true", "on", "yes"].includes(value.toLowerCase())),
+		/** `true` for `false`, `0`, `"0"`, `"false"`, `"off"`, `"no"`. */
+		isFalse: (value: unknown): boolean =>
+			value === false ||
+			value === 0 ||
+			(typeof value === "string" &&
+				["0", "false", "off", "no"].includes(value.toLowerCase())),
+		/** Neither `undefined` nor `null` (an empty string IS defined). */
+		exists: (value: unknown): boolean => value !== undefined && value !== null,
+		/** `undefined` or `null`. */
+		isMissing: (value: unknown): boolean =>
+			value === undefined || value === null,
+		/** A plain object, not an array and not `null`. */
+		isObject: (value: unknown): value is Record<string, unknown> =>
+			typeof value === "object" && value !== null && !Array.isArray(value),
+		/** An array. */
+		isArray: Array.isArray,
+	},
 	/** One-shot validation, VineJS `vine.validate({ schema, data })`. */
-	validate<T extends Record<string, RuleChain>>(options: {
-		schema: T | RuleChain;
-		data: unknown;
-		meta?: Record<string, unknown>;
-		messagesProvider?: MessagesProviderContract;
-	}) {
-		return create(options.schema as T).validate(options.data, {
-			meta: options.meta,
-			messagesProvider: options.messagesProvider,
-		});
+	validate<T extends Record<string, RuleChain>>(
+		options: { schema: T | RuleChain; data: unknown } & ValidateOptions,
+	) {
+		// Spread the whole ValidateOptions rather than re-listing its keys: the
+		// hand-listed version silently dropped `errorReporter` when it was added.
+		const { schema: fields, data, ...validateOptions } = options;
+		return create(fields as T).validate(data, validateOptions);
 	},
 	/** One-shot non-throwing validation, VineJS `vine.tryValidate`. */
-	tryValidate<T extends Record<string, RuleChain>>(options: {
-		schema: T | RuleChain;
-		data: unknown;
-		meta?: Record<string, unknown>;
-		messagesProvider?: MessagesProviderContract;
-	}) {
-		return create(options.schema as T).tryValidate(options.data, {
-			meta: options.meta,
-			messagesProvider: options.messagesProvider,
-		});
+	tryValidate<T extends Record<string, RuleChain>>(
+		options: { schema: T | RuleChain; data: unknown } & ValidateOptions,
+	) {
+		// Spread the whole ValidateOptions rather than re-listing its keys: the
+		// hand-listed version silently dropped `errorReporter` when it was added.
+		const { schema: fields, data, ...validateOptions } = options;
+		return create(fields as T).tryValidate(data, validateOptions);
 	},
 	/**
 	 * Type the `meta` passed to `validate(data, { meta })` (VineJS
@@ -133,12 +168,14 @@ const rune = {
 	): {
 		create<T extends Record<string, RuleChain>>(
 			fields: T,
-		): ReturnType<typeof create<T>>;
+		): WithRequiredMeta<ReturnType<typeof create<T>>, M>;
 	} {
 		return {
 			create<T extends Record<string, RuleChain>>(fields: T) {
 				const validator = create(fields);
-				if (!validateMeta) return validator;
+				if (!validateMeta) {
+					return validator as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
+				}
 				// The callback runs BEFORE the payload: meta that is wrong makes
 				// every rule reading it meaningless, so failing early is the only
 				// honest outcome.
@@ -160,7 +197,7 @@ const rune = {
 					validateOrThrowAsync: guard(validator.validateOrThrowAsync),
 					tryValidate: guard(validator.tryValidate),
 					tryValidateSync: guard(validator.tryValidateSync),
-				} as ReturnType<typeof create<T>>;
+				} as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
 			},
 		};
 	},

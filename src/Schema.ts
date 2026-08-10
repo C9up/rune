@@ -273,6 +273,22 @@ export interface ValidateOptions {
 
 export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
+	/** Alias of {@link fields} — VineJS names it `schema` on the validator. */
+	schema: Record<string, RuleChain>;
+	/**
+	 * Standard Schema v1 contract, so a consumer can validate through the
+	 * vendor-neutral protocol instead of rune's own API.
+	 */
+	"~standard": {
+		version: 1;
+		vendor: string;
+		validate(
+			value: unknown,
+		): Promise<
+			| { value: T }
+			| { issues: ReadonlyArray<{ message: string; path: string[] }> }
+		>;
+	};
 	/** Field-by-field introspection of the compiled schema (VineJS `toJSON`). */
 	toJSON(): Record<string, { rules: string[]; optional: boolean }>;
 	/**
@@ -520,6 +536,8 @@ export interface DateCompareOptions {
  */
 export interface FileLike {
 	size: number;
+	/** MIME type as REPORTED by the upload — rune never sniffs bytes. */
+	type?: string;
 	extname?: string | null;
 	clientName?: string;
 	name?: string;
@@ -1065,8 +1083,36 @@ export function schema(
 		);
 	}
 
+	/**
+	 * Standard Schema v1 (`~standard`), the vendor-neutral contract VineJS also
+	 * implements — lets a consumer validate without knowing it holds a rune
+	 * schema.
+	 */
+	const standard = {
+		version: 1 as const,
+		vendor: "rune",
+		validate: (
+			value: unknown,
+		): Promise<
+			| { value: Record<string, unknown> }
+			| { issues: ReadonlyArray<{ message: string; path: string[] }> }
+		> =>
+			validateResultAsync(value).then((result) =>
+				result.valid
+					? { value: result.data }
+					: {
+							issues: result.errors.map((error) => ({
+								message: error.message,
+								path: error.field.split("."),
+							})),
+						},
+			),
+	};
+
 	return {
 		fields,
+		schema: fields,
+		"~standard": standard,
 		toJSON,
 		validate,
 		validateResult,
@@ -1595,7 +1641,16 @@ export class RuleChain<Output = unknown> {
 
 	/** The nested shape declared by `object()`, if any (VineJS `getProperties`). */
 	getProperties(): Record<string, RuleChain> | null {
-		return this.#nestedSchema ? { ...this.#nestedSchema } : null;
+		// CLONE each chain, not just the map. A shallow copy shares the chain
+		// instances, so mutating one through the copy relaxes the source schema —
+		// the same trap that made `partial()` mutate its origin.
+		if (!this.#nestedSchema) return null;
+		return Object.fromEntries(
+			Object.entries(this.#nestedSchema).map(([key, chain]) => [
+				key,
+				chain.clone(),
+			]),
+		);
 	}
 
 	/** Independent copy of this chain (VineJS `clone`). */
@@ -1622,7 +1677,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Make every property of an object shape optional (VineJS `partial`). */
-	partial(): RuleChain<Output> {
+	partial(keys?: readonly string[]): RuleChain<Output> {
 		// `optional()` mutates and returns the SAME chain, so calling it on the
 		// stored properties made the source shape optional too — `base.partial()`
 		// silently relaxed `base`. Clone each property first, like VineJS does.
@@ -1630,7 +1685,9 @@ export class RuleChain<Output = unknown> {
 			Object.fromEntries(
 				Object.entries(shape).map(([key, chain]) => [
 					key,
-					chain.clone().optional(),
+					keys === undefined || keys.includes(key)
+						? chain.clone().optional()
+						: chain,
 				]),
 			),
 		);
@@ -1761,6 +1818,45 @@ export class RuleChain<Output = unknown> {
 					const ext = fileExtension(v);
 					if (ext === null) return false;
 					if (!options.extnames.map((e) => e.toLowerCase()).includes(ext)) {
+						return false;
+					}
+				}
+				return true;
+			},
+			message: "Must be a valid file",
+		});
+		return this.#retype<FileLike>();
+	}
+
+	/**
+	 * Uploaded file with VineJS `nativeFile` options — `minSize`, `maxSize`,
+	 * `mimeTypes`. Same structural contract as {@link file}: rune never reads
+	 * bytes, so the MIME type is the one the upload REPORTS.
+	 */
+	nativeFile(options?: {
+		minSize?: number | string;
+		maxSize?: number | string;
+		mimeTypes?: readonly string[];
+	}): RuleChain<FileLike> {
+		const min =
+			options?.minSize === undefined
+				? undefined
+				: parseByteSize(options.minSize);
+		const max =
+			options?.maxSize === undefined
+				? undefined
+				: parseByteSize(options.maxSize);
+		this.#pushRule({
+			name: "nativeFile",
+			args: options ? { ...options } : undefined,
+			validate: (v) => {
+				if (!isFileLike(v)) return false;
+				if (min !== undefined && v.size < min) return false;
+				if (max !== undefined && v.size > max) return false;
+				if (options?.mimeTypes) {
+					const type = typeof v.type === "string" ? v.type.toLowerCase() : null;
+					if (type === null) return false;
+					if (!options.mimeTypes.map((m) => m.toLowerCase()).includes(type)) {
 						return false;
 					}
 				}
@@ -3267,6 +3363,11 @@ export const rules = {
 		size?: number | string;
 		extnames?: readonly string[];
 	}): RuleChain<FileLike> => new RuleChain().file(options),
+	nativeFile: (options?: {
+		minSize?: number | string;
+		maxSize?: number | string;
+		mimeTypes?: readonly string[];
+	}): RuleChain<FileLike> => new RuleChain().nativeFile(options),
 	record: <Item extends RuleChain>(
 		valueChain: Item,
 	): RuleChain<Record<string, OutputOf<Item>>> =>
@@ -3286,8 +3387,40 @@ export const rules = {
 	 * Union discriminated by the value's TYPE (VineJS `unionOfTypes`): the first
 	 * branch whose own type rule accepts the value wins.
 	 */
-	unionOfTypes: (chains: readonly RuleChain[]): RuleChain =>
-		new RuleChain().union(chains),
+	unionOfTypes: (chains: readonly RuleChain[]): RuleChain => {
+		// VineJS requires DISTINCT types: two branches claiming the same type make
+		// the discrimination meaningless, and the second would be dead code.
+		const seen = new Set<string>();
+		for (const chain of chains) {
+			const typeRule = chain.rules.find((rule) =>
+				TYPE_RULE_NAMES.has(rule.name),
+			);
+			const name = typeRule?.name;
+			if (name === undefined) {
+				throw new RuneError(
+					"NO_TYPE_RULE",
+					"unionOfTypes() needs every branch to declare a type (string/number/…).",
+					{ hint: "Use union([...]) for predicate-based branches." },
+				);
+			}
+			if (seen.has(name)) {
+				throw new RuneError(
+					"DUPLICATE_UNION_TYPE",
+					`unionOfTypes() got two '${name}' branches — the second can never be reached.`,
+					{ hint: "Give each branch a distinct type, or use union([...])." },
+				);
+			}
+			seen.add(name);
+		}
+		return new RuleChain().union(
+			chains.map((chain) => {
+				const typeRule = chain.rules.find((rule) =>
+					TYPE_RULE_NAMES.has(rule.name),
+				);
+				return unionIf((value) => typeRule?.validate(value) === true, chain);
+			}),
+		);
+	},
 	object: <Sh extends Record<string, RuleChain>>(
 		shape: Sh,
 	): RuleChain<Infer<Sh>> => new RuleChain().object(shape),

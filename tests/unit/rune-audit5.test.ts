@@ -145,3 +145,93 @@ describe("rune > audit 5", () => {
 		expect(typeof rune.union.otherwise).toBe("function");
 	});
 });
+
+describe("rune > audit 6", () => {
+	it("the one-shot helpers relay every ValidateOptions key", () => {
+		const seen: string[] = [];
+		rune.tryValidate({
+			schema: { a: rune.string() },
+			data: { a: 1 },
+			errorReporter: (e) => seen.push(e.rule),
+		});
+		// The hand-listed forwarding dropped errorReporter when it was added.
+		expect(seen).toEqual(["string"]);
+	});
+
+	it("getProperties() hands back clones, not the live chains", () => {
+		const base = rules.any().object({ id: rules.number() });
+		const props = base.getProperties();
+		props?.id.optional();
+		// Mutating the copy must not relax the source.
+		expect(schema({ u: base }).validateResult({ u: {} }).valid).toBe(false);
+	});
+
+	it("partial() can target a subset of keys", () => {
+		const base = rules.any().object({ a: rules.string(), b: rules.string() });
+		const v = schema({ u: base.partial(["a"]) });
+		expect(v.validateResult({ u: { b: "x" } }).valid).toBe(true);
+		expect(v.validateResult({ u: { a: "x" } }).valid).toBe(false);
+	});
+
+	it("unionOfTypes discriminates by type and refuses ambiguity", () => {
+		const v = schema({
+			id: rune.unionOfTypes([rules.number().positive(), rules.string().uuid()]),
+		});
+		expect(v.validateResult({ id: 7 }).valid).toBe(true);
+		expect(v.validateResult({ id: -1 }).errors[0]?.rule).toBe("positive");
+		// Two branches of the same type: the second could never be reached.
+		expect(() =>
+			rune.unionOfTypes([rules.string().email(), rules.string().uuid()]),
+		).toThrow(RuneError);
+		expect(() => rune.unionOfTypes([rules.any()])).toThrow(RuneError);
+	});
+
+	it("url and normalizeEmail accept the validator.js snake_case options", () => {
+		expect(
+			schema({
+				u: rules.string().url({ require_protocol: false }),
+			}).validateResult({ u: "example.com" }).valid,
+		).toBe(true);
+		expect(
+			schema({
+				e: rules.string().normalizeEmail({ gmail_remove_dots: true }),
+			}).validateOrThrow({ e: "a.d.a@gmail.com" }).e,
+		).toBe("ada@gmail.com");
+	});
+
+	it("nativeFile enforces minSize / maxSize / mimeTypes", () => {
+		const s = schema({
+			doc: rules.nativeFile({
+				minSize: "1kb",
+				maxSize: "1mb",
+				mimeTypes: ["application/pdf"],
+			}),
+		});
+		expect(
+			s.validateResult({ doc: { size: 5000, type: "application/pdf" } }).valid,
+		).toBe(true);
+		expect(
+			s.validateResult({ doc: { size: 100, type: "application/pdf" } }).valid,
+		).toBe(false);
+		expect(
+			s.validateResult({ doc: { size: 5000, type: "image/png" } }).valid,
+		).toBe(false);
+	});
+
+	it("exposes the Standard Schema contract", async () => {
+		const v = schema({ a: rules.string() });
+		expect(v["~standard"].version).toBe(1);
+		await expect(v["~standard"].validate({ a: "x" })).resolves.toEqual({
+			value: { a: "x" },
+		});
+		const bad = await v["~standard"].validate({ a: 1 });
+		expect("issues" in bad && bad.issues[0]?.path).toEqual(["a"]);
+	});
+
+	it("exposes vine.helpers", () => {
+		expect(rune.helpers.isTrue("on")).toBe(true);
+		expect(rune.helpers.isFalse("off")).toBe(true);
+		expect(rune.helpers.exists("")).toBe(true);
+		expect(rune.helpers.isMissing(null)).toBe(true);
+	});
+});

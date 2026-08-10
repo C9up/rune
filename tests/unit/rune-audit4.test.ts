@@ -81,8 +81,17 @@ describe("rune > audit 4", () => {
 		expect(
 			v.validateResult({ name: "Ada" }, { meta: { tenantId: 3 } }).valid,
 		).toBe(true);
-		// Bad meta fails loudly rather than validating against nonsense.
+		// Omitting metadata must be refused by the COMPILER (VineJS parity) — the
+		// expect-error fails the build if that stops being true — and still guarded
+		// at runtime for a JS caller.
+		// @ts-expect-error withMetaData<T>() makes `meta` required
 		expect(() => v.validateResult({ name: "Ada" })).toThrow(TypeError);
+		// Wrong meta shape is a runtime failure too, loud rather than silent — a JS
+		// caller gets no help from the compiler.
+		expect(() =>
+			// @ts-expect-error tenantId must be a number
+			v.validateResult({ name: "Ada" }, { meta: { tenantId: "3" } }),
+		).toThrow(TypeError);
 	});
 
 	it("createRule({ isAsync: true }) builds an awaited rule usable via .use()", async () => {
