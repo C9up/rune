@@ -207,7 +207,10 @@ describe("rune > audit 6", () => {
 		).toBe("ada@gmail.com");
 	});
 
-	it("nativeFile enforces minSize / maxSize / mimeTypes", () => {
+	it("nativeFile enforces minSize / maxSize / mimeTypes", async () => {
+		// Declaring mimeTypes turns the content check on, so the payload carries
+		// real bytes and the schema runs async.
+		const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
 		const s = schema({
 			doc: rules.nativeFile({
 				minSize: "1kb",
@@ -216,14 +219,29 @@ describe("rune > audit 6", () => {
 			}),
 		});
 		expect(
-			s.validateResult({ doc: { size: 5000, type: "application/pdf" } }).valid,
+			(
+				await s.validateResultAsync({
+					doc: { size: 5000, type: "application/pdf", buffer: PDF },
+				})
+			).valid,
 		).toBe(true);
+		// Dans la forme à options, min/max/mimeTypes sont vérifiés PAR la règle
+		// nativeFile : c'est elle qui rapporte. La forme fluide, elle, nomme la
+		// contrainte fautive — voir le test suivant.
 		expect(
-			s.validateResult({ doc: { size: 100, type: "application/pdf" } }).valid,
-		).toBe(false);
+			(
+				await s.validateResultAsync({
+					doc: { size: 100, type: "application/pdf", buffer: PDF },
+				})
+			).errors[0]?.rule,
+		).toBe("nativeFile");
 		expect(
-			s.validateResult({ doc: { size: 5000, type: "image/png" } }).valid,
-		).toBe(false);
+			(
+				await s.validateResultAsync({
+					doc: { size: 5000, type: "image/png", buffer: PDF },
+				})
+			).errors[0]?.rule,
+		).toBe("nativeFile");
 	});
 
 	it("exposes the Standard Schema contract", async () => {
@@ -469,7 +487,10 @@ describe("rune > audit 7 — object composition, introspection, JSON Schema", ()
 });
 
 describe("rune > nativeFile fluent API (VineJS)", () => {
-	it("chains minSize / maxSize / mimeTypes", () => {
+	it("chains minSize / maxSize / mimeTypes", async () => {
+		// mimeTypes() turns the content check on, so the payload carries real bytes
+		// and the schema runs async. The fluent form names the failing constraint.
+		const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
 		const s = schema({
 			doc: rules
 				.nativeFile()
@@ -477,19 +498,21 @@ describe("rune > nativeFile fluent API (VineJS)", () => {
 				.maxSize("1mb")
 				.mimeTypes(["application/pdf"]),
 		});
+		const run = (doc: Record<string, unknown>) =>
+			s.validateResultAsync({ doc });
 		expect(
-			s.validateResult({ doc: { size: 5000, type: "application/pdf" } }).valid,
+			(await run({ size: 5000, type: "application/pdf", buffer: PDF })).valid,
 		).toBe(true);
 		expect(
-			s.validateResult({ doc: { size: 100, type: "application/pdf" } })
-				.errors[0]?.rule,
+			(await run({ size: 100, type: "application/pdf", buffer: PDF })).errors[0]
+				?.rule,
 		).toBe("minSize");
 		expect(
-			s.validateResult({ doc: { size: 5_000_000, type: "application/pdf" } })
+			(await run({ size: 5_000_000, type: "application/pdf", buffer: PDF }))
 				.errors[0]?.rule,
 		).toBe("maxSize");
 		expect(
-			s.validateResult({ doc: { size: 5000, type: "image/png" } }).errors[0]
+			(await run({ size: 5000, type: "image/png", buffer: PDF })).errors[0]
 				?.rule,
 		).toBe("mimeTypes");
 	});
@@ -783,6 +806,78 @@ describe("rune > audit 9 — contrat du reporter, types optional/null, JSON Sche
 				},
 				kind: { const: "card" },
 				n: { type: "integer" },
+			},
+		});
+	});
+});
+
+describe("rune > audit 10 — confirmed(as), ~standard.jsonSchema, vat, meta", () => {
+	it("confirmed({ as }) reporte sur le champ de CONFIRMATION", () => {
+		const v = schema({
+			password: rules.string().confirmed({ as: "passwordConfirm" }),
+			passwordConfirm: rules.string(),
+		});
+		const res = v.validateResult({ password: "a", passwordConfirm: "b" });
+		expect(res.valid).toBe(false);
+		// VineJS reporte là où l'utilisateur doit corriger.
+		expect(res.errors[0]?.field).toBe("passwordConfirm");
+		expect(res.errors[0]?.rule).toBe("confirmed");
+		// L'alias déprécié marche toujours.
+		expect(
+			schema({
+				pwd: rules.string().confirmed({ confirmationField: "pwd2" }),
+				pwd2: rules.string(),
+			}).validateResult({ pwd: "a", pwd2: "a" }).valid,
+		).toBe(true);
+	});
+
+	it("~standard.jsonSchema.input()/output()", () => {
+		const v = schema({ a: rules.string().minLength(2) });
+		expect(v["~standard"].jsonSchema.input()).toMatchObject({
+			properties: { a: { type: "string", minLength: 2 } },
+		});
+		expect(v["~standard"].jsonSchema.output()).toMatchObject({
+			type: "object",
+		});
+	});
+
+	it("vat() valide format ET checksum, et lève sur un pays inconnu", () => {
+		const be = schema({ n: rules.string().vat({ countryCode: "BE" }) });
+		// Clé mod-97 juste (97 - (8 premiers mod 97) == 2 derniers).
+		expect(be.validateResult({ n: "BE0428759497" }).valid).toBe(true);
+		// Même format, clé faussée.
+		expect(be.validateResult({ n: "BE0428759498" }).valid).toBe(false);
+
+		const ch = schema({ n: rules.string().vat({ countryCode: "CH" }) });
+		expect(ch.validateResult({ n: "CHE105805187" }).valid).toBe(true);
+		expect(ch.validateResult({ n: "CHE105805188" }).valid).toBe(false);
+
+		// Plusieurs pays acceptés.
+		expect(
+			schema({
+				n: rules.string().vat({ countryCode: ["FR", "BE"] }),
+			}).validateResult({ n: "BE0428759497" }).valid,
+		).toBe(true);
+
+		expect(() => rules.string().vat({ countryCode: "ZZ" })).toThrow(RuneError);
+	});
+
+	it("meta() et objets fermés dans le JSON Schema", () => {
+		const v = schema({
+			u: rules
+				.any()
+				.object({ id: rules.number() })
+				.meta({ title: "User", description: "Un utilisateur" }),
+			open: rules.any().object({ id: rules.number() }).allowUnknownProperties(),
+		});
+		expect(v.toJSONSchema()).toMatchObject({
+			properties: {
+				u: {
+					title: "User",
+					description: "Un utilisateur",
+					additionalProperties: false,
+				},
+				open: { additionalProperties: true },
 			},
 		});
 	});

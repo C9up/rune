@@ -32,6 +32,7 @@ import {
 	isPostalCode,
 	isUlid,
 	isUrlWithOptions,
+	isVat,
 	type NormalizeEmailOptions,
 	type NormalizeUrlOptions,
 	normalizeEmail,
@@ -39,8 +40,10 @@ import {
 	SUPPORTED_MOBILE_LOCALES,
 	SUPPORTED_PASSPORTS,
 	SUPPORTED_POSTAL_CODES,
+	SUPPORTED_VAT_COUNTRIES,
 	toCamelCase,
 	type UrlOptions,
+	type VatOptions,
 } from "./formats.js";
 import type { MessagesProviderContract } from "./MessagesProvider.js";
 import { toWildcardPath } from "./MessagesProvider.js";
@@ -420,6 +423,11 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	"~standard": {
 		version: 1;
 		vendor: string;
+		/** Standard JSON Schema v1 props (VineJS 4.3+). */
+		jsonSchema: {
+			input(): Record<string, unknown>;
+			output(): Record<string, unknown>;
+		};
 		validate(
 			value: unknown,
 		): Promise<
@@ -892,6 +900,16 @@ function chainToJSONSchema(
 			if (rule.name === "nonNegative") node.minimum = 0;
 			if (rule.name === "nonPositive") node.maximum = 0;
 			if (rule.name === "nullType") node.type = "null";
+			if (rule.name === "ulid") node.pattern = "^[0-7][0-9A-HJKMNP-TV-Z]{25}$";
+			if (rule.name === "alpha") node.pattern = "^[a-zA-Z]+$";
+			if (rule.name === "alphaNumeric") node.pattern = "^[a-zA-Z0-9]+$";
+			if (rule.name === "hexCode") node.format = "color";
+			if (rule.name === "ipAddress")
+				node.format = args.version === 6 ? "ipv6" : "ipv4";
+			if (rule.name === "file" || rule.name === "nativeFile") {
+				node.type = "string";
+				node.contentEncoding = "binary";
+			}
 			// A declarative rule may carry its own modifier too.
 			if (typeof rule.toJSONSchema === "function") {
 				Object.assign(node, rule.toJSONSchema(node, rule.args));
@@ -909,7 +927,14 @@ function chainToJSONSchema(
 			node.type = [node.type, "null"];
 		}
 		const nested = chain.getProperties();
-		if (nested) Object.assign(modified, chainToJSONSchema(nested));
+		if (nested) {
+			Object.assign(modified, chainToJSONSchema(nested));
+			// A rune object DROPS undeclared keys unless allowUnknownProperties(),
+			// so the emitted schema must say so — otherwise a consumer generating a
+			// form from it would offer fields the validator silently discards.
+			modified.additionalProperties = chain.allowsUnknown;
+		}
+		if (chain.metadata) Object.assign(modified, chain.metadata);
 
 		// Containers: describe what they hold, not just that they are containers.
 		const itemChain = chain.arrayItem;
@@ -1591,6 +1616,14 @@ export function schema(
 	const standard = {
 		version: 1 as const,
 		vendor: "rune",
+		/**
+		 * Standard JSON Schema v1 (`~standard.jsonSchema`), added by VineJS 4.3.
+		 * `input` describes what may be sent, `output` what validation returns.
+		 */
+		jsonSchema: {
+			input: (): Record<string, unknown> => toJSONSchema(),
+			output: (): Record<string, unknown> => toJSONSchema(),
+		},
 		validate: (
 			value: unknown,
 		): Promise<
@@ -1760,9 +1793,14 @@ export class RuleChain<Output = unknown> {
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
 	#allowUnknown = false;
+	#metadata: Record<string, unknown> | null = null;
 	/** Extensions / MIME types declared by `file()` / `mimeTypes()`. */
 	#declaredExtnames: readonly string[] | null = null;
 	#declaredMimeTypes: readonly string[] | null = null;
+	/** `true` once the content-verification rule has been registered. */
+	#contentVerified = false;
+	/** Set by `{ verifyContent: false }` — an explicit, auditable opt-out. */
+	#contentVerificationOff = false;
 	#camelCaseKeys = false;
 	#groups: ConditionalGroup[] = [];
 	#recordValueChain: RuleChain | null = null;
@@ -1828,6 +1866,14 @@ export class RuleChain<Output = unknown> {
 		}
 		return false;
 	}
+	/** Does this object keep keys its shape does not declare? */
+	get allowsUnknown(): boolean {
+		return this.#allowUnknown;
+	}
+	/** Free-form JSON Schema metadata attached with `meta()`. */
+	get metadata(): Record<string, unknown> | null {
+		return this.#metadata;
+	}
 	/** The item chain of an `array()`, if declared. */
 	get arrayItem(): RuleChain | null {
 		return this.#arrayItemChain;
@@ -1871,8 +1917,11 @@ export class RuleChain<Output = unknown> {
 		next.#dateFormats = this.#dateFormats;
 		next.#coercions = [...this.#coercions];
 		next.#allowUnknown = this.#allowUnknown;
+		next.#metadata = this.#metadata ? { ...this.#metadata } : null;
 		next.#declaredExtnames = this.#declaredExtnames;
 		next.#declaredMimeTypes = this.#declaredMimeTypes;
+		next.#contentVerified = this.#contentVerified;
+		next.#contentVerificationOff = this.#contentVerificationOff;
 		next.#camelCaseKeys = this.#camelCaseKeys;
 		next.#groups = [...this.#groups];
 		next.#recordValueChain = this.#recordValueChain;
@@ -2388,6 +2437,13 @@ export class RuleChain<Output = unknown> {
 	file(options?: {
 		size?: number | string;
 		extnames?: readonly string[];
+		/**
+		 * Skip the magic-number check. Default `true` — Adonis derives `extname`
+		 * from the real bytes before validation, so trusting the declaration is
+		 * NOT the safe default: a `.exe` renamed `.png` satisfies every
+		 * declarative check, since all of them come from the uploader.
+		 */
+		verifyContent?: boolean;
 	}): RuleChain<FileLike> {
 		// Adonis documents `size: '2mb'`; a numeric-only option meant a
 		// transcribed validator either failed the typecheck or, in JS, silently
@@ -2395,6 +2451,7 @@ export class RuleChain<Output = unknown> {
 		const maxBytes =
 			options?.size === undefined ? undefined : parseByteSize(options.size);
 		if (options?.extnames) this.#declaredExtnames = options.extnames;
+		if (options?.verifyContent === false) this.#contentVerificationOff = true;
 		this.#pushRule({
 			name: "file",
 			args: options ? { ...options } : undefined,
@@ -2412,6 +2469,10 @@ export class RuleChain<Output = unknown> {
 			},
 			message: "Must be a valid file",
 		});
+		// Declaring an allowed extension list is a SECURITY statement, so the
+		// bytes are checked by default. `{ verifyContent: false }` opts out
+		// explicitly and leaves a trace in the schema.
+		if (options?.extnames) this.#ensureContentVerification();
 		return this.#retype<FileLike>();
 	}
 
@@ -2451,6 +2512,9 @@ export class RuleChain<Output = unknown> {
 			},
 			message: "Must be a valid file",
 		});
+		// Declaring allowed MIME types is a SECURITY statement, so the bytes are
+		// checked by default.
+		if (options?.mimeTypes) this.#ensureContentVerification();
 		return this.#retype<FileLike>();
 	}
 
@@ -2485,6 +2549,7 @@ export class RuleChain<Output = unknown> {
 	mimeTypes(types: readonly string[]): this {
 		const allowed = types.map((t) => t.toLowerCase());
 		this.#declaredMimeTypes = allowed;
+		this.#ensureContentVerification();
 		this.#pushRule({
 			name: "mimeTypes",
 			args: { types: allowed },
@@ -2511,6 +2576,19 @@ export class RuleChain<Output = unknown> {
 	 * run must never look like one that passed.
 	 */
 	verifyContent(): this {
+		this.#contentVerificationOff = false;
+		return this.#ensureContentVerification();
+	}
+
+	/** Register the content check once, honouring an explicit opt-out. */
+	#ensureContentVerification(): this {
+		if (this.#contentVerified || this.#contentVerificationOff) return this;
+		this.#contentVerified = true;
+		return this.#registerContentVerification();
+	}
+
+	/** The async rule itself — reads the bytes and confronts the declaration. */
+	#registerContentVerification(): this {
 		const extnames = this.#declaredExtnames;
 		const mimeTypes = this.#declaredMimeTypes;
 		this.#pushAsync({
@@ -2883,6 +2961,52 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
+	/**
+	 * Must be a valid VAT number (VineJS 4.2 `vat`). Accepts a country list or a
+	 * callback resolving it per payload.
+	 *
+	 * Checksums are run where the country defines a short, well-defined one
+	 * (BE, DE, NL, IT, PT, LU, CH); the others are FORMAT-only, which is stated
+	 * rather than implied. An unknown country LEVES rather than accepting the
+	 * value unchecked.
+	 */
+	vat(options: VatOptions | ((field: FieldContext) => VatOptions)): this {
+		if (typeof options === "function") {
+			this.#pushUse({
+				__rune: "rule",
+				run: (value, field) => {
+					if (typeof value !== "string") return;
+					const countries = [options(field).countryCode].flat();
+					if (!countries.some((c) => isVat(value, c) === true)) {
+						field.report(
+							`Must be a valid ${countries.join("/")} VAT number`,
+							"vat",
+						);
+					}
+				},
+			});
+			return this;
+		}
+		const countries = [options.countryCode].flat();
+		for (const country of countries) {
+			if (isVat("", country) === null) {
+				throw new RuneError(
+					"UNSUPPORTED_COUNTRY",
+					`vat(): no rule for country '${country}'.`,
+					{
+						hint: `Supported: ${SUPPORTED_VAT_COUNTRIES.join(", ")}. Use .regex() for others.`,
+					},
+				);
+			}
+		}
+		return this.#stringRule(
+			"vat",
+			(v) => countries.some((c) => isVat(v, c) === true),
+			`Must be a valid ${countries.join("/").toUpperCase()} VAT number`,
+			{ countryCode: countries },
+		);
+	}
+
 	/** Must differ from a sibling field (VineJS `notSameAs`). */
 	notSameAs(otherField: string): this {
 		const formats = this.#dateFormats;
@@ -3235,14 +3359,24 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must equal its `<field>_confirmation` sibling (VineJS `confirmed`). */
-	confirmed(options?: { confirmationField?: string }): this {
+	confirmed(options?: { as?: string; confirmationField?: string }): this {
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
 				const leaf = field.field.split(".").pop() ?? field.field;
-				const other = options?.confirmationField ?? `${leaf}_confirmation`;
+				// `as` is the current VineJS spelling; `confirmationField` is its
+				// deprecated alias, kept so existing callers keep working.
+				const other =
+					options?.as ?? options?.confirmationField ?? `${leaf}_confirmation`;
 				if (value !== readSibling(field, other)) {
-					field.report("Confirmation does not match", "confirmed");
+					// VineJS reports on the CONFIRMATION field: that is the input the
+					// user has to fix, and where a form renders the message.
+					const prefix = field.field.slice(0, -leaf.length);
+					field.report(
+						"Confirmation does not match",
+						"confirmed",
+						`${prefix}${other}`,
+					);
 				}
 			},
 		});
@@ -3419,6 +3553,16 @@ export class RuleChain<Output = unknown> {
 				}
 			},
 		});
+		return this;
+	}
+
+	/**
+	 * Attach free-form JSON Schema metadata (VineJS `meta()`) — `title`,
+	 * `description`, `examples`, `deprecated`… Merged verbatim into the field's
+	 * node by `toJSONSchema()`.
+	 */
+	meta(metadata: Record<string, unknown>): this {
+		this.#metadata = { ...this.#metadata, ...metadata };
 		return this;
 	}
 
@@ -4112,6 +4256,7 @@ export const rules = {
 	file: (options?: {
 		size?: number | string;
 		extnames?: readonly string[];
+		verifyContent?: boolean;
 	}): RuleChain<FileLike> => new RuleChain().file(options),
 	nativeFile: (options?: {
 		minSize?: number | string;

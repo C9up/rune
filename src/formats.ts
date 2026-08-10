@@ -578,3 +578,144 @@ export function isEmail(value: string, options: EmailOptions = {}): boolean {
 
 	return true;
 }
+
+/** Options accepted by `vat()` (VineJS 4.2 `vatRule`). */
+export interface VatOptions {
+	countryCode: string | string[];
+}
+
+/**
+ * VAT number patterns, per country. `check` runs the country's own checksum
+ * when there is a short, well-defined one; countries without a `check` are
+ * validated on FORMAT only, and that is stated rather than implied.
+ */
+const VAT_RULES: Record<
+	string,
+	{ pattern: RegExp; check?: (digits: string) => boolean }
+> = {
+	// mod-97 on the 9 leading digits (the two check digits are the last two).
+	BE: {
+		pattern: /^BE0?\d{9}$/i,
+		check: (d) => mod97(d.slice(0, 8)) === Number(d.slice(8, 10)),
+	},
+	FR: { pattern: /^FR[0-9A-Z]{2}\d{9}$/i },
+	DE: { pattern: /^DE\d{9}$/i, check: (d) => germanChecksum(d) },
+	NL: { pattern: /^NL\d{9}B\d{2}$/i, check: (d) => dutchChecksum(d) },
+	IT: { pattern: /^IT\d{11}$/i, check: (d) => luhnLike(d) },
+	ES: { pattern: /^ES[0-9A-Z]\d{7}[0-9A-Z]$/i },
+	PT: { pattern: /^PT\d{9}$/i, check: (d) => mod11(d) },
+	LU: {
+		pattern: /^LU\d{8}$/i,
+		check: (d) => Number(d.slice(0, 6)) % 89 === Number(d.slice(6, 8)),
+	},
+	AT: { pattern: /^ATU\d{8}$/i },
+	DK: { pattern: /^DK\d{8}$/i },
+	FI: { pattern: /^FI\d{8}$/i },
+	SE: { pattern: /^SE\d{12}$/i },
+	IE: { pattern: /^IE(?:\d{7}[A-W]{1,2}|\d[A-Z+*]\d{5}[A-W])$/i },
+	PL: { pattern: /^PL\d{10}$/i },
+	CZ: { pattern: /^CZ\d{8,10}$/i },
+	SK: { pattern: /^SK\d{10}$/i },
+	GR: { pattern: /^(?:EL|GR)\d{9}$/i },
+	HU: { pattern: /^HU\d{8}$/i },
+	RO: { pattern: /^RO\d{2,10}$/i },
+	BG: { pattern: /^BG\d{9,10}$/i },
+	HR: { pattern: /^HR\d{11}$/i },
+	SI: { pattern: /^SI\d{8}$/i },
+	EE: { pattern: /^EE\d{9}$/i },
+	LV: { pattern: /^LV\d{11}$/i },
+	LT: { pattern: /^LT(?:\d{9}|\d{12})$/i },
+	MT: { pattern: /^MT\d{8}$/i },
+	CY: { pattern: /^CY\d{8}[A-Z]$/i },
+	GB: { pattern: /^GB(?:\d{9}|\d{12}|GD\d{3}|HA\d{3})$/i },
+	CH: {
+		pattern: /^CHE\d{9}(?:TVA|MWST|IVA)?$/i,
+		check: (d) => swissUidChecksum(d),
+	},
+};
+
+/** Countries `vat()` can check. */
+export const SUPPORTED_VAT_COUNTRIES = Object.keys(VAT_RULES);
+
+/** Plain mod-97 over a digit string. */
+function mod97(digits: string): number {
+	let remainder = 0;
+	for (const digit of digits) {
+		remainder = (remainder * 10 + (digit.charCodeAt(0) - 48)) % 97;
+	}
+	return 97 - remainder;
+}
+
+/** ISO 7064 mod-11 used by the Portuguese NIF. */
+function mod11(digits: string): boolean {
+	let sum = 0;
+	for (let i = 0; i < 8; i++) {
+		sum += (digits.charCodeAt(i) - 48) * (9 - i);
+	}
+	const check = 11 - (sum % 11);
+	const expected = check >= 10 ? 0 : check;
+	return expected === digits.charCodeAt(8) - 48;
+}
+
+/** German USt-IdNr. checksum (the "11-test" defined by the Bundeszentralamt). */
+function germanChecksum(digits: string): boolean {
+	let product = 10;
+	for (let i = 0; i < 8; i++) {
+		const digit = digits.charCodeAt(i) - 48;
+		let sum = (digit + product) % 10;
+		if (sum === 0) sum = 10;
+		product = (2 * sum) % 11;
+	}
+	const check = 11 - product;
+	return (check === 10 ? 0 : check) === digits.charCodeAt(8) - 48;
+}
+
+/** Dutch BTW checksum: weighted 9..2 mod 11 over the first 8 digits. */
+function dutchChecksum(digits: string): boolean {
+	let sum = 0;
+	for (let i = 0; i < 8; i++) {
+		sum += (digits.charCodeAt(i) - 48) * (9 - i);
+	}
+	return sum % 11 === digits.charCodeAt(8) - 48;
+}
+
+/** Italian partita IVA: Luhn over 11 digits. */
+function luhnLike(digits: string): boolean {
+	let sum = 0;
+	for (let i = 0; i < 11; i++) {
+		let digit = digits.charCodeAt(i) - 48;
+		if (i % 2 === 1) {
+			digit *= 2;
+			if (digit > 9) digit -= 9;
+		}
+		sum += digit;
+	}
+	return sum % 10 === 0;
+}
+
+/** Swiss UID (CHE): weights 5,4,3,2,7,6,5,4 mod 11. */
+function swissUidChecksum(digits: string): boolean {
+	const weights = [5, 4, 3, 2, 7, 6, 5, 4];
+	let sum = 0;
+	for (let i = 0; i < 8; i++) {
+		sum += (digits.charCodeAt(i) - 48) * weights[i];
+	}
+	const remainder = sum % 11;
+	if (remainder === 10) return false;
+	const check = remainder === 0 ? 0 : 11 - remainder;
+	return check === digits.charCodeAt(8) - 48;
+}
+
+/**
+ * Validate a VAT number for one country. Returns `null` when the country has no
+ * rule, so the caller can fail LOUDLY instead of accepting the value.
+ */
+export function isVat(value: string, countryCode: string): boolean | null {
+	const rule = VAT_RULES[countryCode.toUpperCase()];
+	if (rule === undefined) return null;
+	const normalized = value.replace(/[\s.-]/g, "").toUpperCase();
+	if (!rule.pattern.test(normalized)) return false;
+	if (!rule.check) return true;
+	const digits = normalized.replace(/[^0-9]/g, "");
+	return rule.check(digits);
+}

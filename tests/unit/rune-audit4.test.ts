@@ -8,8 +8,15 @@ import rune, {
 
 describe("rune > audit 4", () => {
 	it("file() accepts an Adonis-shaped upload and enforces size/extnames", () => {
+		// verifyContent: false to exercise the DECLARATIVE checks in isolation —
+		// the content check is on by default and needs real bytes (covered by
+		// rune-magic.test.ts).
 		const s = schema({
-			avatar: rules.file({ size: 1024, extnames: ["png", "jpg"] }),
+			avatar: rules.file({
+				size: 1024,
+				extnames: ["png", "jpg"],
+				verifyContent: false,
+			}),
 		});
 		expect(
 			s.validateResult({ avatar: { size: 500, extname: "png" } }).valid,

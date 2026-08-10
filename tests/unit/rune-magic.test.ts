@@ -44,15 +44,19 @@ describe("rune > verifyContent (magic number)", () => {
 		const s = schema({
 			avatar: rules.file({ extnames: ["png", "jpg"] }).verifyContent(),
 		});
-		// Every declarative check passes: size ok, extname "png", allowed list ok.
-		const declarative = schema({ avatar: rules.file({ extnames: ["png"] }) });
+		// Opting OUT leaves only declarative checks — size ok, extname "png",
+		// allowed list ok — so the renamed executable passes. That is exactly why
+		// the check is ON by default.
+		const optedOut = schema({
+			avatar: rules.file({ extnames: ["png"], verifyContent: false }),
+		});
 		expect(
-			declarative.validateResult({
+			optedOut.validateResult({
 				avatar: { size: 8, extname: "png", tmpPath: exePath },
 			}).valid,
 		).toBe(true);
 
-		// The bytes say otherwise.
+		// With the default, the bytes decide.
 		const res = await s.validateResultAsync({
 			avatar: { size: 8, extname: "png", tmpPath: exePath },
 		});
@@ -130,5 +134,53 @@ describe("rune > verifyContent (magic number)", () => {
 		});
 		expect(lying.valid).toBe(false);
 		expect(lying.errors[0]?.rule).toBe("verifyContent");
+	});
+});
+
+describe("rune > la vérification de contenu est le DÉFAUT", () => {
+	it("file({ extnames }) refuse un exécutable renommé, sans rien ajouter", async () => {
+		// Parité Adonis : là-bas `extname` est dérivé des octets par le bodyparser
+		// AVANT la validation, donc un validateur transcrit tel quel est sûr.
+		const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
+		const res = await s.validateResultAsync({
+			avatar: { size: 8, extname: "png", tmpPath: exePath },
+		});
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.rule).toBe("verifyContent");
+	});
+
+	it("le chemin synchrone REFUSE de tourner plutôt que de sauter le contrôle", () => {
+		const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
+		expect(() =>
+			s.validateResult({
+				avatar: { size: 8, extname: "png", tmpPath: exePath },
+			}),
+		).toThrow(/validateAsync/);
+	});
+
+	it("mimeTypes() active aussi le contrôle", async () => {
+		const s = schema({ doc: rules.nativeFile().mimeTypes(["image/png"]) });
+		const res = await s.validateResultAsync({
+			doc: { size: 8, type: "image/png", tmpPath: exePath },
+		});
+		expect(res.valid).toBe(false);
+	});
+
+	it("sans extnames ni mimeTypes, file() reste déclaratif", () => {
+		// Rien n'a été déclaré sur le type, donc il n'y a pas de contrat de type à
+		// confronter aux octets : le contrôle ne s'impose pas.
+		const s = schema({ doc: rules.file({ size: "1mb" }) });
+		expect(s.validateResult({ doc: { size: 10 } }).valid).toBe(true);
+	});
+
+	it("l'opt-out est explicite et laisse une trace dans le schéma", () => {
+		const s = schema({
+			avatar: rules.file({ extnames: ["png"], verifyContent: false }),
+		});
+		expect(
+			s.validateResult({
+				avatar: { size: 8, extname: "png", tmpPath: exePath },
+			}).valid,
+		).toBe(true);
 	});
 });
