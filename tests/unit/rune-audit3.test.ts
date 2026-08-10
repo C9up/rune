@@ -136,10 +136,17 @@ describe("rune > object composition and the Vine entrypoint shapes", () => {
 			secret: rules.string(),
 		});
 
-	it("pick / omit / partial rebuild the shape without touching the original", () => {
+	it("pick / omit return spreadable properties, partial returns a schema", () => {
 		const base = shape();
+		// VineJS types these `Pick<Properties, Keys>` / `Omit<…>`: a properties
+		// RECORD, so the idiomatic composition is a spread.
 		const picked = base.pick(["id", "name"]);
-		expect(Object.keys(picked.getProperties() ?? {})).toEqual(["id", "name"]);
+		expect(Object.keys(picked)).toEqual(["id", "name"]);
+		const composed = schema({ u: rules.any().object({ ...picked }) });
+		expect(composed.validateResult({ u: { id: 1, name: "Ada" } }).valid).toBe(
+			true,
+		);
+
 		// The source shape is untouched.
 		expect(Object.keys(base.getProperties() ?? {})).toEqual([
 			"id",
@@ -148,7 +155,7 @@ describe("rune > object composition and the Vine entrypoint shapes", () => {
 		]);
 
 		const omitted = base.omit(["secret"]);
-		expect(Object.keys(omitted.getProperties() ?? {})).toEqual(["id", "name"]);
+		expect(Object.keys(omitted)).toEqual(["id", "name"]);
 
 		const partial = schema({ user: shape().partial() });
 		expect(partial.validateResult({ user: {} }).valid).toBe(true);

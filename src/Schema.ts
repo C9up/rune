@@ -128,8 +128,10 @@ export interface CompiledRule {
 	/** Run even on `undefined`/`null` (VineJS implicit rules). */
 	readonly implicit?: boolean;
 	readonly name?: string;
-	/** JSON Schema fragment contributed to `toJSONSchema()`. */
-	readonly jsonSchema?: Record<string, unknown>;
+	/** Modifier applied to this field's JSON Schema node. */
+	readonly toJSONSchema?: JsonSchemaModifier;
+	/** The options the rule was built with, handed to {@link toJSONSchema}. */
+	readonly ruleOptions?: unknown;
 	run(value: unknown, field: FieldContext): void;
 }
 
@@ -162,10 +164,12 @@ export interface CreateRuleOptions {
 	/** Rule name reported in errors when the validator does not pass one. */
 	name?: string;
 	/**
-	 * JSON Schema fragment this rule contributes to `toJSONSchema()`. Without it
-	 * a custom rule is OMITTED from the emitted schema rather than guessed at.
+	 * VineJS `toJSONSchema?: JsonSchemaModifier` — a FUNCTION receiving the node
+	 * built so far (plus the rule's options) and returning the modified node.
+	 * A static fragment could only ever add keys; a modifier can also narrow or
+	 * replace what the base rules produced.
 	 */
-	jsonSchema?: Record<string, unknown>;
+	toJSONSchema?: JsonSchemaModifier;
 	/**
 	 * Declare the rule asynchronous (VineJS `{ isAsync: true }`).
 	 * {@link createAsyncRule} sets it; passing it to {@link createRule} routes
@@ -201,7 +205,8 @@ export function createRule<Options>(
 		__rune: "rule",
 		implicit: ruleOptions?.implicit ?? false,
 		name: ruleOptions?.name,
-		jsonSchema: ruleOptions?.jsonSchema,
+		toJSONSchema: ruleOptions?.toJSONSchema,
+		ruleOptions: options,
 		run(value: unknown, field: FieldContext): void {
 			validator(value, options, field);
 		},
@@ -224,8 +229,10 @@ export interface AsyncCompiledRule {
 	/** Run even on `undefined`/`null` (VineJS implicit rules). */
 	readonly implicit?: boolean;
 	readonly name?: string;
-	/** JSON Schema fragment contributed to `toJSONSchema()`. */
-	readonly jsonSchema?: Record<string, unknown>;
+	/** Modifier applied to this field's JSON Schema node. */
+	readonly toJSONSchema?: JsonSchemaModifier;
+	/** The options the rule was built with, handed to {@link toJSONSchema}. */
+	readonly ruleOptions?: unknown;
 	run(value: unknown, field: FieldContext): Promise<void>;
 }
 
@@ -251,7 +258,8 @@ export function createAsyncRule<Options>(
 		__rune: "asyncRule",
 		implicit: ruleOptions?.implicit ?? false,
 		name: ruleOptions?.name,
-		jsonSchema: ruleOptions?.jsonSchema,
+		toJSONSchema: ruleOptions?.toJSONSchema,
+		ruleOptions: options,
 		async run(value: unknown, field: FieldContext): Promise<void> {
 			await validator(value, options, field);
 		},
@@ -278,20 +286,75 @@ export interface ValidateOptions {
 	 */
 	messagesProvider?: MessagesProviderContract;
 	/**
-	 * Receives every error as it is reported (VineJS `errorReporter`). Purely an
-	 * observer: the result is unchanged, so a reporter can never mask a failure.
+	 * VineJS `errorReporter: () => ErrorReporterContract` — a FACTORY returning a
+	 * reporter, so a transcribed Adonis reporter works as-is. A plain
+	 * `(error) => void` observer is also accepted.
+	 *
+	 * The two are told apart by ARITY (a factory takes no argument), never by
+	 * calling one speculatively to see what comes back.
+	 *
+	 * Either way the reporter OBSERVES: the validation result is never changed by
+	 * it, so a reporter cannot mask a failure.
 	 */
-	errorReporter?: (error: ValidationError) => void;
+	errorReporter?: ErrorReporterFactory | ((error: ValidationError) => void);
+}
+
+/**
+ * VineJS `JsonSchemaModifier`: receives the JSON Schema node assembled from the
+ * declarative rules and returns the node to use instead.
+ */
+export type JsonSchemaModifier = (
+	node: Record<string, unknown>,
+	options?: unknown,
+) => Record<string, unknown>;
+
+/** VineJS `ErrorReporterContract`. */
+export interface ErrorReporterContract {
+	/** `true` once at least one error has been reported. */
+	hasErrors: boolean;
+	/** Build the exception a caller may throw. */
+	createError(): Error;
+	/** Report one failure. */
+	report(
+		message: string,
+		rule: string,
+		field: FieldContext | string,
+		args?: Record<string, unknown>,
+	): unknown;
+}
+
+/** A zero-argument factory producing a fresh {@link ErrorReporterContract}. */
+export type ErrorReporterFactory = () => ErrorReporterContract;
+
+/**
+ * Normalise either accepted spelling into one "report this error" callback.
+ * A factory is built ONCE per validation, so a stateful Vine reporter sees the
+ * whole run and can assemble its own error shape.
+ */
+function toReportFn(
+	reporter:
+		| ErrorReporterFactory
+		| ((error: ValidationError) => void)
+		| undefined,
+): ((error: ValidationError) => void) | undefined {
+	if (!reporter) return undefined;
+	if (reporter.length > 0) {
+		return reporter as (error: ValidationError) => void;
+	}
+	const built = (reporter as ErrorReporterFactory)();
+	return (error) =>
+		built.report(error.message, error.rule, error.field, error.meta);
 }
 
 export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
 	/**
-	 * The schema the validator was built from. When it was created from
-	 * `rune.object({...})`, this is that CHAIN — so `validator.schema.partial()`
-	 * works as it does in VineJS. Built from a field map, it is the map.
+	 * The object schema the validator was built from — always a chain, so
+	 * `validator.schema.partial()` / `.pick()` / `.omit()` work as in VineJS
+	 * whichever form `create()` received. The raw field map stays on
+	 * {@link fields}.
 	 */
-	schema: Record<string, RuleChain> | RuleChain;
+	schema: RuleChain;
 	/**
 	 * Standard Schema v1 contract, so a consumer can validate through the
 	 * vendor-neutral protocol instead of rune's own API.
@@ -700,20 +763,25 @@ function chainToJSONSchema(
 			if (rule.name === "enum" && Array.isArray(args.values)) {
 				node.enum = args.values;
 			}
-			// A custom rule contributes only what it declares.
-			if (isStringRecord(rule.jsonSchema)) Object.assign(node, rule.jsonSchema);
+			// A declarative rule may carry its own modifier too.
+			if (typeof rule.toJSONSchema === "function") {
+				Object.assign(node, rule.toJSONSchema(node, rule.args));
+			}
 		}
 		// `.use()` and async rules live outside `chain.rules`, so reading only that
-		// register made a declared fragment unreachable from the public API.
+		// register left a declared modifier unreachable from the public API.
+		let modified = node;
 		for (const rule of [...chain.useRules, ...chain.asyncRules]) {
-			if (isStringRecord(rule.jsonSchema)) Object.assign(node, rule.jsonSchema);
+			if (typeof rule.toJSONSchema === "function") {
+				modified = rule.toJSONSchema(modified, rule.ruleOptions);
+			}
 		}
 		if (chain.isNullable && typeof node.type === "string") {
 			node.type = [node.type, "null"];
 		}
 		const nested = chain.getProperties();
-		if (nested) Object.assign(node, chainToJSONSchema(nested));
-		properties[field] = node;
+		if (nested) Object.assign(modified, chainToJSONSchema(nested));
+		properties[field] = modified;
 		if (!chain.isOptionalField) required.push(field);
 	}
 	return {
@@ -721,11 +789,6 @@ function chainToJSONSchema(
 		properties,
 		...(required.length > 0 ? { required } : {}),
 	};
-}
-
-/** Narrow an unknown to a string-keyed record without lying to the compiler. */
-function isStringRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** `snake_case` / `kebab-case` / spaced key to `camelCase`. */
@@ -1128,8 +1191,9 @@ export function schema(
 				// Report here too: the native path returns before the TS traversal,
 				// so instrumenting only the latter left the reporter silent exactly
 				// when the fast path was taken.
-				if (options?.errorReporter) {
-					for (const error of native.errors) options.errorReporter(error);
+				const reportNative = toReportFn(options?.errorReporter);
+				if (reportNative) {
+					for (const error of native.errors) reportNative(error);
 				}
 				return native;
 			}
@@ -1161,8 +1225,9 @@ export function schema(
 			}
 		}
 
-		if (options?.errorReporter) {
-			for (const error of errors) options.errorReporter(error);
+		const report = toReportFn(options?.errorReporter);
+		if (report) {
+			for (const error of errors) report(error);
 		}
 		if (errors.length === 0) {
 			return { valid: true, errors, data: validated };
@@ -1235,8 +1300,9 @@ export function schema(
 			}
 		}
 
-		if (options?.errorReporter) {
-			for (const error of errors) options.errorReporter(error);
+		const report = toReportFn(options?.errorReporter);
+		if (report) {
+			for (const error of errors) report(error);
 		}
 		if (errors.length === 0) {
 			return { valid: true, errors, data: validated };
@@ -1341,7 +1407,10 @@ export function schema(
 
 	return {
 		fields,
-		schema: objectChain ?? fields,
+		// ALWAYS a chain, even when the validator was built from a bare field map:
+		// VineJS documents `createUserValidator.schema.partial()`, and returning
+		// the map left that broken on the most common Adonis path.
+		schema: objectChain ?? new RuleChain().object(fields),
 		"~standard": standard,
 		toJSON,
 		toJSONSchema,
@@ -1426,8 +1495,8 @@ export interface RuleDef {
 	message: string;
 	/** Set when `.message()` overrode this rule's default text. */
 	hasCustomMessage?: boolean;
-	/** JSON Schema fragment this rule contributes (VineJS rule metadata). */
-	jsonSchema?: Record<string, unknown>;
+	/** Modifier this rule applies to its field's JSON Schema node. */
+	toJSONSchema?: JsonSchemaModifier;
 }
 
 /** A conditional-required condition (VineJS `requiredWhen` family). */
@@ -1885,15 +1954,7 @@ export class RuleChain<Output = unknown> {
 	 * VALUE — that one was never a substitute for this.
 	 */
 	toCamelCaseKeys(): this {
-		if (!this.#nestedSchema) {
-			throw new RuneError(
-				"NOT_AN_OBJECT",
-				"toCamelCaseKeys() needs an object() shape to work on.",
-				{ hint: "rules.any().object({ … }).toCamelCaseKeys()" },
-			);
-		}
-		this.#camelCaseKeys = true;
-		return this;
+		return this.toCamelCase();
 	}
 
 	/**
@@ -1936,21 +1997,37 @@ export class RuleChain<Output = unknown> {
 		return this.#retype<Output>();
 	}
 
-	/** Keep only `keys` of an object shape (VineJS `pick`). */
-	pick<K extends string>(keys: readonly K[]): RuleChain<Output> {
-		return this.#reshape((shape) =>
-			Object.fromEntries(
-				Object.entries(shape).filter(([key]) => keys.includes(key as K)),
-			),
-		);
+	/**
+	 * A CLONED subset of the object's properties (VineJS `pick`).
+	 *
+	 * Returns a properties record, not a schema — VineJS types it
+	 * `Pick<Properties, Keys>` precisely so it composes by spread:
+	 * `rules.any().object({ ...userShape.pick(["id"]) })`. Returning a chain here
+	 * broke that idiom.
+	 */
+	pick<K extends string>(keys: readonly K[]): Record<string, RuleChain> {
+		return this.#subsetOfProperties((key) => keys.includes(key as K));
 	}
 
-	/** Drop `keys` from an object shape (VineJS `omit`). */
-	omit<K extends string>(keys: readonly K[]): RuleChain<Output> {
-		return this.#reshape((shape) =>
-			Object.fromEntries(
-				Object.entries(shape).filter(([key]) => !keys.includes(key as K)),
-			),
+	/** A cloned copy of the properties EXCLUDING `keys` (VineJS `omit`). */
+	omit<K extends string>(keys: readonly K[]): Record<string, RuleChain> {
+		return this.#subsetOfProperties((key) => !keys.includes(key as K));
+	}
+
+	/** Shared body of `pick`/`omit` — clones so the source stays untouched. */
+	#subsetOfProperties(
+		keep: (key: string) => boolean,
+	): Record<string, RuleChain> {
+		const shape = this.getProperties();
+		if (!shape) {
+			throw new RuneError(
+				"NOT_AN_OBJECT",
+				"pick()/omit() need an object() shape to work on.",
+				{ hint: "rules.any().object({ … }).pick([…])" },
+			);
+		}
+		return Object.fromEntries(
+			Object.entries(shape).filter(([key]) => keep(key)),
 		);
 	}
 
@@ -2651,8 +2728,21 @@ export class RuleChain<Output = unknown> {
 		return this.#stringMutation("toUpperCase", (v) => v.toUpperCase());
 	}
 
-	/** Convert dash/snake/spaced words to camelCase (VineJS `toCamelCase`). */
+	/**
+	 * VineJS `toCamelCase()`, on both shapes it exists for:
+	 *
+	 * - on an `object()` chain it camelCases the object's KEYS
+	 *   (`VineObject.toCamelCase`);
+	 * - on any other chain it camelCases the string VALUE (`VineString`).
+	 *
+	 * One name, because Vine has one name. Dispatching on whether a nested shape
+	 * was declared is what keeps a transcribed validator behaving the same.
+	 */
 	toCamelCase(): this {
+		if (this.#nestedSchema) {
+			this.#camelCaseKeys = true;
+			return this;
+		}
 		return this.#stringMutation("toCamelCase", toCamelCase);
 	}
 
@@ -3731,6 +3821,18 @@ export const rules = {
 	 * Union discriminated by the value's TYPE (VineJS `unionOfTypes`): the first
 	 * branch whose own type rule accepts the value wins.
 	 */
+	/**
+	 * Make every property of a shape optional (VineJS `vine.helpers.optional`).
+	 * A properties TRANSFORMER, like `pick`/`omit` — it returns a record to
+	 * spread, not a schema.
+	 */
+	optional: (props: Record<string, RuleChain>): Record<string, RuleChain> =>
+		Object.fromEntries(
+			Object.entries(props).map(([key, chain]) => [
+				key,
+				chain.clone().optional(),
+			]),
+		),
 	unionOfTypes: (chains: readonly RuleChain[]): RuleChain => {
 		// VineJS requires DISTINCT types: two branches claiming the same type make
 		// the discrimination meaningless, and the second would be dead code.

@@ -496,7 +496,7 @@ describe("rune > nativeFile fluent API (VineJS)", () => {
 });
 
 describe("rune > audit 8 — les trois derniers manques", () => {
-	it("createRule({ jsonSchema }) atteint bien toJSONSchema()", () => {
+	it("createRule({ toJSONSchema }) atteint bien toJSONSchema()", () => {
 		// Le chemin de LECTURE existait, l'écriture non : la métadonnée était
 		// inatteignable depuis l'API publique, donc silencieusement ignorée.
 		const evenOnly = createRule(
@@ -505,7 +505,9 @@ describe("rune > audit 8 — les trois derniers manques", () => {
 					field.report("Must be even", "even");
 				}
 			},
-			{ jsonSchema: { multipleOf: 2 } },
+			// VineJS metadata is a MODIFIER, not a static fragment: it receives the
+			// node built from the declarative rules and returns the node to use.
+			{ toJSONSchema: (node) => ({ ...node, multipleOf: 2 }) },
 		);
 		const v = schema({ n: rules.number().use(evenOnly()) });
 		expect(v.toJSONSchema()).toMatchObject({
@@ -594,5 +596,71 @@ describe("rune > audit 8 — les trois derniers manques", () => {
 				u: "https://a.io/dir/index.html",
 			}).u,
 		).toBe("https://a.io/dir/");
+	});
+});
+
+describe("rune > audit 8 — formes exactes de l'API Vine 4.x", () => {
+	it("errorReporter accepte la FABRIQUE de Vine et l'observer", () => {
+		// Vine: `errorReporter: () => ErrorReporterContract`. Une fabrique est
+		// distinguée d'un observer par l'ARITÉ, jamais en l'appelant pour voir.
+		const collected: string[] = [];
+		const reporter = () => ({
+			hasErrors: false,
+			createError: () => new Error("invalid"),
+			report(message: string, rule: string) {
+				collected.push(`${rule}:${message}`);
+				return undefined;
+			},
+		});
+		const res = schema({ a: rules.string() }).validateResult(
+			{ a: 1 },
+			{ errorReporter: reporter },
+		);
+		expect(collected).toHaveLength(1);
+		expect(collected[0]?.startsWith("string:")).toBe(true);
+		// L'observer reste accepté.
+		const seen: string[] = [];
+		schema({ a: rules.string() }).validateResult(
+			{ a: 1 },
+			{ errorReporter: (e) => seen.push(e.rule) },
+		);
+		expect(seen).toEqual(["string"]);
+		// Dans les deux cas le reporter n'a pas masqué l'échec.
+		expect(res.valid).toBe(false);
+	});
+
+	it("validator.schema est toujours une chaîne, donc .partial() marche", () => {
+		// Chemin Adonis le plus courant : create() sur une map de champs.
+		const v = create({ id: rules.number(), name: rules.string() });
+		const relaxed = create(v.schema.partial());
+		expect(relaxed.validateResult({}).valid).toBe(true);
+		// La source reste stricte.
+		expect(v.validateResult({}).valid).toBe(false);
+	});
+
+	it("toCamelCase() dispatche sur la forme, comme Vine", () => {
+		// Sur un objet : les CLÉS.
+		const keys = schema({
+			u: rules.any().object({ first_name: rules.string() }).toCamelCase(),
+		});
+		expect(keys.validateOrThrow({ u: { first_name: "Ada" } }).u).toEqual({
+			firstName: "Ada",
+		});
+		// Sur une string : la VALEUR.
+		expect(
+			schema({ s: rules.string().toCamelCase() }).validateOrThrow({
+				s: "hello-world",
+			}).s,
+		).toBe("helloWorld");
+	});
+
+	it("rules.optional() rend un record de propriétés à spreader", () => {
+		const shape = { id: rules.number(), name: rules.string() };
+		const v = schema({ u: rules.any().object({ ...rune.optional(shape) }) });
+		expect(v.validateResult({ u: {} }).valid).toBe(true);
+		// La source n'est pas relâchée par l'opération.
+		expect(
+			schema({ u: rules.any().object(shape) }).validateResult({ u: {} }).valid,
+		).toBe(false);
 	});
 });
