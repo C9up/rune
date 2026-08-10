@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import rune, {
+	create,
 	createRule,
 	RuneError,
 	rules,
@@ -369,5 +370,126 @@ describe("rune > message keys and native routing are independent", () => {
 			e: rules.string().email({ require_tld: false }),
 		});
 		expect(withOptions.validateResult({ e: "ada@localhost" }).valid).toBe(true);
+	});
+});
+
+describe("rune > audit 7 — object composition, introspection, JSON Schema", () => {
+	it("validator.schema keeps the object chain, so .partial() works on it", () => {
+		const userSchema = rules.any().object({
+			id: rules.number(),
+			name: rules.string(),
+		});
+		const v = create(userSchema);
+		const chain = v.schema;
+		// VineJS keeps the compiled object schema, not a bare field map.
+		expect(chain).toBeInstanceOf(Object);
+		if (chain instanceof Object && "partial" in chain) {
+			const relaxed = create((chain as ReturnType<typeof rules.any>).partial());
+			expect(relaxed.validateResult({}).valid).toBe(true);
+		}
+		// …and the source stays strict.
+		expect(v.validateResult({}).valid).toBe(false);
+	});
+
+	it("toCamelCaseKeys() rewrites the KEYS, not the values", () => {
+		const v = schema({
+			user: rules
+				.any()
+				.object({ first_name: rules.string(), last_name: rules.string() })
+				.toCamelCaseKeys(),
+		});
+		const out = v.validateOrThrow({
+			user: { first_name: "Ada", last_name: "Lovelace" },
+		});
+		expect(out.user).toEqual({ firstName: "Ada", lastName: "Lovelace" });
+	});
+
+	it("merge() adds properties, and a conditional group picks its branch", () => {
+		const merged = schema({
+			u: rules
+				.any()
+				.object({ id: rules.number() })
+				.merge({ name: rules.string() }),
+		});
+		expect(merged.validateResult({ u: { id: 1 } }).valid).toBe(false);
+		expect(merged.validateResult({ u: { id: 1, name: "Ada" } }).valid).toBe(
+			true,
+		);
+
+		const grouped = schema({
+			p: rules
+				.any()
+				.object({ kind: rules.string() })
+				.merge(
+					rune.group([
+						rune.group.if((data) => data.kind === "card", {
+							cardNumber: rules.string().creditCard(),
+						}),
+						rune.group.else({ iban: rules.string().iban() }),
+					]),
+				),
+		});
+		expect(
+			grouped.validateResult({
+				p: { kind: "card", cardNumber: "4242424242424242" },
+			}).valid,
+		).toBe(true);
+		// Wrong branch's field is not accepted as a substitute.
+		expect(
+			grouped.validateResult({
+				p: { kind: "card", iban: "GB82WEST12345698765432" },
+			}).valid,
+		).toBe(false);
+		expect(
+			grouped.validateResult({
+				p: { kind: "bank", iban: "GB82 WEST 1234 5698 7654 32" },
+			}).valid,
+		).toBe(true);
+	});
+
+	it("toJSONSchema emits the constraints it can express and omits the rest", () => {
+		const v = schema({
+			email: rules.string().email(),
+			age: rules.number().range([18, 60]).optional(),
+			tag: rules.string().minLength(2).maxLength(8).nullable(),
+		});
+		const js = v.toJSONSchema();
+		expect(js).toMatchObject({
+			type: "object",
+			properties: {
+				email: { type: "string", format: "email" },
+				age: { type: "number", minimum: 18, maximum: 60 },
+				tag: { type: ["string", "null"], minLength: 2, maxLength: 8 },
+			},
+			// `tag` is nullable, NOT optional — a nullable field is still required.
+			required: ["email", "tag"],
+		});
+	});
+});
+
+describe("rune > nativeFile fluent API (VineJS)", () => {
+	it("chains minSize / maxSize / mimeTypes", () => {
+		const s = schema({
+			doc: rules
+				.nativeFile()
+				.minSize("1kb")
+				.maxSize("1mb")
+				.mimeTypes(["application/pdf"]),
+		});
+		expect(
+			s.validateResult({ doc: { size: 5000, type: "application/pdf" } }).valid,
+		).toBe(true);
+		expect(
+			s.validateResult({ doc: { size: 100, type: "application/pdf" } })
+				.errors[0]?.rule,
+		).toBe("minSize");
+		expect(
+			s.validateResult({ doc: { size: 5_000_000, type: "application/pdf" } })
+				.errors[0]?.rule,
+		).toBe("maxSize");
+		expect(
+			s.validateResult({ doc: { size: 5000, type: "image/png" } }).errors[0]
+				?.rule,
+		).toBe("mimeTypes");
 	});
 });

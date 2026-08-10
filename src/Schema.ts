@@ -275,8 +275,12 @@ export interface ValidateOptions {
 
 export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
-	/** Alias of {@link fields} — VineJS names it `schema` on the validator. */
-	schema: Record<string, RuleChain>;
+	/**
+	 * The schema the validator was built from. When it was created from
+	 * `rune.object({...})`, this is that CHAIN — so `validator.schema.partial()`
+	 * works as it does in VineJS. Built from a field map, it is the map.
+	 */
+	schema: Record<string, RuleChain> | RuleChain;
 	/**
 	 * Standard Schema v1 contract, so a consumer can validate through the
 	 * vendor-neutral protocol instead of rune's own API.
@@ -291,8 +295,10 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 			| { issues: ReadonlyArray<{ message: string; path: string[] }> }
 		>;
 	};
-	/** Field-by-field introspection of the compiled schema (VineJS `toJSON`). */
-	toJSON(): Record<string, { rules: string[]; optional: boolean }>;
+	/** Introspection of the compiled schema — VineJS `{ schema, refs }` shape. */
+	toJSON(): { schema: SchemaIntrospection; refs: string[] };
+	/** JSON Schema for the compiled validator (VineJS `toJSONSchema`). */
+	toJSONSchema(): Record<string, unknown>;
 	/**
 	 * Validate and return the payload, throwing {@link RuneValidationError} on
 	 * failure — the VineJS/Adonis contract (`validator.validate(data)`), async
@@ -596,6 +602,160 @@ function fileExtension(file: FileLike): string | null {
  * `ParseFn = (value, ctx: Pick<FieldContext, 'data' | 'parent' | 'meta'>)`.
  */
 export type ParseContext = Pick<FieldContext, "data" | "parent" | "meta">;
+
+/**
+ * A conditional set of properties merged into an object (VineJS `vine.group`).
+ * The first branch whose predicate matches contributes its shape; `otherwise`
+ * is the unconditional fallback.
+ */
+export interface ConditionalGroup {
+	readonly __rune: "group";
+	branches: ReadonlyArray<{
+		predicate: ((data: Record<string, unknown>) => boolean) | null;
+		shape: Record<string, RuleChain>;
+	}>;
+}
+
+/** Per-field introspection returned inside `toJSON().schema`. */
+export type SchemaIntrospection = Record<
+	string,
+	{ rules: string[]; optional: boolean; nullable: boolean }
+>;
+
+/** Describe every field's rules — the `schema` half of `toJSON()`. */
+function introspect(fields: Record<string, RuleChain>): SchemaIntrospection {
+	return Object.fromEntries(
+		Object.entries(fields).map(([field, chain]) => [
+			field,
+			{
+				rules: chain.rules.map((rule) => rule.name),
+				optional: chain.isOptionalField,
+				nullable: chain.isNullable,
+			},
+		]),
+	);
+}
+
+/** Rule name → the JSON Schema fragment it contributes. */
+const JSON_SCHEMA_TYPES: Record<string, string> = {
+	string: "string",
+	number: "number",
+	boolean: "boolean",
+	date: "string",
+	accepted: "boolean",
+	object: "object",
+	record: "object",
+	array: "array",
+	tuple: "array",
+};
+
+/**
+ * Translate a field map to JSON Schema.
+ *
+ * Only rules with a real JSON Schema equivalent are emitted; a rule without one
+ * is OMITTED rather than approximated, because a schema that quietly drops a
+ * constraint is worse than one that says less.
+ */
+function chainToJSONSchema(
+	fields: Record<string, RuleChain>,
+): Record<string, unknown> {
+	const properties: Record<string, unknown> = {};
+	const required: string[] = [];
+	for (const [field, chain] of Object.entries(fields)) {
+		const node: Record<string, unknown> = {};
+		for (const rule of chain.rules) {
+			const type = JSON_SCHEMA_TYPES[rule.name];
+			if (type !== undefined) node.type = type;
+			const args = rule.args ?? {};
+			if (rule.name === "minLength") node.minLength = args.min ?? rule.param;
+			if (rule.name === "maxLength") node.maxLength = args.max ?? rule.param;
+			if (rule.name === "fixedLength") {
+				node.minLength = args.length ?? rule.param;
+				node.maxLength = args.length ?? rule.param;
+			}
+			if (rule.name === "min") node.minimum = args.min ?? rule.param;
+			if (rule.name === "max") node.maximum = args.max ?? rule.param;
+			if (rule.name === "range") {
+				node.minimum = args.min;
+				node.maximum = args.max;
+			}
+			if (rule.name === "email") node.format = "email";
+			if (rule.name === "uuid") node.format = "uuid";
+			if (rule.name === "url") node.format = "uri";
+			if (rule.name === "date") node.format = "date-time";
+			if (rule.name === "regex" && typeof args.pattern === "string") {
+				node.pattern = args.pattern;
+			}
+			if (rule.name === "enum" && Array.isArray(args.values)) {
+				node.enum = args.values;
+			}
+			// A custom rule contributes only what it declares.
+			if (isStringRecord(rule.jsonSchema)) Object.assign(node, rule.jsonSchema);
+		}
+		if (chain.isNullable && typeof node.type === "string") {
+			node.type = [node.type, "null"];
+		}
+		const nested = chain.getProperties();
+		if (nested) Object.assign(node, chainToJSONSchema(nested));
+		properties[field] = node;
+		if (!chain.isOptionalField) required.push(field);
+	}
+	return {
+		type: "object",
+		properties,
+		...(required.length > 0 ? { required } : {}),
+	};
+}
+
+/** Narrow an unknown to a string-keyed record without lying to the compiler. */
+function isStringRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** `snake_case` / `kebab-case` / spaced key to `camelCase`. */
+function toCamelCaseKey(key: string): string {
+	return key
+		.replace(/[-_\s]+(.)?/g, (_, c: string | undefined) =>
+			c ? c.toUpperCase() : "",
+		)
+		.replace(/^(.)/, (c) => c.toLowerCase());
+}
+
+/** Structural guard telling a plain shape from a {@link ConditionalGroup}. */
+function isConditionalGroup(
+	value: Record<string, RuleChain> | ConditionalGroup,
+): value is ConditionalGroup {
+	return "__rune" in value && value.__rune === "group";
+}
+
+/** Build a conditional group (VineJS `vine.group([...])`). */
+export function group(
+	branches: ReadonlyArray<{
+		predicate: ((data: Record<string, unknown>) => boolean) | null;
+		shape: Record<string, RuleChain>;
+	}>,
+): ConditionalGroup {
+	return { __rune: "group", branches };
+}
+
+/** A predicate-guarded group branch (`vine.group.if`). */
+export function groupIf(
+	predicate: (data: Record<string, unknown>) => boolean,
+	shape: Record<string, RuleChain>,
+): {
+	predicate: (data: Record<string, unknown>) => boolean;
+	shape: Record<string, RuleChain>;
+} {
+	return { predicate, shape };
+}
+
+/** The unconditional fallback branch (`vine.group.else` / `.otherwise`). */
+export function groupElse(shape: Record<string, RuleChain>): {
+	predicate: null;
+	shape: Record<string, RuleChain>;
+} {
+	return { predicate: null, shape };
+}
 
 /** A union branch guarded by a predicate — `vine.union.if(...)`. */
 export interface ConditionalBranch {
@@ -903,12 +1063,15 @@ export type Infer<S> = Prettify<
  */
 export function schema<S extends Record<string, RuleChain>>(
 	fields: S,
+	objectChain?: RuleChain,
 ): ValidationSchema<Infer<S>>;
 export function schema<T = Record<string, unknown>>(
 	fields: Record<string, RuleChain>,
+	objectChain?: RuleChain,
 ): ValidationSchema<T>;
 export function schema(
 	fields: Record<string, RuleChain>,
+	objectChain?: RuleChain,
 ): ValidationSchema<Record<string, unknown>> {
 	// Computed once at construction time, not per validate() call.
 	const hasCustomRules = detectHasCustomRules(fields);
@@ -1115,16 +1278,23 @@ export function schema(
 	 * Introspection of the compiled schema (VineJS `toJSON`): field names and the
 	 * rules attached to each, enough to render a form or diff two schemas.
 	 */
-	function toJSON(): Record<string, { rules: string[]; optional: boolean }> {
-		return Object.fromEntries(
-			Object.entries(fields).map(([field, chain]) => [
-				field,
-				{
-					rules: chain.rules.map((rule) => rule.name),
-					optional: chain.isOptionalField,
-				},
-			]),
-		);
+	function toJSON(): { schema: SchemaIntrospection; refs: string[] } {
+		// VineJS shape: `{ schema, refs }`. The flat `{ field: { rules } }` map was
+		// rune's own invention, so a consumer written against Vine read undefined.
+		return {
+			schema: introspect(fields),
+			refs: Object.keys(fields),
+		};
+	}
+
+	/**
+	 * Emit a JSON Schema for the compiled validator (VineJS `toJSONSchema`).
+	 * Covers the rules that HAVE a JSON Schema equivalent; a custom rule
+	 * contributes its `jsonSchema` metadata when it declares one, and is
+	 * otherwise omitted rather than guessed at.
+	 */
+	function toJSONSchema(): Record<string, unknown> {
+		return chainToJSONSchema(fields);
 	}
 
 	/**
@@ -1155,9 +1325,10 @@ export function schema(
 
 	return {
 		fields,
-		schema: fields,
+		schema: objectChain ?? fields,
 		"~standard": standard,
 		toJSON,
+		toJSONSchema,
 		validate,
 		validateResult,
 		validateResultAsync,
@@ -1184,7 +1355,9 @@ export function create(chain: RuleChain): ValidationSchema;
 export function create(
 	input: Record<string, RuleChain> | RuleChain,
 ): ValidationSchema {
-	return schema(toFieldMap(input));
+	return input instanceof RuleChain
+		? schema(toFieldMap(input), input)
+		: schema(input);
 }
 
 /** Unwrap `rune.object({...})` back to the field map `schema()` expects. */
@@ -1237,6 +1410,8 @@ export interface RuleDef {
 	message: string;
 	/** Set when `.message()` overrode this rule's default text. */
 	hasCustomMessage?: boolean;
+	/** JSON Schema fragment this rule contributes (VineJS rule metadata). */
+	jsonSchema?: Record<string, unknown>;
 }
 
 /** A conditional-required condition (VineJS `requiredWhen` family). */
@@ -1286,6 +1461,8 @@ export class RuleChain<Output = unknown> {
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
 	#allowUnknown = false;
+	#camelCaseKeys = false;
+	#groups: ConditionalGroup[] = [];
 	#recordValueChain: RuleChain | null = null;
 	#tupleChains: RuleChain[] | null = null;
 	#unionChains: ConditionalBranch[] | null = null;
@@ -1380,6 +1557,8 @@ export class RuleChain<Output = unknown> {
 		next.#dateFormats = this.#dateFormats;
 		next.#coercions = [...this.#coercions];
 		next.#allowUnknown = this.#allowUnknown;
+		next.#camelCaseKeys = this.#camelCaseKeys;
+		next.#groups = [...this.#groups];
 		next.#recordValueChain = this.#recordValueChain;
 		next.#tupleChains = this.#tupleChains;
 		next.#unionChains = this.#unionChains;
@@ -1683,6 +1862,45 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
+	/**
+	 * Convert the object's KEYS to camelCase in the output (VineJS
+	 * `object.toCamelCase()`), so a snake_case payload hydrates camelCase
+	 * properties. Distinct from the string `toCamelCase()`, which rewrites a
+	 * VALUE — that one was never a substitute for this.
+	 */
+	toCamelCaseKeys(): this {
+		if (!this.#nestedSchema) {
+			throw new RuneError(
+				"NOT_AN_OBJECT",
+				"toCamelCaseKeys() needs an object() shape to work on.",
+				{ hint: "rules.any().object({ … }).toCamelCaseKeys()" },
+			);
+		}
+		this.#camelCaseKeys = true;
+		return this;
+	}
+
+	/**
+	 * Merge extra properties into this object's shape (VineJS `merge`). Accepts a
+	 * plain shape or a {@link ConditionalGroup} whose branch is chosen per
+	 * payload — `vine.group` in VineJS.
+	 */
+	merge(extra: Record<string, RuleChain> | ConditionalGroup): this {
+		if (!this.#nestedSchema) {
+			throw new RuneError(
+				"NOT_AN_OBJECT",
+				"merge() needs an object() shape to merge into.",
+				{ hint: "rules.any().object({ … }).merge({ … })" },
+			);
+		}
+		if (isConditionalGroup(extra)) {
+			this.#groups.push(extra);
+			return this;
+		}
+		this.#nestedSchema = { ...this.#nestedSchema, ...extra };
+		return this;
+	}
+
 	/** The nested shape declared by `object()`, if any (VineJS `getProperties`). */
 	getProperties(): Record<string, RuleChain> | null {
 		// CLONE each chain, not just the map. A shallow copy shares the chain
@@ -1909,6 +2127,48 @@ export class RuleChain<Output = unknown> {
 			message: "Must be a valid file",
 		});
 		return this.#retype<FileLike>();
+	}
+
+	/** Minimum upload size (VineJS `nativeFile().minSize()`). */
+	minSize(size: number | string): this {
+		const min = parseByteSize(size);
+		this.#pushRule({
+			name: "minSize",
+			args: { size },
+			validate: (v) => isFileLike(v) && v.size >= min,
+			message: `Must be at least ${size} in size`,
+		});
+		return this;
+	}
+
+	/** Maximum upload size (VineJS `nativeFile().maxSize()`). */
+	maxSize(size: number | string): this {
+		const max = parseByteSize(size);
+		this.#pushRule({
+			name: "maxSize",
+			args: { size },
+			validate: (v) => isFileLike(v) && v.size <= max,
+			message: `Must be at most ${size} in size`,
+		});
+		return this;
+	}
+
+	/**
+	 * Allowed MIME types (VineJS `nativeFile().mimeTypes()`). The type is the one
+	 * the upload REPORTS — rune never reads bytes, see {@link file}.
+	 */
+	mimeTypes(types: readonly string[]): this {
+		const allowed = types.map((t) => t.toLowerCase());
+		this.#pushRule({
+			name: "mimeTypes",
+			args: { types: allowed },
+			validate: (v) =>
+				isFileLike(v) &&
+				typeof v.type === "string" &&
+				allowed.includes(v.type.toLowerCase()),
+			message: `Must be one of ${allowed.join(", ")}`,
+		});
+		return this;
 	}
 
 	/** Must equal one of `values` (enum). Narrows the output to the union. */
@@ -2987,7 +3247,17 @@ export class RuleChain<Output = unknown> {
 				? { ...source }
 				: {};
 			transformed = obj;
-			for (const [nestedField, chain] of Object.entries(this.#nestedSchema)) {
+			// A conditional group contributes its branch's properties for THIS
+			// payload, so the shape is resolved per validation, not at build time.
+			let shape = this.#nestedSchema;
+			for (const grp of this.#groups) {
+				const branch =
+					grp.branches.find(
+						(candidate) => candidate.predicate?.(source) === true,
+					) ?? grp.branches.find((candidate) => candidate.predicate === null);
+				if (branch) shape = { ...shape, ...branch.shape };
+			}
+			for (const [nestedField, chain] of Object.entries(shape)) {
 				const nestedResult = chain._validateWithTransform(
 					`${field}.${nestedField}`,
 					source[nestedField],
@@ -2996,7 +3266,16 @@ export class RuleChain<Output = unknown> {
 				);
 				errors.push(...nestedResult.errors);
 				if (nestedResult.transformed !== undefined) {
-					obj[nestedField] = nestedResult.transformed;
+					obj[this.#camelCaseKeys ? toCamelCaseKey(nestedField) : nestedField] =
+						nestedResult.transformed;
+				}
+			}
+			if (this.#camelCaseKeys && this.#allowUnknown) {
+				// Undeclared keys are camelCased too, otherwise the output would mix
+				// both spellings depending on whether a key was declared.
+				for (const [key, value] of Object.entries(source)) {
+					const camel = toCamelCaseKey(key);
+					if (!(camel in obj)) obj[camel] = value;
 				}
 			}
 		}
@@ -3394,7 +3673,7 @@ export function compile(input: ValidationSchema | RuleChain): ValidationSchema {
 	// A rune schema is already compiled, so this is identity for that form; the
 	// `RuleChain` form exists because `vine.compile(vine.object({…}))` is the
 	// shape Adonis documents.
-	return input instanceof RuleChain ? schema(toFieldMap(input)) : input;
+	return input instanceof RuleChain ? schema(toFieldMap(input), input) : input;
 }
 
 /** Entry point for building rules. */

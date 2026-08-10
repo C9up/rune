@@ -63,9 +63,13 @@ describe("rune > audit 4", () => {
 			email: rules.string().email(),
 			age: rules.number().optional(),
 		});
+		// VineJS shape is `{ schema, refs }`, not a flat field map.
 		expect(v.toJSON()).toEqual({
-			email: { rules: ["string", "email"], optional: false },
-			age: { rules: ["number"], optional: true },
+			schema: {
+				email: { rules: ["string", "email"], optional: false, nullable: false },
+				age: { rules: ["number"], optional: true, nullable: false },
+			},
+			refs: ["email", "age"],
 		});
 	});
 

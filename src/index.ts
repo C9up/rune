@@ -8,6 +8,7 @@ export type { DateFormat } from "./date.js";
 export { RuneError, RuneValidationError } from "./errors.js";
 export type {
 	AlphaOptions,
+	EmailOptions,
 	NormalizeEmailOptions,
 	NormalizeUrlOptions,
 	UrlOptions,
@@ -60,6 +61,9 @@ import {
 	createRule,
 	getConvertEmptyStringsToNull,
 	getGlobalMessagesProvider,
+	group,
+	groupElse,
+	groupIf,
 	rules,
 	schema,
 	setConvertEmptyStringsToNull,
@@ -96,6 +100,12 @@ const rune = {
 	compile,
 	createRule,
 	createAsyncRule,
+	// `group` carries its branch factories, mirroring `vine.group.if/else`.
+	group: Object.assign(group, {
+		if: groupIf,
+		else: groupElse,
+		otherwise: groupElse,
+	}),
 	bindDatabase,
 	bindHostResolver,
 	bindRosetta,
