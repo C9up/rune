@@ -13,6 +13,7 @@ import {
 import type { RuneErrorNode } from "./errors.js";
 import { RuneError, RuneValidationError } from "./errors.js";
 import {
+	escapeHtml,
 	isAscii,
 	isCoordinates,
 	isCreditCard,
@@ -21,11 +22,19 @@ import {
 	isIpAddress,
 	isJwt,
 	isMobile,
+	isPassport,
 	isPostalCode,
 	isUlid,
+	type NormalizeEmailOptions,
+	type NormalizeUrlOptions,
+	normalizeEmail,
+	normalizeUrl,
+	SUPPORTED_PASSPORTS,
 	SUPPORTED_POSTAL_CODES,
+	toCamelCase,
 } from "./formats.js";
 import type { MessagesProviderContract } from "./MessagesProvider.js";
+import { toWildcardPath } from "./MessagesProvider.js";
 import {
 	isNativeAvailable,
 	validateNative,
@@ -67,8 +76,31 @@ export interface FieldContext {
 	meta: Record<string, unknown>;
 	/** `true` while no error has been reported for this field yet. */
 	isValid: boolean;
-	/** Report a validation failure for this field. */
-	report(message: string, rule: string): void;
+	/** Last path segment — `city` for `address.city` (VineJS `name`). */
+	name: string;
+	/** Dotted path with numeric segments replaced by `*` (`tags.*.name`). */
+	wildCardPath: string;
+	/** `true` when this value sits inside an array. */
+	isArrayMember: boolean;
+	/** `true` when the value is neither `undefined` nor `null`. */
+	isDefined: boolean;
+	/** `true` when the value passed its type rule. */
+	isValidDataType: boolean;
+	/** The full dotted path — same value as {@link field}, VineJS spelling. */
+	getFieldPath(): string;
+	/** Replace the value under validation (VineJS `mutate`). */
+	mutate(newValue: unknown): void;
+	/**
+	 * Report a validation failure. `field` and `args` are optional (VineJS
+	 * passes four arguments); omitting them reports against this field with no
+	 * interpolation data.
+	 */
+	report(
+		message: string,
+		rule: string,
+		field?: string,
+		args?: Record<string, unknown>,
+	): void;
 }
 
 /**
@@ -84,6 +116,9 @@ export type RuleValidator<Options = undefined> = (
 /** A compiled `.use()` rule produced by {@link createRule}. */
 export interface CompiledRule {
 	readonly __rune: "rule";
+	/** Run even on `undefined`/`null` (VineJS implicit rules). */
+	readonly implicit?: boolean;
+	readonly name?: string;
 	run(value: unknown, field: FieldContext): void;
 }
 
@@ -102,17 +137,37 @@ export interface CompiledRule {
  *       passwordConfirmation: rules.string().use(sameAs('password')),
  *     })
  */
+/**
+ * Options accepted by {@link createRule} / {@link createAsyncRule} — VineJS
+ * `vine.createRule(fn, { implicit, isAsync })`.
+ */
+export interface CreateRuleOptions {
+	/**
+	 * Run the rule even when the value is `undefined` or `null`. Non-implicit
+	 * rules are skipped on an absent value, which is why a `required`-style
+	 * custom rule could not be written before.
+	 */
+	implicit?: boolean;
+	/** Rule name reported in errors when the validator does not pass one. */
+	name?: string;
+}
+
 export function createRule(
 	validator: RuleValidator<undefined>,
+	options?: CreateRuleOptions,
 ): () => CompiledRule;
 export function createRule<Options>(
 	validator: RuleValidator<Options>,
+	options?: CreateRuleOptions,
 ): (options: Options) => CompiledRule;
 export function createRule<Options>(
 	validator: RuleValidator<Options>,
+	ruleOptions?: CreateRuleOptions,
 ): (options: Options) => CompiledRule {
 	return (options: Options): CompiledRule => ({
 		__rune: "rule",
+		implicit: ruleOptions?.implicit ?? false,
+		name: ruleOptions?.name,
 		run(value: unknown, field: FieldContext): void {
 			validator(value, options, field);
 		},
@@ -132,6 +187,9 @@ export type AsyncRuleValidator<Options = undefined> = (
 /** A compiled async rule produced by {@link createAsyncRule}. */
 export interface AsyncCompiledRule {
 	readonly __rune: "asyncRule";
+	/** Run even on `undefined`/`null` (VineJS implicit rules). */
+	readonly implicit?: boolean;
+	readonly name?: string;
 	run(value: unknown, field: FieldContext): Promise<void>;
 }
 
@@ -143,15 +201,20 @@ export interface AsyncCompiledRule {
  */
 export function createAsyncRule(
 	validator: AsyncRuleValidator<undefined>,
+	options?: CreateRuleOptions,
 ): () => AsyncCompiledRule;
 export function createAsyncRule<Options>(
 	validator: AsyncRuleValidator<Options>,
+	options?: CreateRuleOptions,
 ): (options: Options) => AsyncCompiledRule;
 export function createAsyncRule<Options>(
 	validator: AsyncRuleValidator<Options>,
+	ruleOptions?: CreateRuleOptions,
 ): (options: Options) => AsyncCompiledRule {
 	return (options: Options): AsyncCompiledRule => ({
 		__rune: "asyncRule",
+		implicit: ruleOptions?.implicit ?? false,
+		name: ruleOptions?.name,
 		async run(value: unknown, field: FieldContext): Promise<void> {
 			await validator(value, options, field);
 		},
@@ -189,6 +252,19 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	 * with a structured `.messages` array on failure.
 	 */
 	validateOrThrow(data: unknown, options?: ValidateOptions): T;
+	/**
+	 * Non-throwing validation returning `[error, null] | [null, data]`
+	 * (VineJS `tryValidate`).
+	 */
+	tryValidate(
+		data: unknown,
+		options?: ValidateOptions,
+	): [RuneValidationError, null] | [null, T];
+	/** Async counterpart of {@link tryValidate}. */
+	tryValidateAsync(
+		data: unknown,
+		options?: ValidateOptions,
+	): Promise<[RuneValidationError, null] | [null, T]>;
 	/**
 	 * Async validation — runs the sync rules, then any `.useAsync()`/`unique`/
 	 * `exists` rules (awaited). Required when the schema carries async rules; the
@@ -237,6 +313,89 @@ let dateOutputTransform: ((value: Date) => unknown) | null = null;
 /** Bind (or clear, with `null`) the global `rules.date()` output mapper. */
 export function setDateTransform(fn: ((value: Date) => unknown) | null): void {
 	dateOutputTransform = fn;
+}
+
+/**
+ * A database lookup seam for the Lucid-style `unique` / `exists` rules.
+ *
+ * rune stays framework-agnostic, so it never imports a driver: the host binds
+ * one resolver at boot (as `bindRosetta` does for translations) and the rules
+ * then take Lucid's `{ table, column, where }` options instead of a hand-written
+ * callback. The callback form is kept — it is what the resolver is built from.
+ */
+export interface DatabaseResolver {
+	/** Resolve `true` when at least one row matches. */
+	exists(query: DatabaseLookup): Promise<boolean>;
+}
+
+/** The lookup handed to a {@link DatabaseResolver} (Lucid `unique`/`exists`). */
+export interface DatabaseLookup {
+	table: string;
+	column: string;
+	value: unknown;
+	/** Extra equality filters, e.g. `{ tenant_id: 3 }` (Lucid `where`). */
+	where?: Record<string, unknown>;
+	/** Rows to ignore, e.g. `{ id: 7 }` when updating (Lucid `whereNot`). */
+	whereNot?: Record<string, unknown>;
+}
+
+let databaseResolver: DatabaseResolver | null = null;
+
+/** Bind (or clear, with `null`) the resolver backing `unique()` / `exists()`. */
+export function bindDatabase(resolver: DatabaseResolver | null): void {
+	databaseResolver = resolver;
+}
+
+/** Options form of `unique()` / `exists()` — Lucid's shape. */
+export interface DatabaseRuleOptions {
+	table: string;
+	column?: string;
+	where?: Record<string, unknown>;
+	whereNot?: Record<string, unknown>;
+}
+
+/**
+ * Turn the options form of `unique`/`exists` into the callback the rule runs.
+ * Fails loudly when no resolver is bound: a uniqueness check that cannot run
+ * must never look like one that passed.
+ */
+function toDatabaseCheck(
+	checkOrOptions:
+		| ((value: unknown, field: FieldContext) => boolean | Promise<boolean>)
+		| DatabaseRuleOptions,
+	kind: "unique" | "exists",
+): (value: unknown, field: FieldContext) => boolean | Promise<boolean> {
+	if (typeof checkOrOptions === "function") return checkOrOptions;
+	const options = checkOrOptions;
+	return async (value, field) => {
+		if (!databaseResolver) {
+			throw new RuneError(
+				"NO_DATABASE_RESOLVER",
+				`rules.${kind}({ table }) needs a database resolver.`,
+				{
+					hint: "Call bindDatabase(resolver) once at boot, or pass a callback.",
+				},
+			);
+		}
+		const found = await databaseResolver.exists({
+			table: options.table,
+			column: options.column ?? field.name,
+			value,
+			where: options.where,
+			whereNot: options.whereNot,
+		});
+		return kind === "unique" ? !found : found;
+	};
+}
+
+/** The checkbox-style truthies VineJS `accepted` recognises. */
+function isAcceptedValue(value: unknown): boolean {
+	return (
+		value === true ||
+		value === 1 ||
+		(typeof value === "string" &&
+			["1", "on", "yes", "true"].includes(value.toLowerCase()))
+	);
 }
 
 /** Default context for internal callers that don't supply one (no root available). */
@@ -592,6 +751,29 @@ export function schema(
 		return { valid: false, errors };
 	}
 
+	/**
+	 * Non-throwing validation returning a `[error, null] | [null, data]` tuple
+	 * (VineJS `tryValidate`), for when a failure is an expected code path.
+	 */
+	function tryValidate(
+		data: unknown,
+		options?: ValidateOptions,
+	): [RuneValidationError, null] | [null, Record<string, unknown>] {
+		const result = validate(data, options);
+		if (result.valid) return [null, result.data];
+		return [new RuneValidationError(result.errors.map(toErrorNode)), null];
+	}
+
+	/** Async counterpart of {@link tryValidate}. */
+	async function tryValidateAsync(
+		data: unknown,
+		options?: ValidateOptions,
+	): Promise<[RuneValidationError, null] | [null, Record<string, unknown>]> {
+		const result = await validateAsync(data, options);
+		if (result.valid) return [null, result.data];
+		return [new RuneValidationError(result.errors.map(toErrorNode)), null];
+	}
+
 	async function validateOrThrowAsync(
 		data: unknown,
 		options?: ValidateOptions,
@@ -609,8 +791,16 @@ export function schema(
 		validateOrThrow,
 		validateAsync,
 		validateOrThrowAsync,
+		tryValidate,
+		tryValidateAsync,
 	};
 }
+
+/**
+ * VineJS's `vine.create(...)`. Same thing as {@link schema} — the Adonis
+ * spelling is provided so a validator reads the same in both frameworks.
+ */
+export const create = schema;
 
 /** Map an internal {@link ValidationError} to a {@link RuneErrorNode}. */
 function toErrorNode(error: ValidationError): RuneErrorNode {
@@ -687,6 +877,9 @@ export class RuleChain<Output = unknown> {
 	#dateFormats: DateFormat[] | null = null;
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
+	#recordValueChain: RuleChain | null = null;
+	#tupleChains: RuleChain[] | null = null;
+	#unionChains: RuleChain[] | null = null;
 	#useRules: CompiledRule[] = [];
 	#asyncRules: AsyncCompiledRule[] = [];
 	/** Last rule added, whichever register it landed in — the `message()` target. */
@@ -737,7 +930,15 @@ export class RuleChain<Output = unknown> {
 				if (chain.hasAsyncRulesDeep) return true;
 			}
 		}
-		return this.#arrayItemChain?.hasAsyncRulesDeep ?? false;
+		if (this.#arrayItemChain?.hasAsyncRulesDeep) return true;
+		if (this.#recordValueChain?.hasAsyncRulesDeep) return true;
+		for (const chain of [
+			...(this.#tupleChains ?? []),
+			...(this.#unionChains ?? []),
+		]) {
+			if (chain.hasAsyncRulesDeep) return true;
+		}
+		return false;
 	}
 	/** Whether this chain stops at its first failing rule (VineJS `bail`). */
 	get bails(): boolean {
@@ -766,6 +967,9 @@ export class RuleChain<Output = unknown> {
 		next.#bail = this.#bail;
 		next.#transforms = [...this.#transforms];
 		next.#dateFormats = this.#dateFormats;
+		next.#recordValueChain = this.#recordValueChain;
+		next.#tupleChains = this.#tupleChains;
+		next.#unionChains = this.#unionChains;
 		next.#ruleMessages = new Map(this.#ruleMessages);
 		next.#lastRule = this.#lastRule;
 		next.#preTransforms = [...this.#preTransforms];
@@ -923,6 +1127,31 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
+	/** Must be the same instant as `operand` (VineJS `equals`). */
+	equals(operand: unknown): this {
+		return this.#compareDate("equals", operand, (a, b) => a === b);
+	}
+
+	/** Must be after the sibling's date, or the same instant (VineJS `afterOrSameAs`). */
+	afterOrSameAs(otherField: string, options?: { compare?: "day" }): this {
+		return this.#compareDateField(
+			"afterOrSameAs",
+			otherField,
+			options,
+			(a, b) => a >= b,
+		);
+	}
+
+	/** Must be before the sibling's date, or the same instant. */
+	beforeOrSameAs(otherField: string, options?: { compare?: "day" }): this {
+		return this.#compareDateField(
+			"beforeOrSameAs",
+			otherField,
+			options,
+			(a, b) => a <= b,
+		);
+	}
+
 	/** Must fall on a Saturday or Sunday (VineJS `weekend`). */
 	weekend(): this {
 		this.#pushRule({
@@ -989,6 +1218,81 @@ export class RuleChain<Output = unknown> {
 					);
 				}
 			},
+		});
+		return this;
+	}
+
+	/**
+	 * Must be an "accepted" value — `true`, `1`, `"1"`, `"on"`, `"yes"`,
+	 * `"true"` (VineJS `accepted`, for checkbox-style consent fields).
+	 */
+	accepted(): RuleChain<true> {
+		this.#pushRule({
+			name: "accepted",
+			validate: isAcceptedValue,
+			message: "Must be accepted",
+		});
+		// Normalise ONLY an accepted value: a blanket `() => true` would rewrite a
+		// refused value into an accepted one before the rule ever saw it.
+		this.#transforms.push({
+			name: "accepted",
+			fn: (value) => (isAcceptedValue(value) ? true : value),
+		});
+		return this.#retype<true>();
+	}
+
+	/**
+	 * Object with arbitrary keys, every value validated by `valueChain`
+	 * (VineJS `record`).
+	 */
+	record<Item extends RuleChain>(
+		valueChain: Item,
+	): RuleChain<Record<string, OutputOf<Item>>> {
+		this.#pushRule({
+			name: "record",
+			validate: (v) => isPlainObject(v),
+			message: "Must be an object",
+		});
+		this.#recordValueChain = valueChain;
+		return this.#retype<Record<string, OutputOf<Item>>>();
+	}
+
+	/**
+	 * Fixed-length array with a schema per position (VineJS `tuple`). Extra
+	 * items are rejected — a tuple that silently ignores a trailing element is
+	 * how unvalidated data slips through.
+	 */
+	tuple<const Items extends readonly RuleChain[]>(
+		items: Items,
+	): RuleChain<{ [K in keyof Items]: OutputOf<Items[K]> }> {
+		this.#pushRule({
+			name: "tuple",
+			args: { length: items.length },
+			validate: (v) => Array.isArray(v) && v.length === items.length,
+			message: `Must be an array of exactly ${items.length} items`,
+		});
+		this.#tupleChains = [...items];
+		return this.#retype<{ [K in keyof Items]: OutputOf<Items[K]> }>();
+	}
+
+	/**
+	 * Value must satisfy at least one of `chains`.
+	 *
+	 * Named deviation: VineJS's `vine.union` selects a branch with an explicit
+	 * predicate (`vine.union.if(...)`) and reports that branch's errors. rune
+	 * tries each branch and passes on the first match; when none matches it
+	 * reports a single `union` error rather than the losing branches' errors,
+	 * which would be noise attributable to no particular branch.
+	 */
+	union(chains: readonly RuleChain[]): this {
+		this.#unionChains = [...chains];
+		// Marker rule: its name is not in STANDARD_RULES, which is what keeps a
+		// union off the native path. The Rust engine knows nothing about branches
+		// and would silently accept anything.
+		this.#pushRule({
+			name: "union",
+			validate: () => true,
+			message: "Does not match any allowed shape",
 		});
 		return this;
 	}
@@ -1229,10 +1533,19 @@ export class RuleChain<Output = unknown> {
 
 	/** Must differ from a sibling field (VineJS `notSameAs`). */
 	notSameAs(otherField: string): this {
+		const formats = this.#dateFormats;
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
-				if (value === readSibling(field, otherField)) {
+				const other = readSibling(field, otherField);
+				if (formats !== null && value instanceof Date) {
+					const parsed = parseDateValue(other, formats);
+					if (parsed !== null && parsed.getTime() === value.getTime()) {
+						field.report(`Must be different from ${otherField}`, "notSameAs");
+					}
+					return;
+				}
+				if (value === other) {
 					field.report(`Must be different from ${otherField}`, "notSameAs");
 				}
 			},
@@ -1283,6 +1596,69 @@ export class RuleChain<Output = unknown> {
 			args,
 			validate: (v) => typeof v === "string" && check(v),
 			message,
+		});
+		return this;
+	}
+
+	/** Must be a passport number for `countryCode`. Throws for an uncovered country. */
+	passport(options: { countryCode: string }): this {
+		const { countryCode } = options;
+		if (isPassport("", countryCode) === null) {
+			throw new RuneError(
+				"UNSUPPORTED_COUNTRY",
+				`passport(): no pattern for country '${countryCode}'.`,
+				{
+					hint: `Supported: ${SUPPORTED_PASSPORTS.join(", ")}. Use .regex() for others.`,
+				},
+			);
+		}
+		return this.#stringRule(
+			"passport",
+			(v) => isPassport(v, countryCode) === true,
+			`Must be a valid ${countryCode.toUpperCase()} passport number`,
+			{ countryCode },
+		);
+	}
+
+	/** Lowercase the value (VineJS `toLowerCase`). */
+	toLowerCase(): this {
+		return this.#stringMutation("toLowerCase", (v) => v.toLowerCase());
+	}
+
+	/** Uppercase the value (VineJS `toUpperCase`). */
+	toUpperCase(): this {
+		return this.#stringMutation("toUpperCase", (v) => v.toUpperCase());
+	}
+
+	/** Convert dash/snake/spaced words to camelCase (VineJS `toCamelCase`). */
+	toCamelCase(): this {
+		return this.#stringMutation("toCamelCase", toCamelCase);
+	}
+
+	/** HTML-escape `& < > " '` (VineJS `escape`). */
+	escape(): this {
+		return this.#stringMutation("escape", escapeHtml);
+	}
+
+	/** Normalise an email address (VineJS `normalizeEmail`). */
+	normalizeEmail(options?: NormalizeEmailOptions): this {
+		return this.#stringMutation("normalizeEmail", (v) =>
+			normalizeEmail(v, options),
+		);
+	}
+
+	/** Normalise a URL (VineJS `normalizeUrl`). */
+	normalizeUrl(options?: NormalizeUrlOptions): this {
+		return this.#stringMutation("normalizeUrl", (v) =>
+			normalizeUrl(v, options),
+		);
+	}
+
+	/** Shared body of the string mutations — non-strings pass through untouched. */
+	#stringMutation(name: string, fn: (value: string) => string): this {
+		this.#transforms.push({
+			name,
+			fn: (value) => (typeof value === "string" ? fn(value) : value),
 		});
 		return this;
 	}
@@ -1414,10 +1790,21 @@ export class RuleChain<Output = unknown> {
 
 	/** Must equal a sibling field (VineJS `sameAs`). Cross-field → TS-only. */
 	sameAs(otherField: string): this {
+		const formats = this.#dateFormats;
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
 				const other = readSibling(field, otherField);
+				// On a date chain the value is a parsed `Date` and the sibling is
+				// still raw, so `!==` would compare a Date to a string and always
+				// fail. Compare instants instead.
+				if (formats !== null && value instanceof Date) {
+					const parsed = parseDateValue(other, formats);
+					if (parsed === null || parsed.getTime() !== value.getTime()) {
+						field.report(`Must match ${otherField}`, "sameAs");
+					}
+					return;
+				}
 				if (value !== other) {
 					field.report(`Must match ${otherField}`, "sameAs");
 				}
@@ -1554,7 +1941,15 @@ export class RuleChain<Output = unknown> {
 	unique(
 		check: (value: unknown, field: FieldContext) => boolean | Promise<boolean>,
 		message?: string,
+	): this;
+	unique(options: DatabaseRuleOptions, message?: string): this;
+	unique(
+		checkOrOptions:
+			| ((value: unknown, field: FieldContext) => boolean | Promise<boolean>)
+			| DatabaseRuleOptions,
+		message?: string,
 	): this {
+		const check = toDatabaseCheck(checkOrOptions, "unique");
 		this.#pushAsync({
 			__rune: "asyncRule",
 			async run(value: unknown, field: FieldContext): Promise<void> {
@@ -1577,7 +1972,15 @@ export class RuleChain<Output = unknown> {
 	exists(
 		check: (value: unknown, field: FieldContext) => boolean | Promise<boolean>,
 		message?: string,
+	): this;
+	exists(options: DatabaseRuleOptions, message?: string): this;
+	exists(
+		checkOrOptions:
+			| ((value: unknown, field: FieldContext) => boolean | Promise<boolean>)
+			| DatabaseRuleOptions,
+		message?: string,
 	): this {
+		const check = toDatabaseCheck(checkOrOptions, "exists");
 		this.#pushAsync({
 			__rune: "asyncRule",
 			async run(value: unknown, field: FieldContext): Promise<void> {
@@ -1616,6 +2019,75 @@ export class RuleChain<Output = unknown> {
 			this.#ruleMessages.set(target.ref, msg);
 		}
 		return this;
+	}
+
+	/**
+	 * Build the {@link FieldContext} handed to `.use()` / async rules. Shared so
+	 * the sync and async paths cannot drift on what a rule can see.
+	 */
+	#makeFieldContext(
+		field: string,
+		value: unknown,
+		ctx: RunContext,
+		errors: ValidationError[],
+		onMutate: (next: unknown) => void,
+	): FieldContext {
+		const segments = field.split(".");
+		return {
+			value,
+			data: ctx.data,
+			parent: ctx.parent,
+			field,
+			meta: ctx.meta,
+			isValid: errors.length === 0,
+			name: segments[segments.length - 1] ?? field,
+			wildCardPath: toWildcardPath(field),
+			isArrayMember: Array.isArray(ctx.parent),
+			isDefined: value !== undefined && value !== null,
+			isValidDataType: errors.length === 0,
+			getFieldPath: () => field,
+			mutate: onMutate,
+			report(
+				message: string,
+				rule: string,
+				reportedField?: string,
+				args?: Record<string, unknown>,
+			): void {
+				errors.push({
+					field: reportedField ?? field,
+					rule,
+					message,
+					...(args ? { meta: args } : {}),
+				});
+			},
+		};
+	}
+
+	/**
+	 * Run only the implicit `.use()` rules against an absent value. A rule
+	 * declared `{ implicit: true }` exists to police `undefined`/`null`, so the
+	 * early return for optional fields must not skip it.
+	 */
+	#runImplicitRules(
+		field: string,
+		value: unknown,
+		ctx: RunContext,
+	): ValidationError[] {
+		const implicitRules = this.#useRules.filter((rule) => rule.implicit);
+		if (implicitRules.length === 0) return [];
+		const errors: ValidationError[] = [];
+		const fieldCtx = this.#makeFieldContext(
+			field,
+			value,
+			ctx,
+			errors,
+			() => {},
+		);
+		for (const rule of implicitRules) {
+			fieldCtx.isValid = errors.length === 0;
+			rule.run(value, fieldCtx);
+		}
+		return errors;
 	}
 
 	/** Add a value rule and remember it as the `message()` target. */
@@ -1666,18 +2138,30 @@ export class RuleChain<Output = unknown> {
 
 		if (value === undefined) {
 			if (this.#isOptional || !this.#isRequired(ctx)) {
-				return { errors: [], transformed: value };
+				// Implicit rules are precisely the ones that must see an absent value.
+				return {
+					errors: this.#runImplicitRules(field, value, ctx),
+					transformed: value,
+				};
 			}
 			return { errors: [this.#requiredError(field, ctx)], transformed: value };
 		}
 		if (value === null) {
-			// rune treats a `null` value as "absent" for optional/nullable/
-			// non-required fields (a deliberate, cross-engine-conformance-tested
-			// choice — see the Rust↔TS parity suite). `.nullable()` additionally
-			// keeps it in the output. This unifies null/undefined for optional
-			// fields, a documented deviation from VineJS's stricter split.
-			if (this.#isNullable || this.#isOptional || !this.#isRequired(ctx)) {
-				return { errors: [], transformed: value };
+			// VineJS split, now matched exactly: `nullable()` accepts null AND keeps
+			// it in the output; `optional()` accepts null but DROPS the key. rune
+			// used to keep null in both cases, so an optional field silently added
+			// `key: null` to a payload VineJS would have left without the key.
+			if (this.#isNullable) {
+				return {
+					errors: this.#runImplicitRules(field, value, ctx),
+					transformed: value,
+				};
+			}
+			if (this.#isOptional || !this.#isRequired(ctx)) {
+				return {
+					errors: this.#runImplicitRules(field, value, ctx),
+					transformed: undefined,
+				};
 			}
 			return { errors: [this.#requiredError(field, ctx)], transformed: value };
 		}
@@ -1693,7 +2177,8 @@ export class RuleChain<Output = unknown> {
 		// 3. Vine-style .use() rules — run with a FieldContext exposing the root
 		//    `data` and `parent`, so a rule can validate across fields.
 		if (this.#useRules.length > 0 && !(this.#bail && errors.length > 0)) {
-			this.#runUseRules(field, transformed, ctx, errors);
+			// `.use()` rules may call `field.mutate()`, so the value can change here.
+			transformed = this.#runUseRules(field, transformed, ctx, errors);
 		}
 
 		// 3b. Date output mapping (VineJS `VineDate.transform`). Deliberately AFTER
@@ -1722,6 +2207,67 @@ export class RuleChain<Output = unknown> {
 				if (nestedResult.transformed !== undefined) {
 					obj[nestedField] = nestedResult.transformed;
 				}
+			}
+		}
+
+		// 4b. Record values — same shape as the nested-object walk, arbitrary keys.
+		if (this.#recordValueChain && isPlainObject(transformed)) {
+			const obj: Record<string, unknown> = { ...transformed };
+			transformed = obj;
+			for (const key of Object.keys(obj)) {
+				const res = this.#recordValueChain._validateWithTransform(
+					`${field}.${key}`,
+					obj[key],
+					{ ...ctx, parent: obj },
+					pending,
+				);
+				errors.push(...res.errors);
+				if (res.transformed !== undefined) obj[key] = res.transformed;
+			}
+		}
+
+		// 4c. Tuple positions — length was already enforced by the `tuple` rule.
+		if (this.#tupleChains && Array.isArray(transformed)) {
+			const arr: unknown[] = [...transformed];
+			transformed = arr;
+			this.#tupleChains.forEach((chain, i) => {
+				const res = chain._validateWithTransform(
+					`${field}.${i}`,
+					arr[i],
+					{ ...ctx, parent: arr },
+					pending,
+				);
+				for (const e of res.errors) if (e.index === undefined) e.index = i;
+				errors.push(...res.errors);
+				if (res.transformed !== undefined) arr[i] = res.transformed;
+			});
+		}
+
+		// 4d. Union — first branch that validates wins; its transform is kept.
+		if (this.#unionChains) {
+			let matched = false;
+			for (const branch of this.#unionChains) {
+				const res = branch._validateWithTransform(field, transformed, ctx);
+				if (res.errors.length === 0) {
+					transformed = res.transformed;
+					matched = true;
+					break;
+				}
+			}
+			if (!matched) {
+				errors.push({
+					field,
+					rule: "union",
+					message: resolveRuleMessage(
+						field,
+						{
+							name: "union",
+							validate: () => false,
+							message: "Does not match any allowed shape",
+						},
+						ctx,
+					),
+				});
 			}
 		}
 
@@ -1768,26 +2314,35 @@ export class RuleChain<Output = unknown> {
 		transformed: unknown,
 		ctx: RunContext,
 		errors: ValidationError[],
-	): void {
+	): unknown {
 		// Set per iteration so `report` can substitute the `.message()` override of
 		// the rule currently running — these rules carry their text inside `run`.
 		let override: string | undefined;
-		const fieldCtx: FieldContext = {
-			value: transformed,
-			data: ctx.data,
-			parent: ctx.parent,
+		let current = transformed;
+		const fieldCtx = this.#makeFieldContext(
 			field,
-			meta: ctx.meta,
-			isValid: errors.length === 0,
-			report(message: string, rule: string): void {
-				errors.push({ field, rule, message: override ?? message });
+			transformed,
+			ctx,
+			errors,
+			(next) => {
+				current = next;
+				fieldCtx.value = next;
 			},
-		};
+		);
+		const report = fieldCtx.report.bind(fieldCtx);
+		fieldCtx.report = (message, rule, reportedField, args) =>
+			report(override ?? message, rule, reportedField, args);
 		for (const rule of this.#useRules) {
+			// A non-implicit rule is skipped on an absent value (VineJS semantics);
+			// `implicit: true` is what lets a custom rule police undefined/null.
+			if (!rule.implicit && (current === undefined || current === null))
+				continue;
 			fieldCtx.isValid = errors.length === 0;
+			fieldCtx.isDefined = current !== undefined && current !== null;
 			override = this.#ruleMessages.get(rule);
-			rule.run(transformed, fieldCtx);
+			rule.run(current, fieldCtx);
 		}
+		return current;
 	}
 
 	/**
@@ -1802,21 +2357,27 @@ export class RuleChain<Output = unknown> {
 	): Promise<ValidationError[]> {
 		const errors: ValidationError[] = [];
 		let override: string | undefined;
-		const fieldCtx: FieldContext = {
-			value: transformed,
-			data: ctx.data,
-			parent: ctx.parent,
+		let current = transformed;
+		const fieldCtx = this.#makeFieldContext(
 			field,
-			meta: ctx.meta,
-			isValid: true,
-			report(message: string, rule: string): void {
-				errors.push({ field, rule, message: override ?? message });
+			transformed,
+			ctx,
+			errors,
+			(next) => {
+				current = next;
+				fieldCtx.value = next;
 			},
-		};
+		);
+		const report = fieldCtx.report.bind(fieldCtx);
+		fieldCtx.report = (message, rule, reportedField, args) =>
+			report(override ?? message, rule, reportedField, args);
 		for (const rule of this.#asyncRules) {
+			if (!rule.implicit && (current === undefined || current === null))
+				continue;
 			fieldCtx.isValid = errors.length === 0;
+			fieldCtx.isDefined = current !== undefined && current !== null;
 			override = this.#ruleMessages.get(rule);
-			await rule.run(transformed, fieldCtx);
+			await rule.run(current, fieldCtx);
 		}
 		return errors;
 	}
@@ -1907,6 +2468,13 @@ const LAST_FIELD: FieldContext = {
 	field: "",
 	meta: {},
 	isValid: true,
+	name: "",
+	wildCardPath: "",
+	isArrayMember: false,
+	isDefined: false,
+	isValidDataType: true,
+	getFieldPath: () => "",
+	mutate: (): void => {},
 	report(): void {},
 };
 
@@ -2004,6 +2572,17 @@ export const rules = {
 	any: (): RuleChain<unknown> => new RuleChain(),
 	date: (options?: { formats?: DateFormat[] }): RuleChain<Date> =>
 		new RuleChain().date(options),
+	accepted: (): RuleChain<true> => new RuleChain().accepted(),
+	record: <Item extends RuleChain>(
+		valueChain: Item,
+	): RuleChain<Record<string, OutputOf<Item>>> =>
+		new RuleChain().record(valueChain),
+	tuple: <const Items extends readonly RuleChain[]>(
+		items: Items,
+	): RuleChain<{ [K in keyof Items]: OutputOf<Items[K]> }> =>
+		new RuleChain().tuple(items),
+	union: (chains: readonly RuleChain[]): RuleChain =>
+		new RuleChain().union(chains),
 	object: <Sh extends Record<string, RuleChain>>(
 		shape: Sh,
 	): RuleChain<Infer<Sh>> => new RuleChain().object(shape),

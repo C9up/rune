@@ -39,7 +39,7 @@ export interface MessagesProviderContract {
  * Replace a dotted field path's numeric segments with `*` so array items share
  * a single wildcard message key — `tags.0.name` → `tags.*.name` (VineJS parity).
  */
-function toWildcardPath(field: string): string {
+export function toWildcardPath(field: string): string {
 	return field
 		.split(".")
 		.map((segment) => (/^\d+$/.test(segment) ? "*" : segment))

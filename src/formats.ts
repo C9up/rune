@@ -125,3 +125,105 @@ export function isPostalCode(v: string, countryCode: string): boolean | null {
  */
 export const isMobile = (v: string): boolean =>
 	E164_RE.test(v.replace(/[ .-]/g, ""));
+
+/** HTML-escape the five characters that break out of markup (VineJS `escape`). */
+export function escapeHtml(v: string): string {
+	return v
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#x27;");
+}
+
+/** Options accepted by `normalizeEmail` (subset of VineJS's). */
+export interface NormalizeEmailOptions {
+	/** Lowercase the whole address. Defaults to `true`, like VineJS. */
+	allLowercase?: boolean;
+	/** Strip dots from a Gmail local part (`a.b@gmail.com` → `ab@gmail.com`). */
+	gmailRemoveDots?: boolean;
+	/** Drop a `+tag` suffix from the local part. */
+	gmailRemoveSubaddress?: boolean;
+}
+
+const GMAIL_DOMAINS = new Set(["gmail.com", "googlemail.com"]);
+
+export function normalizeEmail(
+	value: string,
+	options: NormalizeEmailOptions = {},
+): string {
+	const at = value.lastIndexOf("@");
+	if (at < 1) return value;
+	let local = value.slice(0, at);
+	let domain = value.slice(at + 1);
+	// The domain is case-insensitive per RFC 1035, so it is always lowercased.
+	domain = domain.toLowerCase();
+	if (options.allLowercase !== false) local = local.toLowerCase();
+	if (GMAIL_DOMAINS.has(domain)) {
+		if (options.gmailRemoveSubaddress) local = local.split("+")[0];
+		if (options.gmailRemoveDots) local = local.replace(/\./g, "");
+	} else if (options.gmailRemoveSubaddress) {
+		local = local.split("+")[0];
+	}
+	return `${local}@${domain}`;
+}
+
+/** Options accepted by `normalizeUrl` (subset of VineJS's). */
+export interface NormalizeUrlOptions {
+	/** Remove a leading `www.` from the host. */
+	stripWWW?: boolean;
+	/** Force this protocol (e.g. `"https"`). */
+	forceProtocol?: string;
+	/** Drop the trailing slash of an empty path. */
+	stripTrailingSlash?: boolean;
+}
+
+export function normalizeUrl(
+	value: string,
+	options: NormalizeUrlOptions = {},
+): string {
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		// Not parseable: hand it back untouched and let `url()` report the failure.
+		return value;
+	}
+	if (options.forceProtocol) url.protocol = `${options.forceProtocol}:`;
+	if (options.stripWWW) url.hostname = url.hostname.replace(/^www\./, "");
+	let out = url.toString();
+	if (options.stripTrailingSlash && url.pathname === "/") {
+		out = out.replace(/\/$/, "");
+	}
+	return out;
+}
+
+/** `dash-case`, `snake_case` and spaced words to `camelCase`. */
+export function toCamelCase(v: string): string {
+	return v
+		.trim()
+		.replace(/[-_\s]+(.)?/g, (_, c: string | undefined) =>
+			c ? c.toUpperCase() : "",
+		)
+		.replace(/^(.)/, (c) => c.toLowerCase());
+}
+
+/**
+ * Passport numbers. Named subset, same fail-closed contract as
+ * {@link isPostalCode}: an unknown country returns `null`.
+ */
+const PASSPORTS: Record<string, RegExp> = {
+	CH: /^[A-Z]\d{7}$/i,
+	FR: /^\d{2}[A-Z]{2}\d{5}$/i,
+	US: /^\d{9}$/,
+	GB: /^\d{9}$/,
+	DE: /^[CFGHJKLMNPRTVWXYZ0-9]{9}$/i,
+	IT: /^[A-Z0-9]{2}\d{7}$/i,
+};
+
+export const SUPPORTED_PASSPORTS = Object.keys(PASSPORTS);
+
+export function isPassport(v: string, countryCode: string): boolean | null {
+	const re = PASSPORTS[countryCode.toUpperCase()];
+	return re === undefined ? null : re.test(v.trim());
+}
