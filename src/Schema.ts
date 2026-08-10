@@ -45,6 +45,12 @@ import {
 import type { MessagesProviderContract } from "./MessagesProvider.js";
 import { toWildcardPath } from "./MessagesProvider.js";
 import {
+	detectFileType,
+	extensionMatches,
+	MAGIC_HEAD_BYTES,
+	readHead,
+} from "./magic.js";
+import {
 	isNativeAvailable,
 	validateNative,
 	warnNativeUnavailableOnce,
@@ -702,8 +708,18 @@ export interface DateCompareOptions {
  */
 export interface FileLike {
 	size: number;
-	/** MIME type as REPORTED by the upload — rune never sniffs bytes. */
+	/**
+	 * MIME type as REPORTED by the upload. Trust it only with
+	 * `verifyContent()`, which checks it against the real bytes.
+	 */
 	type?: string;
+	/** Adonis bodyparser's temp path — a byte source for `verifyContent()`. */
+	tmpPath?: string;
+	/** Alternative byte-source paths. */
+	filePath?: string;
+	path?: string;
+	/** In-memory bytes, when the upload was buffered. */
+	buffer?: Uint8Array;
 	extname?: string | null;
 	clientName?: string;
 	name?: string;
@@ -732,6 +748,24 @@ export function parseByteSize(size: number | string): number {
 		});
 	}
 	return Math.round(Number(match[1]) * BYTE_UNITS[match[2].toLowerCase()]);
+}
+
+/**
+ * Get the leading bytes of an upload, from whichever source it exposes.
+ * Returns `null` when there is none — the caller must treat that as a FAILURE,
+ * not as "nothing to check".
+ */
+async function readFileHead(file: FileLike): Promise<Uint8Array | null> {
+	if (file.buffer instanceof Uint8Array) {
+		return file.buffer.subarray(0, MAGIC_HEAD_BYTES);
+	}
+	const path = file.tmpPath ?? file.filePath ?? file.path;
+	if (typeof path !== "string" || path.length === 0) return null;
+	try {
+		return await readHead(path);
+	} catch {
+		return null;
+	}
 }
 
 /** Structural guard for {@link FileLike}. */
@@ -1726,6 +1760,9 @@ export class RuleChain<Output = unknown> {
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
 	#allowUnknown = false;
+	/** Extensions / MIME types declared by `file()` / `mimeTypes()`. */
+	#declaredExtnames: readonly string[] | null = null;
+	#declaredMimeTypes: readonly string[] | null = null;
 	#camelCaseKeys = false;
 	#groups: ConditionalGroup[] = [];
 	#recordValueChain: RuleChain | null = null;
@@ -1834,6 +1871,8 @@ export class RuleChain<Output = unknown> {
 		next.#dateFormats = this.#dateFormats;
 		next.#coercions = [...this.#coercions];
 		next.#allowUnknown = this.#allowUnknown;
+		next.#declaredExtnames = this.#declaredExtnames;
+		next.#declaredMimeTypes = this.#declaredMimeTypes;
 		next.#camelCaseKeys = this.#camelCaseKeys;
 		next.#groups = [...this.#groups];
 		next.#recordValueChain = this.#recordValueChain;
@@ -2355,6 +2394,7 @@ export class RuleChain<Output = unknown> {
 		// stopped capping.
 		const maxBytes =
 			options?.size === undefined ? undefined : parseByteSize(options.size);
+		if (options?.extnames) this.#declaredExtnames = options.extnames;
 		this.#pushRule({
 			name: "file",
 			args: options ? { ...options } : undefined,
@@ -2444,6 +2484,7 @@ export class RuleChain<Output = unknown> {
 	 */
 	mimeTypes(types: readonly string[]): this {
 		const allowed = types.map((t) => t.toLowerCase());
+		this.#declaredMimeTypes = allowed;
 		this.#pushRule({
 			name: "mimeTypes",
 			args: { types: allowed },
@@ -2452,6 +2493,75 @@ export class RuleChain<Output = unknown> {
 				typeof v.type === "string" &&
 				allowed.includes(v.type.toLowerCase()),
 			message: `Must be one of ${allowed.join(", ")}`,
+		});
+		return this;
+	}
+
+	/**
+	 * Verify the file's REAL type against its magic number (Adonis parity).
+	 *
+	 * A `.exe` renamed `.jpg` passes every declarative check — size, extension,
+	 * reported MIME — because all three come from the uploader. This reads the
+	 * leading bytes and refuses a mismatch.
+	 *
+	 * Async by nature (it touches the filesystem), so the schema must run with
+	 * `validateResultAsync` / `validate`. Needs a byte source on the file object
+	 * (`buffer`, `tmpPath`, `filePath` or `path`) — an Adonis `MultipartFile`
+	 * carries `tmpPath`. With NO source it FAILS: a content check that cannot
+	 * run must never look like one that passed.
+	 */
+	verifyContent(): this {
+		const extnames = this.#declaredExtnames;
+		const mimeTypes = this.#declaredMimeTypes;
+		this.#pushAsync({
+			__rune: "asyncRule",
+			async run(value: unknown, field: FieldContext): Promise<void> {
+				if (!isFileLike(value)) {
+					field.report("Must be a valid file", "verifyContent");
+					return;
+				}
+				const head = await readFileHead(value);
+				if (head === null) {
+					field.report(
+						"Cannot read the file's content to verify its type",
+						"verifyContent",
+					);
+					return;
+				}
+				const detected = detectFileType(head);
+				if (detected === null) {
+					field.report("File type could not be recognised", "verifyContent");
+					return;
+				}
+				// The declared extension must agree with the bytes.
+				const declaredExt =
+					typeof value.extname === "string" && value.extname.length > 0
+						? value.extname
+						: null;
+				if (declaredExt && !extensionMatches(detected.ext, declaredExt)) {
+					field.report(
+						`Content is ${detected.ext}, not ${declaredExt.replace(/^\./, "")}`,
+						"verifyContent",
+					);
+					return;
+				}
+				if (
+					extnames &&
+					!extnames.some((allowed) => extensionMatches(detected.ext, allowed))
+				) {
+					field.report(
+						`Content is ${detected.ext}, which is not allowed`,
+						"verifyContent",
+					);
+					return;
+				}
+				if (mimeTypes && !mimeTypes.includes(detected.mime)) {
+					field.report(
+						`Content is ${detected.mime}, which is not allowed`,
+						"verifyContent",
+					);
+				}
+			},
 		});
 		return this;
 	}
