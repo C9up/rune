@@ -654,13 +654,136 @@ describe("rune > audit 8 — formes exactes de l'API Vine 4.x", () => {
 		).toBe("helloWorld");
 	});
 
-	it("rules.optional() rend un record de propriétés à spreader", () => {
+	it("helpers.optional() rend un record de propriétés à spreader", () => {
+		// VineJS garde ce transformateur sous `helpers`; `optional()` au niveau
+		// racine est un TYPE de schéma (VineOptional), pas un transformateur.
 		const shape = { id: rules.number(), name: rules.string() };
-		const v = schema({ u: rules.any().object({ ...rune.optional(shape) }) });
+		const v = schema({
+			u: rules.any().object({ ...rune.helpers.optional(shape) }),
+		});
 		expect(v.validateResult({ u: {} }).valid).toBe(true);
 		// La source n'est pas relâchée par l'opération.
 		expect(
 			schema({ u: rules.any().object(shape) }).validateResult({ u: {} }).valid,
 		).toBe(false);
+	});
+});
+
+describe("rune > audit 9 — contrat du reporter, types optional/null, JSON Schema", () => {
+	it("le reporter DÉCIDE l'erreur levée et reçoit un FieldContext", () => {
+		const seen: Array<{ path: string; name: string; wildcard: string }> = [];
+		class MyError extends Error {}
+		const factory = () => ({
+			hasErrors: false,
+			createError: () => new MyError("mon format"),
+			report(
+				_m: string,
+				_r: string,
+				field: { getFieldPath(): string; name: string; wildCardPath: string },
+			) {
+				seen.push({
+					path: field.getFieldPath(),
+					name: field.name,
+					wildcard: field.wildCardPath,
+				});
+				return undefined;
+			},
+		});
+		const v = schema({
+			rows: rules.array(rules.any().object({ email: rules.string() })),
+		});
+		v.errorReporter = factory;
+		// VineJS : c'est createError() du reporter qui produit l'erreur finale.
+		expect(() => v.validateOrThrow({ rows: [{ email: 1 }] })).toThrow(MyError);
+		expect(seen[0]?.path).toBe("rows.0.email");
+		expect(seen[0]?.name).toBe("email");
+		expect(seen[0]?.wildcard).toBe("rows.*.email");
+		v.errorReporter = null;
+	});
+
+	it("reporter global, par validateur, puis par appel — dans cet ordre", () => {
+		const hits: string[] = [];
+		rune.errorReporter = () => ({
+			hasErrors: false,
+			createError: () => new Error("global"),
+			report: () => void hits.push("global"),
+		});
+		const v = schema({ a: rules.string() });
+		v.validateResult({ a: 1 });
+		expect(hits).toEqual(["global"]);
+
+		v.errorReporter = () => ({
+			hasErrors: false,
+			createError: () => new Error("validator"),
+			report: () => void hits.push("validator"),
+		});
+		v.validateResult({ a: 1 });
+		expect(hits.at(-1)).toBe("validator");
+
+		v.validateResult(
+			{ a: 1 },
+			{
+				errorReporter: () => ({
+					hasErrors: false,
+					createError: () => new Error("call"),
+					report: () => void hits.push("call"),
+				}),
+			},
+		);
+		expect(hits.at(-1)).toBe("call");
+		v.errorReporter = null;
+		rune.errorReporter = null;
+	});
+
+	it("optional() et null() sont des TYPES de schéma", () => {
+		// VineJS builder.d.ts:135/144 — pas des modificateurs.
+		const opt = schema({ a: rune.optional() });
+		expect(opt.validateResult({}).valid).toBe(true);
+		expect(opt.validateResult({ a: 1 }).valid).toBe(false);
+
+		const nul = schema({ a: rune.null() });
+		expect(nul.validateResult({ a: null }).valid).toBe(true);
+		expect(nul.validateResult({ a: 0 }).valid).toBe(false);
+	});
+
+	it("helpers: hasKeys, isDistinct, getNestedValue", () => {
+		expect(rune.helpers.hasKeys({ a: 1, b: 2 }, ["a", "b"])).toBe(true);
+		expect(rune.helpers.hasKeys({ a: 1 }, ["a", "b"])).toBe(false);
+		expect(rune.helpers.isDistinct([1, 2, 3])).toBe(true);
+		expect(rune.helpers.isDistinct([{ id: 1 }, { id: 1 }], "id")).toBe(false);
+		// Un item sans la clé est ignoré, pas compté comme doublon.
+		expect(rune.helpers.isDistinct([{ id: 1 }, {}, {}], "id")).toBe(true);
+		expect(
+			rune.helpers.getNestedValue("a.b.c", { data: { a: { b: { c: 42 } } } }),
+		).toBe(42);
+	});
+
+	it("le JSON Schema décrit les conteneurs et les littéraux", () => {
+		const v = schema({
+			tags: rules.array(rules.string().minLength(2)).notEmpty(),
+			pair: rules.tuple([rules.number(), rules.string()]),
+			counts: rules.record(rules.number().nonNegative()),
+			kind: rules.literal("card"),
+			n: rules.number().withoutDecimals(),
+		});
+		expect(v.toJSONSchema()).toMatchObject({
+			properties: {
+				tags: {
+					type: "array",
+					minItems: 1,
+					items: { type: "string", minLength: 2 },
+				},
+				pair: {
+					type: "array",
+					prefixItems: [{ type: "number" }, { type: "string" }],
+				},
+				counts: {
+					type: "object",
+					additionalProperties: { type: "number", minimum: 0 },
+				},
+				kind: { const: "card" },
+				n: { type: "integer" },
+			},
+		});
 	});
 });

@@ -331,19 +331,71 @@ export type ErrorReporterFactory = () => ErrorReporterContract;
  * A factory is built ONCE per validation, so a stateful Vine reporter sees the
  * whole run and can assemble its own error shape.
  */
-function toReportFn(
+function toReporter(
 	reporter:
 		| ErrorReporterFactory
 		| ((error: ValidationError) => void)
 		| undefined,
-): ((error: ValidationError) => void) | undefined {
+	data: unknown,
+	meta: Record<string, unknown>,
+):
+	| {
+			report(error: ValidationError): void;
+			createError?: () => Error;
+	  }
+	| undefined {
 	if (!reporter) return undefined;
 	if (reporter.length > 0) {
-		return reporter as (error: ValidationError) => void;
+		// Plain observer: it consumes each error and never decides the outcome.
+		const observe = reporter as (error: ValidationError) => void;
+		return { report: observe };
 	}
 	const built = (reporter as ErrorReporterFactory)();
-	return (error) =>
-		built.report(error.message, error.rule, error.field, error.meta);
+	return {
+		report(error) {
+			// VineJS hands the reporter a FieldContext, not a path string: a real
+			// reporter reads `getFieldPath()` / `name` / `wildCardPath` off it.
+			built.report(
+				error.message,
+				error.rule,
+				reportedFieldContext(error, data, meta),
+				error.meta,
+			);
+		},
+		createError: () => built.createError(),
+	};
+}
+
+/**
+ * Rebuild the {@link FieldContext} a reporter expects from a collected error.
+ *
+ * The traversal reports post-hoc (it collects, then hands the batch over), so
+ * the original context is gone by then — but everything a reporter actually
+ * reads is derivable from the field path plus the root data.
+ */
+function reportedFieldContext(
+	error: ValidationError,
+	data: unknown,
+	meta: Record<string, unknown>,
+): FieldContext {
+	const segments = error.field.split(".");
+	const root = isPlainObject(data) ? data : {};
+	return {
+		value: undefined,
+		data: root,
+		parent: root,
+		field: error.field,
+		meta,
+		isValid: false,
+		name: segments[segments.length - 1] ?? error.field,
+		wildCardPath: toWildcardPath(error.field),
+		isArrayMember: /\.\d+$/.test(error.field),
+		isDefined: false,
+		isValidDataType: false,
+		getFieldPath: () => error.field,
+		mutate: (): void => {},
+		report: (): void => {},
+	};
 }
 
 export interface ValidationSchema<T = Record<string, unknown>> {
@@ -369,6 +421,14 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 			| { issues: ReadonlyArray<{ message: string; path: string[] }> }
 		>;
 	};
+	/**
+	 * Error reporter for this validator (VineJS `validator.errorReporter`). A
+	 * per-call option still wins; this wins over the process-wide one.
+	 */
+	errorReporter:
+		| ErrorReporterFactory
+		| ((error: ValidationError) => void)
+		| null;
 	/** Introspection of the compiled schema — VineJS `{ schema, refs }` shape. */
 	toJSON(): { schema: SchemaIntrospection; refs: string[] };
 	/** JSON Schema for the compiled validator (VineJS `toJSONSchema`). */
@@ -449,6 +509,30 @@ let dateOutputTransform: ((value: Date) => unknown) | null = null;
  * passed per call still wins — global is the fallback, not an override.
  */
 let globalMessagesProvider: MessagesProviderContract | null = null;
+
+/**
+ * Process-wide error reporter (VineJS `vine.errorReporter = …`). A per-call
+ * option wins over a per-validator one, which wins over this.
+ */
+let globalErrorReporter:
+	| ErrorReporterFactory
+	| ((error: ValidationError) => void)
+	| null = null;
+
+/** Bind (or clear) the process-wide error reporter. */
+export function setGlobalErrorReporter(
+	reporter: ErrorReporterFactory | ((error: ValidationError) => void) | null,
+): void {
+	globalErrorReporter = reporter;
+}
+
+/** Read the process-wide error reporter. */
+export function getGlobalErrorReporter():
+	| ErrorReporterFactory
+	| ((error: ValidationError) => void)
+	| null {
+	return globalErrorReporter;
+}
 
 /** Host lookup seam backing `activeUrl()` — see that rule's note on why. */
 export interface HostResolver {
@@ -763,6 +847,17 @@ function chainToJSONSchema(
 			if (rule.name === "enum" && Array.isArray(args.values)) {
 				node.enum = args.values;
 			}
+			if (rule.name === "literal" && "value" in args) {
+				node.const = args.value;
+			}
+			if (rule.name === "notEmpty") node.minItems = 1;
+			if (rule.name === "distinct") node.uniqueItems = true;
+			if (rule.name === "withoutDecimals") node.type = "integer";
+			if (rule.name === "positive") node.exclusiveMinimum = 0;
+			if (rule.name === "negative") node.exclusiveMaximum = 0;
+			if (rule.name === "nonNegative") node.minimum = 0;
+			if (rule.name === "nonPositive") node.maximum = 0;
+			if (rule.name === "nullType") node.type = "null";
 			// A declarative rule may carry its own modifier too.
 			if (typeof rule.toJSONSchema === "function") {
 				Object.assign(node, rule.toJSONSchema(node, rule.args));
@@ -781,6 +876,33 @@ function chainToJSONSchema(
 		}
 		const nested = chain.getProperties();
 		if (nested) Object.assign(modified, chainToJSONSchema(nested));
+
+		// Containers: describe what they hold, not just that they are containers.
+		const itemChain = chain.arrayItem;
+		if (itemChain) {
+			modified.items = chainToJSONSchema({ item: itemChain }).properties as
+				| Record<string, unknown>
+				| undefined;
+			if (isRecordOfUnknown(modified.items))
+				modified.items = modified.items.item;
+		}
+		const tupleChains = chain.tupleItems;
+		if (tupleChains) {
+			modified.prefixItems = tupleChains.map((entry) => {
+				const built = chainToJSONSchema({ item: entry });
+				const props = built.properties;
+				return isRecordOfUnknown(props) ? props.item : {};
+			});
+			modified.items = false;
+		}
+		const recordChain = chain.recordValue;
+		if (recordChain) {
+			const built = chainToJSONSchema({ item: recordChain });
+			const props = built.properties;
+			modified.additionalProperties = isRecordOfUnknown(props)
+				? props.item
+				: true;
+		}
 		properties[field] = modified;
 		if (!chain.isOptionalField) required.push(field);
 	}
@@ -789,6 +911,11 @@ function chainToJSONSchema(
 		properties,
 		...(required.length > 0 ? { required } : {}),
 	};
+}
+
+/** Narrow to a string-keyed record — used when threading nested JSON Schema. */
+function isRecordOfUnknown(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** `snake_case` / `kebab-case` / spaced key to `camelCase`. */
@@ -997,6 +1124,9 @@ const TYPE_RULE_NAMES: ReadonlySet<string> = new Set([
 	"boolean",
 	"object",
 	"array",
+	// `optional()` / `null()` are schema TYPES in VineJS, not modifiers.
+	"optionalType",
+	"nullType",
 ]);
 let validationTranslator: ValidationTranslator | undefined;
 
@@ -1152,6 +1282,16 @@ export function schema(
 	fields: Record<string, RuleChain>,
 	objectChain?: RuleChain,
 ): ValidationSchema<Record<string, unknown>> {
+	// Per-validator reporter (VineJS `validator.errorReporter = …`), overridable
+	// per call. Mutable on purpose: that is how Vine exposes it.
+	let validatorErrorReporter:
+		| ErrorReporterFactory
+		| ((error: ValidationError) => void)
+		| null = null;
+	// Set by the last run; the throwing entry points prefer the reporter's own
+	// error, because VineJS lets the reporter decide the failure shape.
+	let reporterError: (() => Error) | undefined;
+
 	// Computed once at construction time, not per validate() call.
 	const hasCustomRules = detectHasCustomRules(fields);
 	// Any field carrying async rules (`unique`/`exists`/`useAsync`) forces callers
@@ -1191,10 +1331,18 @@ export function schema(
 				// Report here too: the native path returns before the TS traversal,
 				// so instrumenting only the latter left the reporter silent exactly
 				// when the fast path was taken.
-				const reportNative = toReportFn(options?.errorReporter);
-				if (reportNative) {
-					for (const error of native.errors) reportNative(error);
+				const nativeReporter = toReporter(
+					options?.errorReporter ??
+						validatorErrorReporter ??
+						globalErrorReporter ??
+						undefined,
+					data,
+					options?.meta ?? {},
+				);
+				if (nativeReporter) {
+					for (const error of native.errors) nativeReporter.report(error);
 				}
+				reporterError = nativeReporter?.createError;
 				return native;
 			}
 			// This schema would have used the native engine, but it isn't loaded —
@@ -1225,10 +1373,18 @@ export function schema(
 			}
 		}
 
-		const report = toReportFn(options?.errorReporter);
-		if (report) {
-			for (const error of errors) report(error);
+		const reporter = toReporter(
+			options?.errorReporter ??
+				validatorErrorReporter ??
+				globalErrorReporter ??
+				undefined,
+			data,
+			options?.meta ?? {},
+		);
+		if (reporter) {
+			for (const error of errors) reporter.report(error);
 		}
+		reporterError = reporter?.createError;
 		if (errors.length === 0) {
 			return { valid: true, errors, data: validated };
 		}
@@ -1243,7 +1399,10 @@ export function schema(
 		if (result.valid) {
 			return result.data;
 		}
-		throw new RuneValidationError(result.errors.map(toErrorNode));
+		// The reporter decides the failure shape when one is bound (VineJS).
+		throw reporterError
+			? reporterError()
+			: new RuneValidationError(result.errors.map(toErrorNode));
 	}
 
 	async function validateResultAsync(
@@ -1300,10 +1459,18 @@ export function schema(
 			}
 		}
 
-		const report = toReportFn(options?.errorReporter);
-		if (report) {
-			for (const error of errors) report(error);
+		const reporter = toReporter(
+			options?.errorReporter ??
+				validatorErrorReporter ??
+				globalErrorReporter ??
+				undefined,
+			data,
+			options?.meta ?? {},
+		);
+		if (reporter) {
+			for (const error of errors) reporter.report(error);
 		}
+		reporterError = reporter?.createError;
 		if (errors.length === 0) {
 			return { valid: true, errors, data: validated };
 		}
@@ -1341,7 +1508,10 @@ export function schema(
 		if (result.valid) {
 			return result.data;
 		}
-		throw new RuneValidationError(result.errors.map(toErrorNode));
+		// The reporter decides the failure shape when one is bound (VineJS).
+		throw reporterError
+			? reporterError()
+			: new RuneValidationError(result.errors.map(toErrorNode));
 	}
 
 	/**
@@ -1407,6 +1577,16 @@ export function schema(
 
 	return {
 		fields,
+		/** Per-validator error reporter (VineJS `validator.errorReporter`). */
+		get errorReporter() {
+			return validatorErrorReporter;
+		},
+		set errorReporter(reporter:
+			| ErrorReporterFactory
+			| ((error: ValidationError) => void)
+			| null,) {
+			validatorErrorReporter = reporter;
+		},
 		// ALWAYS a chain, even when the validator was built from a bare field map:
 		// VineJS documents `createUserValidator.schema.partial()`, and returning
 		// the map left that broken on the most common Adonis path.
@@ -1610,6 +1790,18 @@ export class RuleChain<Output = unknown> {
 			if (chain.hasAsyncRulesDeep) return true;
 		}
 		return false;
+	}
+	/** The item chain of an `array()`, if declared. */
+	get arrayItem(): RuleChain | null {
+		return this.#arrayItemChain;
+	}
+	/** The positional chains of a `tuple()`, if declared. */
+	get tupleItems(): RuleChain[] | null {
+		return this.#tupleChains;
+	}
+	/** The value chain of a `record()`, if declared. */
+	get recordValue(): RuleChain | null {
+		return this.#recordValueChain;
 	}
 	/** Whether this chain stops at its first failing rule (VineJS `bail`). */
 	get bails(): boolean {
@@ -2282,7 +2474,7 @@ export class RuleChain<Output = unknown> {
 	literal<V extends string | number | boolean>(value: V): RuleChain<V> {
 		this.#pushRule({
 			name: "literal",
-			args: { expectedValue: value },
+			args: { value, expectedValue: value },
 			validate: (v) => v === value,
 			message: `Must be ${String(value)}`,
 		});
@@ -3227,6 +3419,20 @@ export class RuleChain<Output = unknown> {
 		return errors;
 	}
 
+	/**
+	 * Register a TYPE rule from outside the chain — used by the `optional()` and
+	 * `null()` factories, which are types in their own right.
+	 * @internal
+	 */
+	pushTypeRule(rule: RuleDef): void {
+		this.#pushRule(rule);
+	}
+
+	/** Re-type this chain in place, without cloning. @internal */
+	retypeTo<U>(): RuleChain<U> {
+		return this.#retype<U>();
+	}
+
 	/** Add a value rule and remember it as the `message()` target. */
 	#pushRule(rule: RuleDef): void {
 		this.#rules.push(rule);
@@ -3826,13 +4032,32 @@ export const rules = {
 	 * A properties TRANSFORMER, like `pick`/`omit` — it returns a record to
 	 * spread, not a schema.
 	 */
-	optional: (props: Record<string, RuleChain>): Record<string, RuleChain> =>
-		Object.fromEntries(
-			Object.entries(props).map(([key, chain]) => [
-				key,
-				chain.clone().optional(),
-			]),
-		),
+	/**
+	 * A field that must be ABSENT (VineJS `vine.optional()` → `VineOptional`,
+	 * `builder.d.ts:135`). Mostly a `unionOfTypes` branch. Distinct from
+	 * `.optional()` on a chain, which relaxes an existing type — this one IS the
+	 * type. The properties transformer that used to squat this name moved to
+	 * `helpers.optional`, where VineJS keeps it.
+	 */
+	optional: (): RuleChain<undefined> => {
+		const chain = new RuleChain();
+		chain.pushTypeRule({
+			name: "optionalType",
+			validate: (v) => v === undefined,
+			message: "Must not be provided",
+		});
+		return chain.optional().retypeTo<undefined>();
+	},
+	/** A field that must be `null` (VineJS `vine.null()` → `VineNull`). */
+	null: (): RuleChain<null> => {
+		const chain = new RuleChain();
+		chain.pushTypeRule({
+			name: "nullType",
+			validate: (v) => v === null,
+			message: "Must be null",
+		});
+		return chain.nullable().retypeTo<null>();
+	},
 	unionOfTypes: (chains: readonly RuleChain[]): RuleChain => {
 		// VineJS requires DISTINCT types: two branches claiming the same type make
 		// the discrimination meaningless, and the second would be dead code.

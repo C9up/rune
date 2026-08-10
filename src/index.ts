@@ -5,6 +5,12 @@
  */
 
 export type { DateFormat } from "./date.js";
+/**
+ * Namespace import, mirroring `import { errors } from '@vinejs/vine'` — Adonis
+ * code catches on `errors.E_VALIDATION_ERROR`, so the namespace has to exist at
+ * the root and not only on the subpath.
+ */
+export * as errors from "./errors.js";
 export { RuneError, RuneValidationError } from "./errors.js";
 export type {
 	AlphaOptions,
@@ -46,6 +52,7 @@ export {
 	schema,
 	setConvertEmptyStringsToNull,
 	setDateTransform,
+	setGlobalErrorReporter,
 	setValidationTranslator,
 } from "./Schema.js";
 
@@ -60,6 +67,7 @@ import {
 	createAsyncRule,
 	createRule,
 	getConvertEmptyStringsToNull,
+	getGlobalErrorReporter,
 	getGlobalMessagesProvider,
 	group,
 	groupElse,
@@ -68,6 +76,7 @@ import {
 	schema,
 	setConvertEmptyStringsToNull,
 	setDateTransform,
+	setGlobalErrorReporter,
 	setGlobalMessagesProvider,
 	setValidationTranslator,
 } from "./Schema.js";
@@ -150,6 +159,56 @@ const rune = {
 			typeof value === "object" && value !== null && !Array.isArray(value),
 		/** An array. */
 		isArray: Array.isArray,
+		/** Every listed key is present on the object (VineJS `helpers.hasKeys`). */
+		hasKeys: (value: unknown, keys: readonly string[]): boolean =>
+			typeof value === "object" &&
+			value !== null &&
+			keys.every((key) => key in value),
+		/**
+		 * No duplicate in the data set, optionally compared on one or more fields
+		 * (VineJS `helpers.isDistinct`). Items missing a compared key are SKIPPED,
+		 * so two absent values are not a duplicate of each other.
+		 */
+		isDistinct: (
+			dataSet: readonly unknown[],
+			fields?: string | string[],
+		): boolean => {
+			const list = fields === undefined ? null : [fields].flat();
+			const keys: string[] = [];
+			for (const item of dataSet) {
+				if (list === null) {
+					keys.push(JSON.stringify(item));
+					continue;
+				}
+				if (typeof item !== "object" || item === null) continue;
+				const record: Record<string, unknown> = { ...item };
+				if (list.some((k) => record[k] === undefined || record[k] === null)) {
+					continue;
+				}
+				keys.push(JSON.stringify(list.map((k) => record[k])));
+			}
+			return new Set(keys).size === keys.length;
+		},
+		/** Read a dotted path off the validated data (VineJS `helpers.getNestedValue`). */
+		getNestedValue: (
+			key: string,
+			field: { data: Record<string, unknown> },
+		): unknown => {
+			let cursor: unknown = field.data;
+			for (const segment of key.split(".")) {
+				if (typeof cursor !== "object" || cursor === null) return undefined;
+				cursor = (cursor as Record<string, unknown>)[segment];
+			}
+			return cursor;
+		},
+		/** Make every property of a shape optional (VineJS `helpers.optional`). */
+		optional: (props: Record<string, RuleChain>): Record<string, RuleChain> =>
+			Object.fromEntries(
+				Object.entries(props).map(([key, chain]) => [
+					key,
+					chain.clone().optional(),
+				]),
+			),
 	},
 	/** One-shot validation, VineJS `vine.validate({ schema, data })`. */
 	validate<T extends Record<string, RuleChain>>(
@@ -210,6 +269,13 @@ const rune = {
 				} as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
 			},
 		};
+	},
+	/** Process-wide error reporter (VineJS `vine.errorReporter`). */
+	set errorReporter(reporter: Parameters<typeof setGlobalErrorReporter>[0],) {
+		setGlobalErrorReporter(reporter);
+	},
+	get errorReporter(): ReturnType<typeof getGlobalErrorReporter> {
+		return getGlobalErrorReporter();
 	},
 	/** Bind the global messages provider (VineJS `vine.messagesProvider`). */
 	set messagesProvider(provider: MessagesProviderContract | null) {
