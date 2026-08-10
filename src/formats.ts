@@ -222,8 +222,26 @@ export interface NormalizeUrlOptions {
 	stripWWW?: boolean;
 	/** Force this protocol (e.g. `"https"`). */
 	forceProtocol?: string;
+	/** Rewrite `http:` to `https:` (normalize-url `forceHttps`). */
+	forceHttps?: boolean;
 	/** Drop the trailing slash of an empty path. */
 	stripTrailingSlash?: boolean;
+	/** Drop the trailing slash of ANY path (normalize-url `removeTrailingSlash`). */
+	removeTrailingSlash?: boolean;
+	/** Drop the `#fragment`. */
+	stripHash?: boolean;
+	/** Drop the scheme entirely, leaving `example.com/path`. */
+	stripProtocol?: boolean;
+	/** Drop `user:pass@`. */
+	stripAuthentication?: boolean;
+	/** Drop `:80` / `:443` when they match the scheme's default. */
+	removeExplicitPort?: boolean;
+	/** Sort the query parameters by name, for a stable comparison key. */
+	sortQueryParameters?: boolean;
+	/** Query parameters to remove — names, or patterns matched against names. */
+	removeQueryParameters?: ReadonlyArray<string | RegExp>;
+	/** Drop `index.html` / `index.php`-style directory indexes. */
+	removeDirectoryIndex?: boolean;
 }
 
 export function normalizeUrl(
@@ -238,11 +256,42 @@ export function normalizeUrl(
 		return value;
 	}
 	if (options.forceProtocol) url.protocol = `${options.forceProtocol}:`;
+	if (options.forceHttps && url.protocol === "http:") url.protocol = "https:";
 	if (options.stripWWW) url.hostname = url.hostname.replace(/^www\./, "");
-	let out = url.toString();
-	if (options.stripTrailingSlash && url.pathname === "/") {
-		out = out.replace(/\/$/, "");
+	if (options.stripHash) url.hash = "";
+	if (options.stripAuthentication) {
+		url.username = "";
+		url.password = "";
 	}
+	if (
+		options.removeExplicitPort &&
+		((url.protocol === "http:" && url.port === "80") ||
+			(url.protocol === "https:" && url.port === "443"))
+	) {
+		url.port = "";
+	}
+	if (options.removeDirectoryIndex) {
+		url.pathname = url.pathname.replace(/\/index\.(?:html?|php|asp)$/i, "/");
+	}
+	for (const parameter of options.removeQueryParameters ?? []) {
+		for (const name of [...url.searchParams.keys()]) {
+			const matches =
+				typeof parameter === "string"
+					? name === parameter
+					: parameter.test(name);
+			if (matches) url.searchParams.delete(name);
+		}
+	}
+	if (options.sortQueryParameters) url.searchParams.sort();
+
+	let out = url.toString();
+	if (options.removeTrailingSlash) {
+		// Any path, not just the root one.
+		out = out.replace(/\/(?=(?:\?|#|$))/, "");
+	} else if (options.stripTrailingSlash && url.pathname === "/") {
+		out = out.replace(/\/(?=(?:\?|#|$))/, "");
+	}
+	if (options.stripProtocol) out = out.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
 	return out;
 }
 

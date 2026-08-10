@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { NormalizeUrlOptions } from "../../src/index.js";
 import rune, {
 	create,
 	createRule,
@@ -491,5 +492,107 @@ describe("rune > nativeFile fluent API (VineJS)", () => {
 			s.validateResult({ doc: { size: 5000, type: "image/png" } }).errors[0]
 				?.rule,
 		).toBe("mimeTypes");
+	});
+});
+
+describe("rune > audit 8 — les trois derniers manques", () => {
+	it("createRule({ jsonSchema }) atteint bien toJSONSchema()", () => {
+		// Le chemin de LECTURE existait, l'écriture non : la métadonnée était
+		// inatteignable depuis l'API publique, donc silencieusement ignorée.
+		const evenOnly = createRule(
+			(value, _o, field) => {
+				if (typeof value === "number" && value % 2 !== 0) {
+					field.report("Must be even", "even");
+				}
+			},
+			{ jsonSchema: { multipleOf: 2 } },
+		);
+		const v = schema({ n: rules.number().use(evenOnly()) });
+		expect(v.toJSONSchema()).toMatchObject({
+			properties: { n: { type: "number", multipleOf: 2 } },
+		});
+		expect(v.validateResult({ n: 3 }).errors[0]?.rule).toBe("even");
+	});
+
+	it("parse les tokens de noms, l'ordinal et l'offset", () => {
+		const long = schema({ d: rules.date({ formats: ["D MMMM YYYY"] }) });
+		const parsed = long.validateOrThrow({ d: "25 June 2026" });
+		expect(parsed.d.getMonth()).toBe(5);
+		expect(parsed.d.getDate()).toBe(25);
+
+		// Casse indifférente, et forme courte.
+		expect(
+			schema({ d: rules.date({ formats: ["D MMM YYYY"] }) })
+				.validateOrThrow({
+					d: "25 jun 2026",
+				})
+				.d.getMonth(),
+		).toBe(5);
+
+		// Le nom de jour est consommé mais ne pilote pas la date.
+		const withDay = schema({
+			d: rules.date({ formats: ["dddd D MMMM YYYY"] }),
+		});
+		expect(
+			withDay.validateOrThrow({ d: "Thursday 25 June 2026" }).d.getDate(),
+		).toBe(25);
+
+		// Ordinal.
+		expect(
+			schema({ d: rules.date({ formats: ["MMMM Do, YYYY"] }) })
+				.validateOrThrow({
+					d: "June 25th, 2026",
+				})
+				.d.getDate(),
+		).toBe(25);
+
+		// Offset explicite : l'instant est absolu, pas local.
+		expect(
+			schema({ d: rules.date({ formats: ["YYYY-MM-DD HH:mm Z"] }) })
+				.validateOrThrow({ d: "2026-06-25 12:00 +02:00" })
+				.d.toISOString(),
+		).toBe("2026-06-25T10:00:00.000Z");
+
+		// Un mois inexistant est rejeté, pas deviné.
+		expect(long.validateResult({ d: "25 Juin 2026" }).valid).toBe(false);
+	});
+
+	it("normalizeUrl couvre les options de normalize-url", () => {
+		const norm = (options: NormalizeUrlOptions) =>
+			schema({ u: rules.string().normalizeUrl(options) });
+		expect(
+			norm({ stripHash: true }).validateOrThrow({ u: "https://a.io/p#frag" }).u,
+		).toBe("https://a.io/p");
+		expect(
+			norm({ forceHttps: true }).validateOrThrow({ u: "http://a.io/p" }).u,
+		).toBe("https://a.io/p");
+		expect(
+			norm({ stripProtocol: true }).validateOrThrow({ u: "https://a.io/p" }).u,
+		).toBe("a.io/p");
+		expect(
+			norm({ removeExplicitPort: true }).validateOrThrow({
+				u: "https://a.io:443/p",
+			}).u,
+		).toBe("https://a.io/p");
+		expect(
+			norm({ stripAuthentication: true }).validateOrThrow({
+				u: "https://u:p@a.io/x",
+			}).u,
+		).toBe("https://a.io/x");
+		expect(
+			norm({ sortQueryParameters: true }).validateOrThrow({
+				u: "https://a.io/?b=2&a=1",
+			}).u,
+		).toBe("https://a.io/?a=1&b=2");
+		expect(
+			norm({ removeQueryParameters: [/^utm_/] }).validateOrThrow({
+				u: "https://a.io/?utm_source=x&keep=1",
+			}).u,
+		).toBe("https://a.io/?keep=1");
+		expect(
+			norm({ removeDirectoryIndex: true }).validateOrThrow({
+				u: "https://a.io/dir/index.html",
+			}).u,
+		).toBe("https://a.io/dir/");
 	});
 });

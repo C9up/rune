@@ -128,6 +128,8 @@ export interface CompiledRule {
 	/** Run even on `undefined`/`null` (VineJS implicit rules). */
 	readonly implicit?: boolean;
 	readonly name?: string;
+	/** JSON Schema fragment contributed to `toJSONSchema()`. */
+	readonly jsonSchema?: Record<string, unknown>;
 	run(value: unknown, field: FieldContext): void;
 }
 
@@ -159,6 +161,11 @@ export interface CreateRuleOptions {
 	implicit?: boolean;
 	/** Rule name reported in errors when the validator does not pass one. */
 	name?: string;
+	/**
+	 * JSON Schema fragment this rule contributes to `toJSONSchema()`. Without it
+	 * a custom rule is OMITTED from the emitted schema rather than guessed at.
+	 */
+	jsonSchema?: Record<string, unknown>;
 	/**
 	 * Declare the rule asynchronous (VineJS `{ isAsync: true }`).
 	 * {@link createAsyncRule} sets it; passing it to {@link createRule} routes
@@ -194,6 +201,7 @@ export function createRule<Options>(
 		__rune: "rule",
 		implicit: ruleOptions?.implicit ?? false,
 		name: ruleOptions?.name,
+		jsonSchema: ruleOptions?.jsonSchema,
 		run(value: unknown, field: FieldContext): void {
 			validator(value, options, field);
 		},
@@ -216,6 +224,8 @@ export interface AsyncCompiledRule {
 	/** Run even on `undefined`/`null` (VineJS implicit rules). */
 	readonly implicit?: boolean;
 	readonly name?: string;
+	/** JSON Schema fragment contributed to `toJSONSchema()`. */
+	readonly jsonSchema?: Record<string, unknown>;
 	run(value: unknown, field: FieldContext): Promise<void>;
 }
 
@@ -241,6 +251,7 @@ export function createAsyncRule<Options>(
 		__rune: "asyncRule",
 		implicit: ruleOptions?.implicit ?? false,
 		name: ruleOptions?.name,
+		jsonSchema: ruleOptions?.jsonSchema,
 		async run(value: unknown, field: FieldContext): Promise<void> {
 			await validator(value, options, field);
 		},
@@ -690,6 +701,11 @@ function chainToJSONSchema(
 				node.enum = args.values;
 			}
 			// A custom rule contributes only what it declares.
+			if (isStringRecord(rule.jsonSchema)) Object.assign(node, rule.jsonSchema);
+		}
+		// `.use()` and async rules live outside `chain.rules`, so reading only that
+		// register made a declared fragment unreachable from the public API.
+		for (const rule of [...chain.useRules, ...chain.asyncRules]) {
 			if (isStringRecord(rule.jsonSchema)) Object.assign(node, rule.jsonSchema);
 		}
 		if (chain.isNullable && typeof node.type === "string") {

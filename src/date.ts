@@ -67,11 +67,48 @@ export function parseIso(value: string): Date | null {
 }
 
 /** Token grammar for custom formats — longest tokens first so `YYYY` beats `YY`. */
+/** Month names, long then short — index 0 is January. */
+const MONTHS_LONG = [
+	"january",
+	"february",
+	"march",
+	"april",
+	"may",
+	"june",
+	"july",
+	"august",
+	"september",
+	"october",
+	"november",
+	"december",
+];
+const MONTHS_SHORT = MONTHS_LONG.map((month) => month.slice(0, 3));
+
+/** Weekday names. Parsed and CONSUMED, but they never set the date: a name that
+ * contradicts the numeric date would otherwise silently win. */
+const DAYS_LONG = [
+	"sunday",
+	"monday",
+	"tuesday",
+	"wednesday",
+	"thursday",
+	"friday",
+	"saturday",
+];
+const DAYS_SHORT = DAYS_LONG.map((day) => day.slice(0, 3));
+
+// Longest-first ordering is load-bearing: `MMMM` must be tried before `MM`,
+// which must come before `M`, or a name is read as a number and the parse fails.
 const TOKENS: Array<[string, string]> = [
+	["MMMM", `(${MONTHS_LONG.join("|")})`],
+	["MMM", `(${MONTHS_SHORT.join("|")})`],
+	["dddd", `(${DAYS_LONG.join("|")})`],
+	["ddd", `(${DAYS_SHORT.join("|")})`],
 	["YYYY", "(\\d{4})"],
 	["YY", "(\\d{2})"],
 	["MM", "(\\d{2})"],
 	["M", "(\\d{1,2})"],
+	["Do", "(\\d{1,2})(?:st|nd|rd|th)"],
 	["DD", "(\\d{2})"],
 	["D", "(\\d{1,2})"],
 	["HH", "(\\d{2})"],
@@ -85,6 +122,8 @@ const TOKENS: Array<[string, string]> = [
 	["SSS", "(\\d{3})"],
 	["A", "(AM|PM)"],
 	["a", "(am|pm)"],
+	["ZZ", "([+-]\\d{4}|Z)"],
+	["Z", "([+-]\\d{2}:\\d{2}|Z)"],
 ];
 
 /** Parse `value` against a token format such as `DD/MM/YYYY`. */
@@ -114,14 +153,35 @@ export function parseWithFormat(value: string, format: string): Date | null {
 			i += 1;
 		}
 	}
-	const m = new RegExp(`^${pattern}$`).exec(value.trim());
+	// Case-insensitive: `Jan`, `jan` and `JAN` are the same month, and a format
+	// carrying a name token would otherwise only match one spelling.
+	const m = new RegExp(`^${pattern}$`, "i").exec(value.trim());
 	if (!m) return null;
 	const part: Record<string, number> = {};
 	let meridiem: "am" | "pm" | null = null;
+	let offset: string | undefined;
 	order.forEach((t, idx) => {
 		const raw = m[idx + 1];
 		if (t === "A" || t === "a") {
 			meridiem = raw.toLowerCase() as "am" | "pm";
+			return;
+		}
+		if (t === "MMMM" || t === "MMM") {
+			const names = t === "MMMM" ? MONTHS_LONG : MONTHS_SHORT;
+			part.MM = names.indexOf(raw.toLowerCase()) + 1;
+			return;
+		}
+		if (t === "dddd" || t === "ddd") {
+			// Consumed only. A weekday name that contradicts the numeric date must
+			// not silently override it — the date wins, the name is decoration.
+			return;
+		}
+		if (t === "Do") {
+			part.DD = Number(raw);
+			return;
+		}
+		if (t === "Z" || t === "ZZ") {
+			offset = raw.toUpperCase() === "Z" ? "Z" : raw;
 			return;
 		}
 		part[t] = Number(raw);
@@ -159,6 +219,7 @@ export function parseWithFormat(value: string, format: string): Date | null {
 		part.mm ?? part.m ?? 0,
 		part.ss ?? part.s ?? 0,
 		part.SSS ?? 0,
+		offset,
 	);
 }
 
