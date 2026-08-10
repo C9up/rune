@@ -94,3 +94,88 @@ describe("rune > async validation", () => {
 		);
 	});
 });
+
+/**
+ * Async rules nested under an object or an array used to be invisible: the
+ * schema-level detection only inspected top-level chains, so `validate()` did
+ * not throw and `validateAsync()` never ran them. A `unique` check that never
+ * runs reads exactly like a `unique` check that passed.
+ */
+describe("rune > async validation at depth", () => {
+	it("sync validate() throws on an async rule nested in an object", () => {
+		const s = schema({
+			user: rules.any().object({
+				email: rules.string().unique(async () => true),
+			}),
+		});
+		expect(() => s.validate({ user: { email: "x@y.io" } })).toThrow(
+			/validateAsync/,
+		);
+	});
+
+	it("sync validate() throws on an async rule nested in an array item", () => {
+		const s = schema({
+			emails: rules.array(rules.string().unique(async () => true)),
+		});
+		expect(() => s.validate({ emails: ["x@y.io"] })).toThrow(/validateAsync/);
+	});
+
+	it("validateAsync runs a unique() nested in an object", async () => {
+		const taken = new Set(["ada@x.io"]);
+		const s = schema({
+			user: rules.any().object({
+				email: rules
+					.string()
+					.email()
+					.unique(async (value) => !taken.has(String(value))),
+			}),
+		});
+
+		const ok = await s.validateAsync({ user: { email: "new@x.io" } });
+		expect(ok.valid).toBe(true);
+
+		const bad = await s.validateAsync({ user: { email: "ada@x.io" } });
+		expect(bad.valid).toBe(false);
+		expect(bad.errors[0]?.rule).toBe("database.unique");
+		expect(bad.errors[0]?.field).toBe("user.email");
+	});
+
+	it("validateAsync runs a unique() on every array item", async () => {
+		const seen: string[] = [];
+		const s = schema({
+			emails: rules.array(
+				rules.string().unique(async (value) => {
+					seen.push(String(value));
+					return String(value) !== "dupe@x.io";
+				}),
+			),
+		});
+
+		const res = await s.validateAsync({
+			emails: ["a@x.io", "dupe@x.io", "b@x.io"],
+		});
+		expect(seen).toEqual(["a@x.io", "dupe@x.io", "b@x.io"]);
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.field).toBe("emails.1");
+	});
+
+	it("skips a nested async rule when the value already failed its sync rules", async () => {
+		let called = false;
+		const s = schema({
+			user: rules.any().object({
+				email: rules
+					.string()
+					.email()
+					.unique(async () => {
+						called = true;
+						return true;
+					}),
+			}),
+		});
+
+		const res = await s.validateAsync({ user: { email: "not-an-email" } });
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.rule).toBe("email");
+		expect(called).toBe(false);
+	});
+});

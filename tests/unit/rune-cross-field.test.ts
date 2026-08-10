@@ -177,8 +177,11 @@ describe("rune > cross-field nested & arrays (parent vs data)", () => {
 describe("rune > .use coexists with legacy rules", () => {
 	it("standard + custom + use rules all run together", () => {
 		const s = schema({
+			// bail(false): the point here is that all three registers run, which by
+			// definition needs the exhaustive mode (VineJS bails per field by default).
 			code: rules
 				.string()
+				.bail(false)
 				.min(3)
 				.custom("upper", (v) => typeof v === "string" && v === v.toUpperCase())
 				.use(sameAs("codeConfirm")),
@@ -192,5 +195,64 @@ describe("rune > .use coexists with legacy rules", () => {
 			.map((e) => e.rule);
 		expect(codeRules).toContain("upper");
 		expect(codeRules).toContain("sameAs");
+	});
+});
+
+/**
+ * `.message()` targets the rule that was just added, whichever register it
+ * landed in. Cross-field and async rules live outside `#rules`, so a naive
+ * "last of #rules" lookup silently retargeted the previous value rule.
+ */
+describe("rune > message() targeting across rule registers", () => {
+	it("overrides a cross-field rule's message", () => {
+		const s = schema({
+			password: rules.string(),
+			confirm: rules
+				.string()
+				.sameAs("password")
+				.message("Les mots de passe diffèrent"),
+		});
+		const res = s.validate({ password: "a", confirm: "b" });
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.rule).toBe("sameAs");
+		expect(res.errors[0]?.message).toBe("Les mots de passe diffèrent");
+	});
+
+	it("does not steal the message from a preceding value rule", () => {
+		const s = schema({
+			password: rules.string(),
+			confirm: rules
+				.string()
+				.bail(false)
+				.minLength(8)
+				.sameAs("password")
+				.message("Confirmation invalide"),
+		});
+		// Too short AND different: minLength keeps its own default message.
+		const res = s.validate({ password: "longenough", confirm: "x" });
+		const byRule = Object.fromEntries(
+			res.errors.map((e) => [e.rule, e.message]),
+		);
+		expect(byRule.minLength).not.toBe("Confirmation invalide");
+		expect(byRule.sameAs).toBe("Confirmation invalide");
+	});
+
+	it("overrides an async rule's message", async () => {
+		const s = schema({
+			email: rules
+				.string()
+				.unique(async () => false)
+				.message("Cet email est déjà pris"),
+		});
+		const res = await s.validateAsync({ email: "a@b.io" });
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.message).toBe("Cet email est déjà pris");
+	});
+
+	it("still throws when no rule precedes it", () => {
+		expect(() => rules.string().message("x")).not.toThrow();
+		expect(() =>
+			new (Object.getPrototypeOf(rules.string()).constructor)().message("x"),
+		).toThrow(/must be called after a rule/);
 	});
 });

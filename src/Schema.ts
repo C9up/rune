@@ -4,8 +4,27 @@
  * @implements FR38, FR39, FR40, FR41
  */
 
+import {
+	type DateFormat,
+	parseDateValue,
+	resolveOperand,
+	startOfDay,
+} from "./date.js";
 import type { RuneErrorNode } from "./errors.js";
 import { RuneError, RuneValidationError } from "./errors.js";
+import {
+	isAscii,
+	isCoordinates,
+	isCreditCard,
+	isHexCode,
+	isIban,
+	isIpAddress,
+	isJwt,
+	isMobile,
+	isPostalCode,
+	isUlid,
+	SUPPORTED_POSTAL_CODES,
+} from "./formats.js";
 import type { MessagesProviderContract } from "./MessagesProvider.js";
 import {
 	isNativeAvailable,
@@ -190,6 +209,34 @@ interface RunContext {
 	parent: Record<string, unknown> | unknown[];
 	meta: Record<string, unknown>;
 	messagesProvider?: MessagesProviderContract;
+}
+
+/**
+ * An async rule run deferred by the (synchronous) traversal and awaited by
+ * `validateAsync`. Collected at EVERY depth — top-level fields, nested object
+ * fields and array items alike.
+ */
+interface PendingAsync {
+	chain: RuleChain;
+	field: string;
+	value: unknown;
+	ctx: RunContext;
+}
+
+/**
+ * Global output mapper for `rules.date()` — VineJS's `VineDate.transform` seam.
+ *
+ * rune has zero runtime dependencies, so a validated date is a plain `Date`. A
+ * consumer that wants its own type (e.g. a `@c9up/chronos` `DateTime`, which is
+ * what atlas hands back on read) binds it here once at boot, exactly like
+ * `bindRosetta` does for translations. Applied AFTER the comparison rules, so
+ * `after`/`before` always compare real `Date`s.
+ */
+let dateOutputTransform: ((value: Date) => unknown) | null = null;
+
+/** Bind (or clear, with `null`) the global `rules.date()` output mapper. */
+export function setDateTransform(fn: ((value: Date) => unknown) | null): void {
+	dateOutputTransform = fn;
 }
 
 /** Default context for internal callers that don't supply one (no root available). */
@@ -420,7 +467,7 @@ export function schema(
 	// Any field carrying async rules (`unique`/`exists`/`useAsync`) forces callers
 	// onto `validateAsync` — the sync path throws rather than silently skipping them.
 	const hasAsyncRules = Object.values(fields).some(
-		(chain) => chain.asyncRules.length > 0,
+		(chain) => chain.hasAsyncRulesDeep,
 	);
 
 	function validate(
@@ -512,21 +559,24 @@ export function schema(
 		};
 
 		for (const [field, chain] of Object.entries(fields)) {
-			const result = chain._validateWithTransform(field, data[field], rootCtx);
+			// One collector per top-level field, drained straight away, so async
+			// errors stay grouped with their field rather than piling up at the end.
+			const pending: PendingAsync[] = [];
+			const result = chain._validateWithTransform(
+				field,
+				data[field],
+				rootCtx,
+				pending,
+			);
 			const fieldErrors = [...result.errors];
-			// Async rules run only when the field passed its sync rules AND has a
-			// present value — mirrors Lucid skipping a DB rule on an already-invalid
-			// or absent field.
-			if (
-				fieldErrors.length === 0 &&
-				chain.asyncRules.length > 0 &&
-				result.transformed !== undefined &&
-				result.transformed !== null
-			) {
-				const asyncErrors = await chain._runAsyncRules(
-					field,
-					result.transformed,
-					rootCtx,
+			// The collector already applied the gate at every depth: a chain records
+			// itself only when its own subtree passed and its value is present —
+			// mirrors Lucid skipping a DB rule on an already-invalid or absent field.
+			for (const task of pending) {
+				const asyncErrors = await task.chain._runAsyncRules(
+					task.field,
+					task.value,
+					task.ctx,
 				);
 				fieldErrors.push(...asyncErrors);
 			}
@@ -621,16 +671,31 @@ export class RuleChain<Output = unknown> {
 	#rules: RuleDef[] = [];
 	#isOptional = false;
 	#isNullable = false;
-	#bail = false;
+	/**
+	 * VineJS validates a field in bail mode by DEFAULT — it stops at that field's
+	 * first failing rule (`FieldOptions.bail: true`). rune defaulted to `false`
+	 * and reported every failing rule, which silently produced a different error
+	 * array for the same schema. `.bail(false)` restores the exhaustive mode.
+	 */
+	#bail = true;
 	#transforms: Array<{
 		name: string;
 		fn: (value: unknown, field: FieldContext) => unknown;
 	}> = [];
 	#preTransforms: Array<(value: unknown) => unknown> = [];
+	/** Formats accepted by `date()` — also used to parse `afterField` siblings. */
+	#dateFormats: DateFormat[] | null = null;
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
 	#useRules: CompiledRule[] = [];
 	#asyncRules: AsyncCompiledRule[] = [];
+	/** Last rule added, whichever register it landed in — the `message()` target. */
+	#lastRule:
+		| { kind: "value"; ref: RuleDef }
+		| { kind: "reporting"; ref: CompiledRule | AsyncCompiledRule }
+		| null = null;
+	/** `.message()` overrides for rules that report their own text from `run`. */
+	#ruleMessages = new Map<CompiledRule | AsyncCompiledRule, string>();
 	#requiredConditions: RequiredCondition[] = [];
 
 	/** Public read access to rules (for OpenAPI generation, Rust bridge). */
@@ -658,6 +723,26 @@ export class RuleChain<Output = unknown> {
 	get asyncRules(): readonly AsyncCompiledRule[] {
 		return this.#asyncRules;
 	}
+	/**
+	 * Does this chain — or anything nested under it (object fields, array items) —
+	 * carry async rules? The schema-level detection used to inspect only the
+	 * top-level chains, so a nested `unique`/`exists` was invisible: `validate()`
+	 * did not throw and `validateAsync()` never ran the rule, silently accepting
+	 * an unchecked value.
+	 */
+	get hasAsyncRulesDeep(): boolean {
+		if (this.#asyncRules.length > 0) return true;
+		if (this.#nestedSchema) {
+			for (const chain of Object.values(this.#nestedSchema)) {
+				if (chain.hasAsyncRulesDeep) return true;
+			}
+		}
+		return this.#arrayItemChain?.hasAsyncRulesDeep ?? false;
+	}
+	/** Whether this chain stops at its first failing rule (VineJS `bail`). */
+	get bails(): boolean {
+		return this.#bail;
+	}
 	/** Public read access to `.parse()` pre-transforms (kept off the native path). */
 	get preTransforms(): ReadonlyArray<(value: unknown) => unknown> {
 		return this.#preTransforms;
@@ -680,6 +765,9 @@ export class RuleChain<Output = unknown> {
 		next.#isNullable = this.#isNullable;
 		next.#bail = this.#bail;
 		next.#transforms = [...this.#transforms];
+		next.#dateFormats = this.#dateFormats;
+		next.#ruleMessages = new Map(this.#ruleMessages);
+		next.#lastRule = this.#lastRule;
 		next.#preTransforms = [...this.#preTransforms];
 		next.#nestedSchema = this.#nestedSchema;
 		next.#arrayItemChain = this.#arrayItemChain;
@@ -718,7 +806,7 @@ export class RuleChain<Output = unknown> {
 	object<Sh extends Record<string, RuleChain>>(
 		shape: Sh,
 	): RuleChain<Infer<Sh>> {
-		this.#rules.push({
+		this.#pushRule({
 			name: "object",
 			validate: (v) => isPlainObject(v),
 			message: "Must be an object",
@@ -729,7 +817,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must be an array. Items validated by the provided chain. */
 	array<Item extends RuleChain>(itemChain?: Item): RuleChain<OutputOf<Item>[]> {
-		this.#rules.push({
+		this.#pushRule({
 			name: "array",
 			validate: (v) => Array.isArray(v),
 			message: "Must be an array",
@@ -740,7 +828,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must be a string. */
 	string(): RuleChain<string> {
-		this.#rules.push({
+		this.#pushRule({
 			name: "string",
 			validate: (v) => typeof v === "string",
 			message: "Must be a string",
@@ -750,7 +838,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must be a number. */
 	number(): RuleChain<number> {
-		this.#rules.push({
+		this.#pushRule({
 			name: "number",
 			validate: (v) =>
 				typeof v === "number" && !Number.isNaN(v) && Number.isFinite(v),
@@ -761,7 +849,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must be a boolean. */
 	boolean(): RuleChain<boolean> {
-		this.#rules.push({
+		this.#pushRule({
 			name: "boolean",
 			validate: (v) => typeof v === "boolean",
 			message: "Must be a boolean",
@@ -769,12 +857,148 @@ export class RuleChain<Output = unknown> {
 		return this.#retype<boolean>();
 	}
 
+	/**
+	 * Must be a date (VineJS `vine.date()`). ISO 8601 by default; pass `formats`
+	 * for unix timestamps (`x` = ms, `X` = seconds) or a token format such as
+	 * `DD/MM/YYYY`. Parsing is calendar-strict — `2026-02-31` is rejected.
+	 *
+	 * The validated output is a `Date`; bind {@link setDateTransform} to map it
+	 * to your own type once at boot.
+	 */
+	date(options?: { formats?: DateFormat[] }): RuleChain<Date> {
+		const formats = options?.formats ?? ["iso8601"];
+		this.#dateFormats = formats;
+		this.#pushRule({
+			name: "date",
+			args: { formats },
+			validate: (v) => parseDateValue(v, formats) !== null,
+			message: "Must be a valid date",
+		});
+		// Parse to a real `Date` BEFORE the comparison rules run, so `after`/
+		// `before` never re-parse and never compare strings lexicographically.
+		this.#transforms.push({
+			name: "date",
+			fn: (value) => parseDateValue(value, formats) ?? value,
+		});
+		return this.#retype<Date>();
+	}
+
+	/** Must be strictly after `operand` (`'today'`, an ISO string, or a `Date`). */
+	after(operand: unknown): this {
+		return this.#compareDate("after", operand, (a, b) => a > b);
+	}
+
+	/** Must be strictly before `operand`. */
+	before(operand: unknown): this {
+		return this.#compareDate("before", operand, (a, b) => a < b);
+	}
+
+	/** Must be after `operand`, or equal to it. */
+	afterOrEqual(operand: unknown): this {
+		return this.#compareDate("afterOrEqual", operand, (a, b) => a >= b);
+	}
+
+	/** Must be before `operand`, or equal to it. */
+	beforeOrEqual(operand: unknown): this {
+		return this.#compareDate("beforeOrEqual", operand, (a, b) => a <= b);
+	}
+
+	/** Must be after the date held by a sibling field (VineJS `afterField`). */
+	afterField(otherField: string, options?: { compare?: "day" }): this {
+		return this.#compareDateField(
+			"afterField",
+			otherField,
+			options,
+			(a, b) => a > b,
+		);
+	}
+
+	/** Must be before the date held by a sibling field. */
+	beforeField(otherField: string, options?: { compare?: "day" }): this {
+		return this.#compareDateField(
+			"beforeField",
+			otherField,
+			options,
+			(a, b) => a < b,
+		);
+	}
+
+	/** Must fall on a Saturday or Sunday (VineJS `weekend`). */
+	weekend(): this {
+		this.#pushRule({
+			name: "weekend",
+			validate: (v) =>
+				v instanceof Date && (v.getDay() === 0 || v.getDay() === 6),
+			message: "Must be a weekend date",
+		});
+		return this;
+	}
+
+	/** Must fall on a Monday-to-Friday day (VineJS `weekday`). */
+	weekday(): this {
+		this.#pushRule({
+			name: "weekday",
+			validate: (v) => v instanceof Date && v.getDay() > 0 && v.getDay() < 6,
+			message: "Must be a weekday date",
+		});
+		return this;
+	}
+
+	/** Shared body of the `after`/`before`/`*OrEqual` literal comparisons. */
+	#compareDate(
+		name: string,
+		operand: unknown,
+		cmp: (a: number, b: number) => boolean,
+	): this {
+		this.#pushRule({
+			name,
+			args: { operand },
+			validate: (v) => {
+				const other = resolveOperand(operand);
+				if (!(v instanceof Date) || other === null) return false;
+				return cmp(v.getTime(), other.getTime());
+			},
+			message: `Must be ${name.replace(/([A-Z])/g, " $1").toLowerCase()} ${String(operand)}`,
+		});
+		return this;
+	}
+
+	/** Shared body of the `afterField`/`beforeField` sibling comparisons. */
+	#compareDateField(
+		name: string,
+		otherField: string,
+		options: { compare?: "day" } | undefined,
+		cmp: (a: number, b: number) => boolean,
+	): this {
+		const formats = this.#dateFormats ?? ["iso8601"];
+		const byDay = options?.compare === "day";
+		this.#pushUse({
+			__rune: "rule",
+			run: (value, field) => {
+				const other = parseDateValue(readSibling(field, otherField), formats);
+				if (!(value instanceof Date) || other === null) {
+					field.report(`Cannot compare with ${otherField}`, name);
+					return;
+				}
+				const a = byDay ? startOfDay(value) : value;
+				const b = byDay ? startOfDay(other) : other;
+				if (!cmp(a.getTime(), b.getTime())) {
+					field.report(
+						`Must be ${name.replace("Field", "")} ${otherField}`,
+						name,
+					);
+				}
+			},
+		});
+		return this;
+	}
+
 	/** Must equal one of `values` (enum). Narrows the output to the union. */
 	enum<const V extends readonly (string | number | boolean)[]>(
 		values: V,
 	): RuleChain<V[number]> {
 		const allowed = [...values];
-		this.#rules.push({
+		this.#pushRule({
 			name: "enum",
 			args: { values: allowed },
 			validate: (v) => allowed.includes(asPrimitive(v)),
@@ -785,7 +1009,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must equal a literal value. */
 	literal<V extends string | number | boolean>(value: V): RuleChain<V> {
-		this.#rules.push({
+		this.#pushRule({
 			name: "literal",
 			args: { expectedValue: value },
 			validate: (v) => v === value,
@@ -796,7 +1020,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Minimum length (string) or minimum value (number). Alias of min/minLength. */
 	min(n: number): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "min",
 			param: n,
 			args: { min: n },
@@ -813,7 +1037,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Maximum length (string) or maximum value (number). Alias of max/maxLength. */
 	max(n: number): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "max",
 			param: n,
 			args: { max: n },
@@ -830,7 +1054,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Minimum length for a string or array (VineJS `minLength`). */
 	minLength(n: number): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "minLength",
 			param: n,
 			args: { min: n },
@@ -842,7 +1066,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Maximum length for a string or array (VineJS `maxLength`). */
 	maxLength(n: number): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "maxLength",
 			param: n,
 			args: { max: n },
@@ -857,7 +1081,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Exact length for a string or array (VineJS `fixedLength`). */
 	fixedLength(n: number): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "fixedLength",
 			param: n,
 			args: { size: n },
@@ -869,7 +1093,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must be a valid email. */
 	email(): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "email",
 			// Mirror the Rust engine's regex exactly so the SAME schema validates
 			// identically whether or not the native binary loaded.
@@ -882,7 +1106,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must match a regular expression (TS-only — never dispatched to Rust). */
 	regex(pattern: RegExp): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "regex",
 			validate: (v) => typeof v === "string" && pattern.test(v),
 			message: "Invalid format",
@@ -892,7 +1116,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must be a valid URL (TS-only — uses the WHATWG URL parser). */
 	url(): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "url",
 			validate: (v) => typeof v === "string" && isValidUrl(v),
 			message: "Must be a valid URL",
@@ -902,7 +1126,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must be a valid UUID. */
 	uuid(): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "uuid",
 			validate: (v) => typeof v === "string" && UUID_RE.test(v),
 			message: "Must be a valid UUID",
@@ -910,9 +1134,162 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
+	/** Must be a ULID (VineJS `ulid`). */
+	ulid(): this {
+		return this.#stringRule("ulid", isUlid, "Must be a valid ULID");
+	}
+
+	/** Must be a JSON Web Token — three dot-separated base64url segments. */
+	jwt(): this {
+		return this.#stringRule("jwt", isJwt, "Must be a valid JWT");
+	}
+
+	/** Must contain only ASCII characters (VineJS `ascii`). */
+	ascii(): this {
+		return this.#stringRule(
+			"ascii",
+			isAscii,
+			"Must contain only ASCII characters",
+		);
+	}
+
+	/** Must be a CSS hex colour code, with or without the leading `#`. */
+	hexCode(): this {
+		return this.#stringRule("hexCode", isHexCode, "Must be a valid hex code");
+	}
+
+	/** Must be an IP address. Pass `version` to require v4 or v6 specifically. */
+	ipAddress(options?: { version?: 4 | 6 }): this {
+		const version = options?.version;
+		return this.#stringRule(
+			"ipAddress",
+			(v) => isIpAddress(v, version),
+			`Must be a valid IP address${version ? ` (v${version})` : ""}`,
+			{ version },
+		);
+	}
+
+	/** Must pass the Luhn checksum (VineJS `creditCard`). */
+	creditCard(): this {
+		return this.#stringRule(
+			"creditCard",
+			isCreditCard,
+			"Must be a valid credit card number",
+		);
+	}
+
+	/** Must be an IBAN passing the ISO 13616 mod-97 check. */
+	iban(): this {
+		return this.#stringRule("iban", isIban, "Must be a valid IBAN");
+	}
+
+	/** Must be a `"lat,lng"` pair within the valid ranges. */
+	coordinates(): this {
+		return this.#stringRule(
+			"coordinates",
+			isCoordinates,
+			"Must be valid coordinates",
+		);
+	}
+
+	/**
+	 * Must be a mobile number in E.164 form. Named deviation from VineJS: rune
+	 * carries no per-locale numbering plans, so there is no `locale` option.
+	 */
+	mobile(): this {
+		return this.#stringRule(
+			"mobile",
+			isMobile,
+			"Must be a valid mobile number",
+		);
+	}
+
+	/**
+	 * Must be a postal code for `countryCode`. Throws for a country rune has no
+	 * pattern for, rather than accepting the value unchecked.
+	 */
+	postalCode(options: { countryCode: string }): this {
+		const { countryCode } = options;
+		if (isPostalCode("", countryCode) === null) {
+			throw new RuneError(
+				"UNSUPPORTED_COUNTRY",
+				`postalCode(): no pattern for country '${countryCode}'.`,
+				{
+					hint: `Supported: ${SUPPORTED_POSTAL_CODES.join(", ")}. Use .regex() for others.`,
+				},
+			);
+		}
+		return this.#stringRule(
+			"postalCode",
+			(v) => isPostalCode(v, countryCode) === true,
+			`Must be a valid ${countryCode.toUpperCase()} postal code`,
+			{ countryCode },
+		);
+	}
+
+	/** Must differ from a sibling field (VineJS `notSameAs`). */
+	notSameAs(otherField: string): this {
+		this.#pushUse({
+			__rune: "rule",
+			run: (value, field) => {
+				if (value === readSibling(field, otherField)) {
+					field.report(`Must be different from ${otherField}`, "notSameAs");
+				}
+			},
+		});
+		return this;
+	}
+
+	/** Array items must be unique — optionally compared on `field` (VineJS `distinct`). */
+	distinct(field?: string): this {
+		this.#pushRule({
+			name: "distinct",
+			args: { field },
+			validate: (v) => {
+				if (!Array.isArray(v)) return false;
+				const keys = v.map((item) =>
+					field !== undefined && isPlainObject(item)
+						? JSON.stringify(item[field])
+						: JSON.stringify(item),
+				);
+				return new Set(keys).size === keys.length;
+			},
+			message: field
+				? `Items must have a unique ${field}`
+				: "Items must be unique",
+		});
+		return this;
+	}
+
+	/** Number must have no fractional part (VineJS `withoutDecimals`). */
+	withoutDecimals(): this {
+		this.#pushRule({
+			name: "withoutDecimals",
+			validate: (v) => typeof v === "number" && Number.isInteger(v),
+			message: "Must not have decimals",
+		});
+		return this;
+	}
+
+	/** Shared body of the string-format rules: reject non-strings, then check. */
+	#stringRule(
+		name: string,
+		check: (value: string) => boolean,
+		message: string,
+		args?: Record<string, unknown>,
+	): this {
+		this.#pushRule({
+			name,
+			args,
+			validate: (v) => typeof v === "string" && check(v),
+			message,
+		});
+		return this;
+	}
+
 	/** Must contain only ASCII letters. */
 	alpha(): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "alpha",
 			validate: (v) =>
 				typeof v === "string" && v.length > 0 && /^[a-zA-Z]+$/.test(v),
@@ -923,7 +1300,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must contain only ASCII letters and digits. */
 	alphaNumeric(): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "alphaNumeric",
 			validate: (v) =>
 				typeof v === "string" && v.length > 0 && /^[a-zA-Z0-9]+$/.test(v),
@@ -934,7 +1311,7 @@ export class RuleChain<Output = unknown> {
 
 	/** String must start with `substring`. */
 	startsWith(substring: string): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "startsWith",
 			args: { substring },
 			validate: (v) => typeof v === "string" && v.startsWith(substring),
@@ -945,7 +1322,7 @@ export class RuleChain<Output = unknown> {
 
 	/** String must end with `substring`. */
 	endsWith(substring: string): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "endsWith",
 			args: { substring },
 			validate: (v) => typeof v === "string" && v.endsWith(substring),
@@ -957,7 +1334,7 @@ export class RuleChain<Output = unknown> {
 	/** Value must be one of `values`. */
 	in(values: ReadonlyArray<string | number | boolean>): this {
 		const allowed = [...values];
-		this.#rules.push({
+		this.#pushRule({
 			name: "in",
 			args: { values: allowed },
 			validate: (v) => allowed.includes(asPrimitive(v)),
@@ -969,7 +1346,7 @@ export class RuleChain<Output = unknown> {
 	/** Value must NOT be one of `values`. */
 	notIn(values: ReadonlyArray<string | number | boolean>): this {
 		const denied = [...values];
-		this.#rules.push({
+		this.#pushRule({
 			name: "notIn",
 			args: { values: denied },
 			validate: (v) => !denied.includes(asPrimitive(v)),
@@ -980,7 +1357,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Number must be positive (> 0) and finite. */
 	positive(): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "positive",
 			validate: (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
 			message: "Must be positive",
@@ -990,7 +1367,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Number must be negative (< 0) and finite. */
 	negative(): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "negative",
 			validate: (v) => typeof v === "number" && Number.isFinite(v) && v < 0,
 			message: "Must be negative",
@@ -1000,7 +1377,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Number must be >= 0 and finite. */
 	nonNegative(): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "nonNegative",
 			validate: (v) => typeof v === "number" && Number.isFinite(v) && v >= 0,
 			message: "Must be positive or zero",
@@ -1010,7 +1387,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Number must fall within `[min, max]` (inclusive). */
 	range(min: number, max: number): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "range",
 			args: { min, max },
 			validate: (v) =>
@@ -1022,7 +1399,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Number must have at most `digits` decimal places (TS-only). */
 	decimal(digits: number): this {
-		this.#rules.push({
+		this.#pushRule({
 			name: "decimal",
 			args: { digits },
 			validate: (v) => {
@@ -1037,7 +1414,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must equal a sibling field (VineJS `sameAs`). Cross-field → TS-only. */
 	sameAs(otherField: string): this {
-		this.#useRules.push({
+		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
 				const other = readSibling(field, otherField);
@@ -1051,7 +1428,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must equal its `<field>_confirmation` sibling (VineJS `confirmed`). */
 	confirmed(options?: { confirmationField?: string }): this {
-		this.#useRules.push({
+		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
 				const leaf = field.field.split(".").pop() ?? field.field;
@@ -1123,7 +1500,7 @@ export class RuleChain<Output = unknown> {
 		validate: (value: unknown) => boolean,
 		message?: string,
 	): this {
-		this.#rules.push({
+		this.#pushRule({
 			name,
 			validate,
 			message: message ?? `Failed custom rule: ${name}`,
@@ -1144,7 +1521,7 @@ export class RuleChain<Output = unknown> {
 				{ hint: "use(myRule()) or use(myRule(options)), not use(myRule)" },
 			);
 		}
-		this.#useRules.push(rule);
+		this.#pushUse(rule);
 		return this;
 	}
 
@@ -1160,7 +1537,7 @@ export class RuleChain<Output = unknown> {
 				{ hint: "useAsync(myRule()) or useAsync(myRule(options))" },
 			);
 		}
-		this.#asyncRules.push(rule);
+		this.#pushAsync(rule);
 		return this;
 	}
 
@@ -1178,7 +1555,7 @@ export class RuleChain<Output = unknown> {
 		check: (value: unknown, field: FieldContext) => boolean | Promise<boolean>,
 		message?: string,
 	): this {
-		this.#asyncRules.push({
+		this.#pushAsync({
 			__rune: "asyncRule",
 			async run(value: unknown, field: FieldContext): Promise<void> {
 				const ok = await check(value, field);
@@ -1201,7 +1578,7 @@ export class RuleChain<Output = unknown> {
 		check: (value: unknown, field: FieldContext) => boolean | Promise<boolean>,
 		message?: string,
 	): this {
-		this.#asyncRules.push({
+		this.#pushAsync({
 			__rune: "asyncRule",
 			async run(value: unknown, field: FieldContext): Promise<void> {
 				const ok = await check(value, field);
@@ -1216,15 +1593,47 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Set custom error message for the last rule. */
+	/**
+	 * Set a custom error message for the rule that was just added.
+	 *
+	 * "The last rule" spans all three registers: value rules (`#rules`),
+	 * cross-field `.use()` rules (`sameAs`, `confirmed`, `afterField`,
+	 * `notSameAs`) and async rules (`unique`, `exists`, `useAsync`). Targeting
+	 * `#rules` alone silently retargeted the PREVIOUS value rule — or threw
+	 * `NO_RULE` — whenever the preceding call was a cross-field or async rule.
+	 */
 	message(msg: string): this {
-		if (this.#rules.length === 0) {
+		const target = this.#lastRule;
+		if (!target) {
 			throw new RuneError("NO_RULE", "message() must be called after a rule");
 		}
-		const last = this.#rules[this.#rules.length - 1];
-		last.message = msg;
-		last.hasCustomMessage = true;
+		if (target.kind === "value") {
+			target.ref.message = msg;
+			target.ref.hasCustomMessage = true;
+		} else {
+			// `.use()` / async rules report their own text from inside `run`, so the
+			// override is applied when the rule reports rather than stored on it.
+			this.#ruleMessages.set(target.ref, msg);
+		}
 		return this;
+	}
+
+	/** Add a value rule and remember it as the `message()` target. */
+	#pushRule(rule: RuleDef): void {
+		this.#rules.push(rule);
+		this.#lastRule = { kind: "value", ref: rule };
+	}
+
+	/** Add a cross-field `.use()` rule and remember it as the `message()` target. */
+	#pushUse(rule: CompiledRule): void {
+		this.#useRules.push(rule);
+		this.#lastRule = { kind: "reporting", ref: rule };
+	}
+
+	/** Add an async rule and remember it as the `message()` target. */
+	#pushAsync(rule: AsyncCompiledRule): void {
+		this.#asyncRules.push(rule);
+		this.#lastRule = { kind: "reporting", ref: rule };
 	}
 
 	/** Whether the field is required given the surrounding data (conditionals). */
@@ -1235,11 +1644,19 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Internal: validate a field value and return errors + transformed value. */
+	/**
+	 * Internal: validate a field value and return errors + transformed value.
+	 *
+	 * `pending` is the async-rule collector. The traversal itself stays sync (it
+	 * is shared with `validate()`); when a collector is supplied, every chain in
+	 * the tree that carries async rules and passed its sync rules records itself
+	 * for `validateAsync` to await. Without it, nested async rules never ran.
+	 */
 	_validateWithTransform(
 		field: string,
 		rawValue: unknown,
 		ctx: RunContext = EMPTY_RUN_CONTEXT,
+		pending?: PendingAsync[],
 	): { errors: ValidationError[]; transformed: unknown } {
 		// 0. Pre-validation parse() transforms run on the raw value first.
 		let value = rawValue;
@@ -1279,6 +1696,17 @@ export class RuleChain<Output = unknown> {
 			this.#runUseRules(field, transformed, ctx, errors);
 		}
 
+		// 3b. Date output mapping (VineJS `VineDate.transform`). Deliberately AFTER
+		//     the comparison rules so `after`/`before`/`afterField` always see a
+		//     real `Date`, whatever type the consumer maps it to.
+		if (
+			this.#dateFormats !== null &&
+			dateOutputTransform !== null &&
+			transformed instanceof Date
+		) {
+			transformed = dateOutputTransform(transformed);
+		}
+
 		// 4. Nested object validation (only if type check passed — not arrays)
 		if (this.#nestedSchema && isPlainObject(transformed)) {
 			const obj: Record<string, unknown> = { ...transformed };
@@ -1288,6 +1716,7 @@ export class RuleChain<Output = unknown> {
 					`${field}.${nestedField}`,
 					obj[nestedField],
 					{ ...ctx, parent: obj },
+					pending,
 				);
 				errors.push(...nestedResult.errors);
 				if (nestedResult.transformed !== undefined) {
@@ -1305,6 +1734,7 @@ export class RuleChain<Output = unknown> {
 					`${field}.${i}`,
 					arr[i],
 					{ ...ctx, parent: arr },
+					pending,
 				);
 				for (const e of itemResult.errors) {
 					if (e.index === undefined) e.index = i;
@@ -1314,6 +1744,19 @@ export class RuleChain<Output = unknown> {
 					arr[i] = itemResult.transformed;
 				}
 			}
+		}
+
+		// 6. Record this chain's async rules for `validateAsync` to await. Mirrors
+		//    Lucid skipping a DB rule on an already-invalid or absent field: only a
+		//    clean, present value is worth a round-trip.
+		if (
+			pending &&
+			this.#asyncRules.length > 0 &&
+			errors.length === 0 &&
+			transformed !== undefined &&
+			transformed !== null
+		) {
+			pending.push({ chain: this, field, value: transformed, ctx });
 		}
 
 		return { errors, transformed };
@@ -1326,6 +1769,9 @@ export class RuleChain<Output = unknown> {
 		ctx: RunContext,
 		errors: ValidationError[],
 	): void {
+		// Set per iteration so `report` can substitute the `.message()` override of
+		// the rule currently running — these rules carry their text inside `run`.
+		let override: string | undefined;
 		const fieldCtx: FieldContext = {
 			value: transformed,
 			data: ctx.data,
@@ -1334,11 +1780,12 @@ export class RuleChain<Output = unknown> {
 			meta: ctx.meta,
 			isValid: errors.length === 0,
 			report(message: string, rule: string): void {
-				errors.push({ field, rule, message });
+				errors.push({ field, rule, message: override ?? message });
 			},
 		};
 		for (const rule of this.#useRules) {
 			fieldCtx.isValid = errors.length === 0;
+			override = this.#ruleMessages.get(rule);
 			rule.run(transformed, fieldCtx);
 		}
 	}
@@ -1354,6 +1801,7 @@ export class RuleChain<Output = unknown> {
 		ctx: RunContext,
 	): Promise<ValidationError[]> {
 		const errors: ValidationError[] = [];
+		let override: string | undefined;
 		const fieldCtx: FieldContext = {
 			value: transformed,
 			data: ctx.data,
@@ -1362,11 +1810,12 @@ export class RuleChain<Output = unknown> {
 			meta: ctx.meta,
 			isValid: true,
 			report(message: string, rule: string): void {
-				errors.push({ field, rule, message });
+				errors.push({ field, rule, message: override ?? message });
 			},
 		};
 		for (const rule of this.#asyncRules) {
 			fieldCtx.isValid = errors.length === 0;
+			override = this.#ruleMessages.get(rule);
 			await rule.run(transformed, fieldCtx);
 		}
 		return errors;
@@ -1553,6 +2002,8 @@ export const rules = {
 	number: (): RuleChain<number> => new RuleChain().number(),
 	boolean: (): RuleChain<boolean> => new RuleChain().boolean(),
 	any: (): RuleChain<unknown> => new RuleChain(),
+	date: (options?: { formats?: DateFormat[] }): RuleChain<Date> =>
+		new RuleChain().date(options),
 	object: <Sh extends Record<string, RuleChain>>(
 		shape: Sh,
 	): RuleChain<Infer<Sh>> => new RuleChain().object(shape),
@@ -1576,6 +2027,7 @@ function validateWithRust(
 			rules: Array<{ name: string; params: unknown }>;
 			optional: boolean;
 			transforms: string[];
+			bail: boolean;
 		}
 	> = {};
 
@@ -1590,6 +2042,8 @@ function validateWithRust(
 			rules: ruleDescs,
 			optional: chain.isOptionalField,
 			transforms: chain.transforms.map((t) => t.name),
+			// Sent explicitly so the Rust engine and the TS path agree on bail.
+			bail: chain.bails,
 		};
 	}
 

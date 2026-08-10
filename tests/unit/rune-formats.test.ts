@@ -1,0 +1,126 @@
+import { describe, expect, it } from "vitest";
+import { RuneError, rules, schema } from "../../src/index.js";
+
+/** One valid / one invalid per rule — the invalid case is the one that matters. */
+const ok = (chain: () => ReturnType<typeof rules.string>, value: unknown) =>
+	schema({ v: chain() }).validate({ v: value }).valid;
+
+describe("rune > format rules (VineJS parity)", () => {
+	it("ulid / jwt / ascii / hexCode", () => {
+		expect(ok(() => rules.string().ulid(), "01ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(
+			true,
+		);
+		expect(ok(() => rules.string().ulid(), "not-a-ulid")).toBe(false);
+		// A ULID cannot start above 7 — the 26-char length alone would accept it.
+		expect(ok(() => rules.string().ulid(), "81ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(
+			false,
+		);
+
+		expect(ok(() => rules.string().jwt(), "aaa.bbb.ccc")).toBe(true);
+		expect(ok(() => rules.string().jwt(), "aaa.bbb")).toBe(false);
+
+		expect(ok(() => rules.string().ascii(), "plain")).toBe(true);
+		expect(ok(() => rules.string().ascii(), "café")).toBe(false);
+
+		expect(ok(() => rules.string().hexCode(), "#a3f")).toBe(true);
+		expect(ok(() => rules.string().hexCode(), "#a3f0c1")).toBe(true);
+		expect(ok(() => rules.string().hexCode(), "#xyz")).toBe(false);
+	});
+
+	it("ipAddress, with and without a pinned version", () => {
+		expect(ok(() => rules.string().ipAddress(), "192.168.1.1")).toBe(true);
+		expect(ok(() => rules.string().ipAddress(), "::1")).toBe(true);
+		expect(ok(() => rules.string().ipAddress(), "2001:db8::ff00:42:8329")).toBe(
+			true,
+		);
+		expect(ok(() => rules.string().ipAddress(), "256.1.1.1")).toBe(false);
+		expect(ok(() => rules.string().ipAddress({ version: 4 }), "::1")).toBe(
+			false,
+		);
+		expect(
+			ok(() => rules.string().ipAddress({ version: 6 }), "192.168.1.1"),
+		).toBe(false);
+	});
+
+	it("creditCard uses Luhn, not just length", () => {
+		expect(ok(() => rules.string().creditCard(), "4242424242424242")).toBe(
+			true,
+		);
+		expect(ok(() => rules.string().creditCard(), "4242 4242 4242 4242")).toBe(
+			true,
+		);
+		// Same length, one digit off — a length check would pass this.
+		expect(ok(() => rules.string().creditCard(), "4242424242424243")).toBe(
+			false,
+		);
+	});
+
+	it("iban uses the mod-97 checksum", () => {
+		expect(ok(() => rules.string().iban(), "GB82 WEST 1234 5698 7654 32")).toBe(
+			true,
+		);
+		expect(ok(() => rules.string().iban(), "GB82WEST12345698765433")).toBe(
+			false,
+		);
+	});
+
+	it("coordinates enforces the lat/lng ranges", () => {
+		expect(ok(() => rules.string().coordinates(), "46.2044, 6.1432")).toBe(
+			true,
+		);
+		expect(ok(() => rules.string().coordinates(), "91.0, 0.0")).toBe(false);
+		expect(ok(() => rules.string().coordinates(), "46.2044")).toBe(false);
+	});
+
+	it("mobile accepts E.164", () => {
+		expect(ok(() => rules.string().mobile(), "+41791234567")).toBe(true);
+		expect(ok(() => rules.string().mobile(), "abc")).toBe(false);
+	});
+
+	it("postalCode checks per country and fails closed on an unknown one", () => {
+		expect(
+			ok(() => rules.string().postalCode({ countryCode: "CH" }), "1201"),
+		).toBe(true);
+		expect(
+			ok(() => rules.string().postalCode({ countryCode: "CH" }), "12010"),
+		).toBe(false);
+		expect(
+			ok(() => rules.string().postalCode({ countryCode: "US" }), "94105-1234"),
+		).toBe(true);
+		// An unsupported country must NOT silently accept everything.
+		expect(() => rules.string().postalCode({ countryCode: "ZZ" })).toThrow(
+			RuneError,
+		);
+	});
+
+	it("notSameAs compares against a sibling", () => {
+		const s = schema({
+			oldPassword: rules.string(),
+			newPassword: rules.string().notSameAs("oldPassword"),
+		});
+		expect(s.validate({ oldPassword: "a", newPassword: "b" }).valid).toBe(true);
+		const bad = s.validate({ oldPassword: "a", newPassword: "a" });
+		expect(bad.valid).toBe(false);
+		expect(bad.errors[0]?.rule).toBe("notSameAs");
+	});
+
+	it("distinct, plain and keyed by a field", () => {
+		const plain = schema({ tags: rules.array(rules.string()).distinct() });
+		expect(plain.validate({ tags: ["a", "b"] }).valid).toBe(true);
+		expect(plain.validate({ tags: ["a", "a"] }).valid).toBe(false);
+
+		const keyed = schema({
+			users: rules
+				.array(rules.any().object({ id: rules.number() }))
+				.distinct("id"),
+		});
+		expect(keyed.validate({ users: [{ id: 1 }, { id: 2 }] }).valid).toBe(true);
+		expect(keyed.validate({ users: [{ id: 1 }, { id: 1 }] }).valid).toBe(false);
+	});
+
+	it("withoutDecimals rejects a fractional number", () => {
+		const s = schema({ n: rules.number().withoutDecimals() });
+		expect(s.validate({ n: 42 }).valid).toBe(true);
+		expect(s.validate({ n: 4.2 }).valid).toBe(false);
+	});
+});

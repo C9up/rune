@@ -192,3 +192,31 @@ describe("rune parity > SimpleMessagesProvider custom messages", () => {
 		expect(r.errors[0].message).toContain("too short");
 	});
 });
+
+/**
+ * VineJS validates each field in bail mode by default (`FieldOptions.bail: true`
+ * in `@vinejs/vine`), i.e. it stops at that field's first failing rule.
+ */
+describe("rune > bail defaults to VineJS behaviour", () => {
+	it("stops at the first failing rule of a field", () => {
+		const s = schema({ code: rules.string().minLength(5).alphaNumeric() });
+		const res = s.validate({ code: "a!" });
+		expect(res.valid).toBe(false);
+		// Both rules fail, only the first is reported.
+		expect(res.errors.filter((e) => e.field === "code")).toHaveLength(1);
+		expect(res.errors[0]?.rule).toBe("minLength");
+	});
+
+	it("bail(false) restores exhaustive reporting", () => {
+		const s = schema({
+			code: rules.string().bail(false).minLength(5).alphaNumeric(),
+		});
+		const rulesHit = s.validate({ code: "a!" }).errors.map((e) => e.rule);
+		expect(rulesHit).toEqual(["minLength", "alphaNumeric"]);
+	});
+
+	it("does not bail across fields — every field still reports", () => {
+		const s = schema({ a: rules.string(), b: rules.string() });
+		expect(s.validate({ a: 1, b: 2 }).errors).toHaveLength(2);
+	});
+});
