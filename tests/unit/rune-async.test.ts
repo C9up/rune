@@ -7,7 +7,7 @@ import {
 } from "../../src/index.js";
 
 /**
- * Async validation (`validateAsync`) + DB-backed `unique`/`exists` rules
+ * Async validation (`validateResultAsync` / `validate`) + DB-backed `unique`/`exists` rules
  * (Adonis Lucid parity). rune stays framework-agnostic: the rules take a check
  * callback that does the query (e.g. against atlas), so no DB dependency here.
  */
@@ -79,7 +79,7 @@ describe("rune > async validation", () => {
 			email: rules.string().unique(async () => true),
 		});
 		expect(() => s.validateResult({ email: "x@y.io" })).toThrow(
-			/validateAsync/,
+			/validateResultAsync/,
 		);
 	});
 
@@ -102,7 +102,7 @@ describe("rune > async validation", () => {
 /**
  * Async rules nested under an object or an array used to be invisible: the
  * schema-level detection only inspected top-level chains, so `validate()` did
- * not throw and `validateAsync()` never ran them. A `unique` check that never
+ * not throw and the async pass never ran them. A `unique` check that never
  * runs reads exactly like a `unique` check that passed.
  */
 describe("rune > async validation at depth", () => {
@@ -113,7 +113,7 @@ describe("rune > async validation at depth", () => {
 			}),
 		});
 		expect(() => s.validateResult({ user: { email: "x@y.io" } })).toThrow(
-			/validateAsync/,
+			/validateResultAsync/,
 		);
 	});
 
@@ -122,11 +122,11 @@ describe("rune > async validation at depth", () => {
 			emails: rules.array(rules.string().unique(async () => true)),
 		});
 		expect(() => s.validateResult({ emails: ["x@y.io"] })).toThrow(
-			/validateAsync/,
+			/validateResultAsync/,
 		);
 	});
 
-	it("validateAsync runs a unique() nested in an object", async () => {
+	it("validateResultAsync runs a unique() nested in an object", async () => {
 		const taken = new Set(["ada@x.io"]);
 		const s = schema({
 			user: rules.any().object({
@@ -146,7 +146,7 @@ describe("rune > async validation at depth", () => {
 		expect(bad.errors[0]?.field).toBe("user.email");
 	});
 
-	it("validateAsync runs a unique() on every array item", async () => {
+	it("validateResultAsync runs a unique() on every array item", async () => {
 		const seen: string[] = [];
 		const s = schema({
 			emails: rules.array(

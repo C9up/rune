@@ -155,7 +155,7 @@ describe("rune > la vérification de contenu est le DÉFAUT", () => {
 			s.validateResult({
 				avatar: { size: 8, extname: "png", tmpPath: exePath },
 			}),
-		).toThrow(/validateAsync/);
+		).toThrow(/validateResultAsync/);
 	});
 
 	it("mimeTypes() active aussi le contrôle", async () => {

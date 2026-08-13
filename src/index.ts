@@ -166,8 +166,9 @@ const rune = {
 			keys.every((key) => key in value),
 		/**
 		 * No duplicate in the data set, optionally compared on one or more fields
-		 * (VineJS `helpers.isDistinct`). Items missing a compared key are SKIPPED,
-		 * so two absent values are not a duplicate of each other.
+		 * (VineJS `helpers.isDistinct`). `null` / `undefined` items are ignored,
+		 * and items missing a compared key are SKIPPED, so two absent values are
+		 * not a duplicate of each other.
 		 */
 		isDistinct: (
 			dataSet: readonly unknown[],
@@ -176,6 +177,7 @@ const rune = {
 			const list = fields === undefined ? null : [fields].flat();
 			const keys: string[] = [];
 			for (const item of dataSet) {
+				if (item === null || item === undefined) continue;
 				if (list === null) {
 					keys.push(JSON.stringify(item));
 					continue;

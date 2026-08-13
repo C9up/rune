@@ -4,6 +4,7 @@ import rune, {
 	compile,
 	create,
 	createRule,
+	errors,
 	RuneError,
 	RuneValidationError,
 	rules,
@@ -306,5 +307,92 @@ describe("rune > union.if / union.else (VineJS parity)", () => {
 		});
 		expect(v.validateResult({ id: 42 }).valid).toBe(true);
 		expect(v.validateResult({ id: "nope" }).errors[0]?.rule).toBe("union");
+	});
+});
+
+describe("errors namespace (VineJS parity)", () => {
+	it("exposes E_VALIDATION_ERROR so an Adonis-style catch matches", async () => {
+		const v = schema({ name: rules.string().minLength(2) });
+
+		await expect(v.validate({ name: "a" })).rejects.toBeInstanceOf(
+			errors.E_VALIDATION_ERROR,
+		);
+
+		// The alias must BE the thrown class, not a look-alike: Adonis code does
+		// `error instanceof errors.E_VALIDATION_ERROR`.
+		expect(errors.E_VALIDATION_ERROR).toBe(RuneValidationError);
+
+		try {
+			await v.validate({ name: "a" });
+			expect.unreachable("validate() must throw on a failure");
+		} catch (err) {
+			expect(err).toBeInstanceOf(errors.E_VALIDATION_ERROR);
+			expect((err as InstanceType<typeof errors.E_VALIDATION_ERROR>).code).toBe(
+				"E_VALIDATION_ERROR",
+			);
+			expect((err as InstanceType<typeof errors.E_VALIDATION_ERROR>).status).toBe(422);
+		}
+	});
+
+	it("points a sync call on an async schema at a method that exists", () => {
+		const v = schema({
+			email: rules.string().unique(async () => true),
+		});
+		// The guidance in this message is the only thing a caller has to go on.
+		expect(() => v.validateResult({ email: "a@b.ch" })).toThrow(
+			/validateResultAsync\(\)/,
+		);
+	});
+});
+
+describe("Vine option parity — uuid / distinct / in / notIn", () => {
+	it("uuid({ version }) enforces the requested versions", () => {
+		const v4 = "9f1b8c2e-4b3a-4d5e-8f2a-1c3d5e7f9a1b"; // version nibble = 4
+		const v1 = "9f1b8c2e-4b3a-1d5e-8f2a-1c3d5e7f9a1b"; // version nibble = 1
+
+		const any = schema({ id: rules.string().uuid() });
+		expect(any.validateResult({ id: v4 }).valid).toBe(true);
+		expect(any.validateResult({ id: v1 }).valid).toBe(true);
+
+		const only4 = schema({ id: rules.string().uuid({ version: [4] }) });
+		expect(only4.validateResult({ id: v4 }).valid).toBe(true);
+		expect(only4.validateResult({ id: v1 }).valid).toBe(false);
+
+		// A single number, not just an array (VineJS accepts both).
+		const one = schema({ id: rules.string().uuid({ version: 1 }) });
+		expect(one.validateResult({ id: v1 }).valid).toBe(true);
+		expect(one.validateResult({ id: v4 }).valid).toBe(false);
+	});
+
+	it("distinct ignores null and undefined items", () => {
+		const v = schema({ tags: rules.array().distinct() });
+		// VineJS: helpers.isDistinct([1, null, 2, null, 4, 5]) === true
+		expect(v.validateResult({ tags: [1, null, 2, null, 4, 5] }).valid).toBe(true);
+		expect(v.validateResult({ tags: [1, undefined, 2, undefined] }).valid).toBe(true);
+		// Real duplicates are still caught.
+		expect(v.validateResult({ tags: [1, 2, 2] }).valid).toBe(false);
+	});
+
+	it("in/notIn accept a callback computed at validation time", () => {
+		let roles = ["admin"];
+		const v = schema({ role: rules.string().in(() => roles) });
+
+		expect(v.validateResult({ role: "admin" }).valid).toBe(true);
+		expect(v.validateResult({ role: "editor" }).valid).toBe(false);
+
+		// The callback is re-read on every check — that is the point of allowing one.
+		roles = ["editor"];
+		expect(v.validateResult({ role: "editor" }).valid).toBe(true);
+		expect(v.validateResult({ role: "admin" }).valid).toBe(false);
+
+		const denied = schema({ username: rules.string().notIn(() => ["root"]) });
+		expect(denied.validateResult({ username: "ada" }).valid).toBe(true);
+		expect(denied.validateResult({ username: "root" }).valid).toBe(false);
+	});
+
+	it("keeps the static array form working", () => {
+		const v = schema({ role: rules.string().in(["admin", "editor"]) });
+		expect(v.validateResult({ role: "editor" }).valid).toBe(true);
+		expect(v.validateResult({ role: "guest" }).valid).toBe(false);
 	});
 });

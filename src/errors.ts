@@ -60,3 +60,14 @@ export class RuneValidationError extends Error {
 		return `${this.name} [${this.code}]: ${this.message}`;
 	}
 }
+
+/**
+ * VineJS-compatible alias. Adonis/Vine code catches on the error's NAME:
+ *
+ *   import { errors } from '@c9up/rune'
+ *   if (error instanceof errors.E_VALIDATION_ERROR) { ... }
+ *
+ * Without this binding the namespace exists but the member does not, and a
+ * copy-pasted Adonis handler silently never matches.
+ */
+export const E_VALIDATION_ERROR = RuneValidationError;

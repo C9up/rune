@@ -224,7 +224,7 @@ export function createRule<Options>(
 
 /**
  * An async `.useAsync()` rule validator — same shape as {@link RuleValidator}
- * but may return a Promise. Runs only under {@link ValidationSchema.validateAsync}.
+ * but may return a Promise. Runs only under {@link ValidationSchema.validateResultAsync}.
  */
 export type AsyncRuleValidator<Options = undefined> = (
 	value: unknown,
@@ -248,7 +248,7 @@ export interface AsyncCompiledRule {
 /**
  * Async counterpart of {@link createRule} — for rules that must await (DB lookups
  * etc.). Attach with `chain.useAsync(rule(options))`; the schema must then be run
- * with `validateAsync`. This is how DB-backed `unique`/`exists` rules are built
+ * with `validateResultAsync`. This is how DB-backed `unique`/`exists` rules are built
  * (the validator does the query), keeping rune framework-agnostic.
  */
 export function createAsyncRule(
@@ -482,7 +482,7 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 		data: unknown,
 		options?: ValidateOptions,
 	): [RuneValidationError, null] | [null, T];
-	/** Throwing async validation (see {@link validateAsync} + {@link validateOrThrow}). */
+	/** Throwing async validation (see {@link validateResultAsync} + {@link validateOrThrow}). */
 	validateOrThrowAsync(data: unknown, options?: ValidateOptions): Promise<T>;
 }
 
@@ -497,7 +497,7 @@ interface RunContext {
 
 /**
  * An async rule run deferred by the (synchronous) traversal and awaited by
- * `validateAsync`. Collected at EVERY depth — top-level fields, nested object
+ * `validateResultAsync`. Collected at EVERY depth — top-level fields, nested object
  * fields and array items alike.
  */
 interface PendingAsync {
@@ -1277,13 +1277,14 @@ function resolveRequiredMessage(field: string, ctx: RunContext): string {
 function detectHasCustomRules(fields: Record<string, RuleChain>): boolean {
 	return Object.values(fields).some((chain) => {
 		if (chain.useRules.length > 0) return true; // .use() rule — TS-only (Rust can't run JS)
-		if (chain.asyncRules.length > 0) return true; // async rule — TS-only, needs validateAsync
+		if (chain.asyncRules.length > 0) return true; // async rule — TS-only, needs validateResultAsync
 		if (chain.hasConditionalRequired) return true; // requiredWhen — TS-only
 		if (chain.preTransforms.length > 0) return true; // .parse() — TS-only
 		if (chain.transforms.length > 0) return true; // .transform() — Rust gets only the NAME, can't run a JS fn
 		if (chain.isNullable) return true; // .nullable() — the flag is not sent to the Rust engine
 		return chain.rules.some((r) => {
 			if (!NATIVE_RULES.has(r.name)) return true; // Rust cannot run it identically
+			if (r.tsOnly === true) return true; // native-listed name, TS-only options
 			if (hasCustomMessage(r)) return true; // custom message
 			return false;
 		});
@@ -1354,7 +1355,7 @@ export function schema(
 	// Computed once at construction time, not per validate() call.
 	const hasCustomRules = detectHasCustomRules(fields);
 	// Any field carrying async rules (`unique`/`exists`/`useAsync`) forces callers
-	// onto `validateAsync` — the sync path throws rather than silently skipping them.
+	// onto the async path — the sync path throws rather than silently skipping them.
 	const hasAsyncRules = Object.values(fields).some(
 		(chain) => chain.hasAsyncRulesDeep,
 	);
@@ -1368,7 +1369,7 @@ export function schema(
 			: rawData;
 		if (hasAsyncRules) {
 			throw new Error(
-				"rune: this schema has async rules (unique/exists/useAsync) — call validateAsync() instead of validate().",
+				"rune: this schema has async rules (unique/exists/useAsync) — call validateResultAsync() (result-based) or validate() (throwing) instead of validateResult().",
 			);
 		}
 		if (!isPlainObject(data)) {
@@ -1742,6 +1743,13 @@ export interface RuleDef {
 	message: string;
 	/** Set when `.message()` overrode this rule's default text. */
 	hasCustomMessage?: boolean;
+	/**
+	 * Keep this rule off the Rust path even though its NAME is in
+	 * {@link NATIVE_RULES}. Set by options the native engine does not know about
+	 * (`uuid({ version })`, a callback list for `in` / `notIn`): the engine would
+	 * run the rule without them and silently answer a different question.
+	 */
+	tsOnly?: boolean;
 	/** Modifier this rule applies to its field's JSON Schema node. */
 	toJSONSchema?: JsonSchemaModifier;
 }
@@ -1762,6 +1770,23 @@ const UUID_RE =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Rule chain — fluent, phantom-typed validation builder. */
+/**
+ * The value list accepted by `in` / `notIn` / `enum` — static, or computed at
+ * validation time (VineJS parity).
+ */
+export type AllowedValues =
+	| ReadonlyArray<string | number | boolean>
+	| (() => ReadonlyArray<string | number | boolean>);
+
+/** Normalise a static list or a callback into a getter. */
+function allowedValuesResolver(
+	values: AllowedValues,
+): () => ReadonlyArray<string | number | boolean> {
+	if (typeof values === "function") return values;
+	const snapshot = [...values];
+	return () => snapshot;
+}
+
 export class RuleChain<Output = unknown> {
 	/** Phantom output type — drives {@link Infer}; never read at runtime. */
 	declare readonly [OUTPUT]: Output;
@@ -1838,7 +1863,7 @@ export class RuleChain<Output = unknown> {
 	get useRules(): readonly CompiledRule[] {
 		return this.#useRules;
 	}
-	/** Public read access to async rules (`unique`/`exists`/`useAsync`) — run by `validateAsync`. */
+	/** Public read access to async rules (`unique`/`exists`/`useAsync`) — run by `validateResultAsync`. */
 	get asyncRules(): readonly AsyncCompiledRule[] {
 		return this.#asyncRules;
 	}
@@ -1846,7 +1871,7 @@ export class RuleChain<Output = unknown> {
 	 * Does this chain — or anything nested under it (object fields, array items) —
 	 * carry async rules? The schema-level detection used to inspect only the
 	 * top-level chains, so a nested `unique`/`exists` was invisible: `validate()`
-	 * did not throw and `validateAsync()` never ran the rule, silently accepting
+	 * did not throw and the async pass never ran the rule, silently accepting
 	 * an unchecked value.
 	 */
 	get hasAsyncRulesDeep(): boolean {
@@ -2781,7 +2806,7 @@ export class RuleChain<Output = unknown> {
 	 * The only rule needing the network, which rune cannot do and stay agnostic
 	 * and zero-dependency — so it runs through a resolver bound once at boot,
 	 * exactly like `unique()`. Async by nature: run the schema with
-	 * `validateAsync`. Unbound it THROWS, rather than passing a host nobody
+	 * `validateResultAsync`. Unbound it THROWS, rather than passing a host nobody
 	 * checked.
 	 */
 	activeUrl(): this {
@@ -2810,12 +2835,30 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Must be a valid UUID. */
-	uuid(): this {
+	/**
+	 * Must be a valid UUID, optionally restricted to given versions
+	 * (VineJS `uuid({ version: [4] })`, versions 1 through 8).
+	 */
+	uuid(options?: { version?: number | number[] }): this {
+		const versions =
+			options?.version === undefined ? undefined : [options.version].flat();
 		this.#pushRule({
 			name: "uuid",
-			validate: (v) => typeof v === "string" && UUID_RE.test(v),
-			message: "Must be a valid UUID",
+			args: versions === undefined ? {} : { version: versions },
+			// The Rust engine checks UUID shape only; a version constraint would
+			// be dropped there.
+			tsOnly: versions !== undefined,
+			validate: (v) => {
+				if (typeof v !== "string" || !UUID_RE.test(v)) return false;
+				if (versions === undefined) return true;
+				// Version nibble: first character of the third group.
+				const version = Number.parseInt(v[14] ?? "", 16);
+				return versions.includes(version);
+			},
+			message:
+				versions === undefined
+					? "Must be a valid UUID"
+					: `Must be a UUID v${versions.join("/")}`,
 		});
 		return this;
 	}
@@ -3039,6 +3082,10 @@ export class RuleChain<Output = unknown> {
 				const fieldList = field === undefined ? null : [field].flat();
 				const keys: string[] = [];
 				for (const item of v) {
+					// VineJS ignores null/undefined items entirely: `[1, null, 2, null]`
+					// is distinct. Serialising them would make the second one a
+					// duplicate of the first.
+					if (item === null || item === undefined) continue;
 					if (fieldList === null) {
 						keys.push(JSON.stringify(item));
 						continue;
@@ -3246,25 +3293,35 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Value must be one of `values`. */
-	in(values: ReadonlyArray<string | number | boolean>): this {
-		const allowed = [...values];
+	/**
+	 * Value must be one of `values`.
+	 *
+	 * VineJS also accepts a callback so the list can be computed at validation
+	 * time (tenant-scoped roles, values read from config…). A static array is
+	 * snapshotted; a callback is invoked on every check.
+	 */
+	in(values: AllowedValues): this {
+		const resolve = allowedValuesResolver(values);
 		this.#pushRule({
 			name: "in",
-			args: { values: allowed },
-			validate: (v) => allowed.includes(asPrimitive(v)),
+			args: typeof values === "function" ? {} : { values: [...values] },
+			// A callback list is computed per call — the native engine only ever
+			// sees a static array, so it must not run this rule.
+			tsOnly: typeof values === "function",
+			validate: (v) => resolve().includes(asPrimitive(v)),
 			message: "Invalid value",
 		});
 		return this;
 	}
 
 	/** Value must NOT be one of `values`. */
-	notIn(values: ReadonlyArray<string | number | boolean>): this {
-		const denied = [...values];
+	notIn(values: AllowedValues): this {
+		const resolve = allowedValuesResolver(values);
 		this.#pushRule({
 			name: "notIn",
-			args: { values: denied },
-			validate: (v) => !denied.includes(asPrimitive(v)),
+			args: typeof values === "function" ? {} : { values: [...values] },
+			tsOnly: typeof values === "function",
+			validate: (v) => !resolve().includes(asPrimitive(v)),
 			message: "Invalid value",
 		});
 		return this;
@@ -3474,7 +3531,7 @@ export class RuleChain<Output = unknown> {
 
 	/**
 	 * Attach an async rule (from {@link createAsyncRule}). The schema must then be
-	 * run with `validateAsync` — sync `validate()` throws for such a schema.
+	 * run with `validateResultAsync` — sync `validate()` throws for such a schema.
 	 */
 	useAsync(rule: AsyncCompiledRule): this {
 		if (rule?.__rune !== "asyncRule" || typeof rule.run !== "function") {
@@ -3491,7 +3548,7 @@ export class RuleChain<Output = unknown> {
 	/**
 	 * DB-backed uniqueness rule (Adonis Lucid `unique`). `check(value, field)`
 	 * resolves `true` when the value is unique (valid). rune stays agnostic — the
-	 * check does the query (e.g. against atlas). Requires `validateAsync`.
+	 * check does the query (e.g. against atlas). Requires the async path (`validateResultAsync` / `validate`).
 	 *
 	 *     rules.string().email().unique(async (value) => {
 	 *       const row = await db.from('users').where('email', value).first()
@@ -3527,7 +3584,7 @@ export class RuleChain<Output = unknown> {
 
 	/**
 	 * DB-backed existence rule (Adonis Lucid `exists`). `check(value, field)`
-	 * resolves `true` when a matching row exists (valid). Requires `validateAsync`.
+	 * resolves `true` when a matching row exists (valid). Requires the async path (`validateResultAsync` / `validate`).
 	 */
 	exists(
 		check: (value: unknown, field: FieldContext) => boolean | Promise<boolean>,
@@ -3719,7 +3776,7 @@ export class RuleChain<Output = unknown> {
 	 * `pending` is the async-rule collector. The traversal itself stays sync (it
 	 * is shared with `validate()`); when a collector is supplied, every chain in
 	 * the tree that carries async rules and passed its sync rules records itself
-	 * for `validateAsync` to await. Without it, nested async rules never ran.
+	 * for the async path to await. Without it, nested async rules never ran.
 	 */
 	_validateWithTransform(
 		field: string,
@@ -3965,7 +4022,7 @@ export class RuleChain<Output = unknown> {
 			}
 		}
 
-		// 6. Record this chain's async rules for `validateAsync` to await. Mirrors
+		// 6. Record this chain's async rules for the async path to await. Mirrors
 		//    Lucid skipping a DB rule on an already-invalid or absent field: only a
 		//    clean, present value is worth a round-trip.
 		if (
@@ -4020,7 +4077,7 @@ export class RuleChain<Output = unknown> {
 
 	/**
 	 * Run this chain's async rules on the (already sync-validated) value, awaiting
-	 * each in order. Returns the errors they reported. Used by `validateAsync`.
+	 * each in order. Returns the errors they reported. Used by `validateResultAsync`.
 	 * @internal
 	 */
 	async _runAsyncRules(
