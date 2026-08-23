@@ -58,28 +58,43 @@ export function isNativeAvailable(): boolean {
 	return native !== undefined;
 }
 
-let warnedFallback = false;
+/** Why the engine could not be loaded, phrased for whoever has to fix it. */
+function unavailableReason(): string {
+	const target = `${platform}-${arch}`;
+	if (loadError !== undefined) {
+		return `failed to load (${loadError instanceof Error ? loadError.message : String(loadError)})`;
+	}
+	return platformMap[target] !== undefined
+		? "binary not found"
+		: `no prebuilt binary for ${target}`;
+}
+
+/** Raised when a schema needs the Rust engine and it is not there. */
+export class RuneNativeRequiredError extends Error {
+	readonly code = "RUNE_NAPI_REQUIRED" as const;
+	constructor() {
+		super(
+			`[RUNE_NAPI_REQUIRED] The Rust validation engine is required but not loaded — ${unavailableReason()}.\n` +
+				"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
+		);
+		this.name = "RuneNativeRequiredError";
+	}
+}
 
 /**
- * Surface — exactly once per process — that the native engine is unavailable so
- * the schema is falling back to the TypeScript validator. The two paths can
- * differ subtly, so a silent fallback makes validation results depend on whether
- * the prebuilt binary loaded (platform-dependent). Callers invoke this only when
- * they WOULD have used the native engine (no custom rules / translator).
+ * Refuse to validate without the native engine.
+ *
+ * There is a TypeScript validator, and it used to take over silently with a
+ * one-time warning. That made a schema's verdict depend on whether a prebuilt
+ * binary happened to load: two deployments of the same code could disagree on
+ * whether a payload is valid, and the one that fell back lost the reason to
+ * have Rust at all. A schema the engine can run is now run BY the engine or
+ * not at all.
+ *
+ * The TypeScript path stays for what the engine genuinely cannot do — custom
+ * rules, a translator, a messages provider — where it is the only
+ * implementation, not a second one.
  */
-export function warnNativeUnavailableOnce(): void {
-	if (warnedFallback) return;
-	warnedFallback = true;
-	const target = `${platform}-${arch}`;
-	const reason =
-		loadError !== undefined
-			? `failed to load (${loadError instanceof Error ? loadError.message : String(loadError)})`
-			: platformMap[target] !== undefined
-				? "binary not found"
-				: `no prebuilt binary for ${target}`;
-	console.warn(
-		`[rune] native validation engine unavailable — ${reason}. Falling back to the ` +
-			"TypeScript validator, whose results can differ subtly from the Rust engine — " +
-			"validation is platform-dependent for this process.",
-	);
+export function assertNativeAvailable(): void {
+	if (native === undefined) throw new RuneNativeRequiredError();
 }

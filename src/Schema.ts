@@ -54,9 +54,9 @@ import {
 	readHead,
 } from "./magic.js";
 import {
+	assertNativeAvailable,
 	isNativeAvailable,
 	validateNative,
-	warnNativeUnavailableOnce,
 } from "./native.js";
 
 export type ValidationMessageParams = Record<string, string | number | boolean>;
@@ -816,6 +816,21 @@ export interface ConditionalGroup {
 	}>;
 }
 
+/**
+ * Called when no union branch matched (VineJS `UnionNoMatchCallback`). Report
+ * through the field context; reporting nothing suppresses the generic error.
+ */
+export type UnionNoMatchCallback = (
+	value: unknown,
+	field: FieldContext,
+) => void;
+
+/**
+ * Called with a record's keys (VineJS `RecordKeysCallback`). Report through the
+ * field context; reporting nothing accepts the key set.
+ */
+export type RecordKeysCallback = (keys: string[], field: FieldContext) => void;
+
 /** Per-field introspection returned inside `toJSON().schema`. */
 export type SchemaIntrospection = Record<
 	string,
@@ -1405,10 +1420,10 @@ export function schema(
 				reporterError = nativeReporter?.createError;
 				return native;
 			}
-			// This schema would have used the native engine, but it isn't loaded —
-			// surface the platform-dependent TS fallback once instead of diverging
-			// silently.
-			warnNativeUnavailableOnce();
+			// This schema carries nothing the engine cannot run, so the engine is
+			// what must run it. Falling back to the TypeScript validator here made
+			// the verdict depend on whether a binary loaded.
+			assertNativeAvailable();
 		}
 
 		const errors: ValidationError[] = [];
@@ -1739,7 +1754,12 @@ export interface RuleDef {
 	param?: number;
 	/** Interpolation args exposed to i18n/messages providers (e.g. `{ min: 3 }`). */
 	args?: Record<string, unknown>;
-	validate: (value: unknown) => boolean;
+	/**
+	 * `field` is the context VineJS hands a rule — a callback-valued rule
+	 * (`in`, `notIn`, `enum`) reads `meta`/`parent` off it to compute its list
+	 * per request. Rules that do not need it simply declare one parameter.
+	 */
+	validate: (value: unknown, field: FieldContext) => boolean;
 	message: string;
 	/** Set when `.message()` overrode this rule's default text. */
 	hasCustomMessage?: boolean;
@@ -1776,12 +1796,12 @@ const UUID_RE =
  */
 export type AllowedValues =
 	| ReadonlyArray<string | number | boolean>
-	| (() => ReadonlyArray<string | number | boolean>);
+	| ((field: FieldContext) => ReadonlyArray<string | number | boolean>);
 
 /** Normalise a static list or a callback into a getter. */
 function allowedValuesResolver(
 	values: AllowedValues,
-): () => ReadonlyArray<string | number | boolean> {
+): (field: FieldContext) => ReadonlyArray<string | number | boolean> {
 	if (typeof values === "function") return values;
 	const snapshot = [...values];
 	return () => snapshot;
@@ -1829,8 +1849,14 @@ export class RuleChain<Output = unknown> {
 	#camelCaseKeys = false;
 	#groups: ConditionalGroup[] = [];
 	#recordValueChain: RuleChain | null = null;
+	#enumChoices:
+		| ReadonlyArray<string | number | boolean>
+		| ((field: FieldContext) => ReadonlyArray<string | number | boolean>)
+		| null = null;
+	#recordKeysCheck: RecordKeysCallback | null = null;
 	#tupleChains: RuleChain[] | null = null;
 	#unionChains: ConditionalBranch[] | null = null;
+	#unionNoMatch: UnionNoMatchCallback | null = null;
 	#useRules: CompiledRule[] = [];
 	#asyncRules: AsyncCompiledRule[] = [];
 	/** Last rule added, whichever register it landed in — the `message()` target. */
@@ -1950,8 +1976,11 @@ export class RuleChain<Output = unknown> {
 		next.#camelCaseKeys = this.#camelCaseKeys;
 		next.#groups = [...this.#groups];
 		next.#recordValueChain = this.#recordValueChain;
+		next.#enumChoices = this.#enumChoices;
+		next.#recordKeysCheck = this.#recordKeysCheck;
 		next.#tupleChains = this.#tupleChains;
 		next.#unionChains = this.#unionChains;
+		next.#unionNoMatch = this.#unionNoMatch;
 		next.#ruleMessages = new Map(this.#ruleMessages);
 		next.#lastRule = this.#lastRule;
 		next.#preTransforms = [...this.#preTransforms];
@@ -2407,6 +2436,18 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
+	 * Check the record's KEYS, not its values (VineJS `record().validateKeys()`).
+	 *
+	 * The callback receives every key at once and reports through the field
+	 * context — the set is what matters when keys must be exclusive, exhaustive,
+	 * or drawn from a list only known at runtime.
+	 */
+	validateKeys(callback: RecordKeysCallback): this {
+		this.#recordKeysCheck = callback;
+		return this;
+	}
+
+	/**
 	 * Fixed-length array with a schema per position (VineJS `tuple`). Extra
 	 * items are rejected — a tuple that silently ignores a trailing element is
 	 * how unvalidated data slips through.
@@ -2436,6 +2477,20 @@ export class RuleChain<Output = unknown> {
 	 * - bare chains: tried in order, first match wins, and a total miss reports a
 	 *   single `union` error rather than every losing branch's noise.
 	 */
+	/**
+	 * What to do when NO union branch matched (VineJS `union().otherwise()`).
+	 *
+	 * The callback receives the value and the field, and reports the error it
+	 * wants — the point being that "matches nothing" is a useless message when
+	 * the caller knows which shapes were on offer. Reporting nothing from the
+	 * callback suppresses the generic error entirely, which is how a union
+	 * folded into a larger check stays quiet.
+	 */
+	otherwise(callback: UnionNoMatchCallback): this {
+		this.#unionNoMatch = callback;
+		return this;
+	}
+
 	union(chains: readonly UnionBranch[]): this {
 		this.#unionChains = chains.map(toUnionBranch);
 		// Marker rule: its name is not in NATIVE_RULES, which is what keeps a
@@ -2669,18 +2724,43 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Must equal one of `values` (enum). Narrows the output to the union. */
+	/**
+	 * Must equal one of `values` (enum). Narrows the output to the union.
+	 *
+	 * `values` may be a callback receiving the field, which is how a list that
+	 * depends on the request — the roles this tenant allows, the statuses this
+	 * user may set — is computed per validation instead of frozen at import.
+	 */
 	enum<const V extends readonly (string | number | boolean)[]>(
-		values: V,
+		values: V | ((field: FieldContext) => V),
 	): RuleChain<V[number]> {
-		const allowed = [...values];
+		const lazy = typeof values === "function";
+		const resolve = allowedValuesResolver(values);
+		this.#enumChoices = lazy ? values : [...values];
 		this.#pushRule({
 			name: "enum",
-			args: { values: allowed },
-			validate: (v) => allowed.includes(asPrimitive(v)),
+			args: lazy ? {} : { values: [...values] },
+			// A computed list is per-call; the native engine only ever sees a
+			// static array, so it must not run this rule.
+			tsOnly: lazy,
+			validate: (v, field) => resolve(field).includes(asPrimitive(v)),
 			message: "Invalid value",
 		});
 		return this.#retype<V[number]>();
+	}
+
+	/**
+	 * The choices this enum was declared with (VineJS `getChoices()`) — the list
+	 * itself, or the callback when it is computed per request.
+	 *
+	 * Reading them back is what lets a form render the same options the
+	 * validator will accept, from one declaration instead of two.
+	 */
+	getChoices():
+		| ReadonlyArray<string | number | boolean>
+		| ((field: FieldContext) => ReadonlyArray<string | number | boolean>)
+		| undefined {
+		return this.#enumChoices ?? undefined;
 	}
 
 	/** Must equal a literal value. */
@@ -3308,7 +3388,7 @@ export class RuleChain<Output = unknown> {
 			// A callback list is computed per call — the native engine only ever
 			// sees a static array, so it must not run this rule.
 			tsOnly: typeof values === "function",
-			validate: (v) => resolve().includes(asPrimitive(v)),
+			validate: (v, field) => resolve(field).includes(asPrimitive(v)),
 			message: "Invalid value",
 		});
 		return this;
@@ -3321,7 +3401,7 @@ export class RuleChain<Output = unknown> {
 			name: "notIn",
 			args: typeof values === "function" ? {} : { values: [...values] },
 			tsOnly: typeof values === "function",
-			validate: (v) => !resolve().includes(asPrimitive(v)),
+			validate: (v, field) => !resolve(field).includes(asPrimitive(v)),
 			message: "Invalid value",
 		});
 		return this;
@@ -3904,6 +3984,14 @@ export class RuleChain<Output = unknown> {
 		}
 
 		// 4b. Record values — same shape as the nested-object walk, arbitrary keys.
+		if (this.#recordKeysCheck && isPlainObject(transformed)) {
+			// Keys first: a key-level rule that rejects the shape makes the
+			// per-value errors that would follow noise.
+			this.#recordKeysCheck(
+				Object.keys(transformed),
+				this.#makeFieldContext(field, transformed, ctx, errors, () => {}),
+			);
+		}
 		if (this.#recordValueChain && isPlainObject(transformed)) {
 			const obj: Record<string, unknown> = { ...transformed };
 			transformed = obj;
@@ -3985,19 +4073,30 @@ export class RuleChain<Output = unknown> {
 				}
 			}
 			if (!matched) {
-				errors.push({
-					field,
-					rule: "union",
-					message: resolveRuleMessage(
+				if (this.#unionNoMatch) {
+					// The callback owns the reporting: whatever it pushes is the
+					// error, and pushing nothing means it handled the case itself.
+					const reported: ValidationError[] = [];
+					this.#unionNoMatch(
+						transformed,
+						this.#makeFieldContext(field, transformed, ctx, reported, () => {}),
+					);
+					errors.push(...reported);
+				} else {
+					errors.push({
 						field,
-						{
-							name: "union",
-							validate: () => false,
-							message: "Does not match any allowed shape",
-						},
-						ctx,
-					),
-				});
+						rule: "union",
+						message: resolveRuleMessage(
+							field,
+							{
+								name: "union",
+								validate: () => false,
+								message: "Does not match any allowed shape",
+							},
+							ctx,
+						),
+					});
+				}
 			}
 		}
 
@@ -4126,8 +4225,14 @@ export class RuleChain<Output = unknown> {
 		value: unknown,
 		ctx: RunContext,
 	): ValidationError | null {
+		let context: FieldContext | undefined;
+		const fieldContext = (): FieldContext =>
+			(context ??= this.#makeFieldContext(field, value, ctx, [], () => {}));
 		for (const rule of this.#rules) {
-			if (TYPE_RULE_NAMES.has(rule.name) && !rule.validate(value)) {
+			if (
+				TYPE_RULE_NAMES.has(rule.name) &&
+				!rule.validate(value, fieldContext())
+			) {
 				return {
 					field,
 					rule: rule.name,
@@ -4146,10 +4251,21 @@ export class RuleChain<Output = unknown> {
 		ctx: RunContext,
 	): ValidationError[] {
 		const errors: ValidationError[] = [];
+		// Built once and only if a rule actually reads it: most rules take the
+		// value alone, and a context per rule per field is pure waste.
+		let context: FieldContext | undefined;
+		const fieldContext = (): FieldContext =>
+			(context ??= this.#makeFieldContext(
+				field,
+				transformed,
+				ctx,
+				[],
+				() => {},
+			));
 		for (const rule of this.#rules) {
 			if (TYPE_RULE_NAMES.has(rule.name)) continue;
 			if (this.#bail && errors.length > 0) break;
-			if (!rule.validate(transformed)) {
+			if (!rule.validate(transformed, fieldContext())) {
 				errors.push({
 					field,
 					rule: rule.name,
@@ -4400,7 +4516,10 @@ export const rules = {
 				const typeRule = chain.rules.find((rule) =>
 					TYPE_RULE_NAMES.has(rule.name),
 				);
-				return unionIf((value) => typeRule?.validate(value) === true, chain);
+				return unionIf(
+					(value, field) => typeRule?.validate(value, field) === true,
+					chain,
+				);
 			}),
 		);
 	},
@@ -4410,7 +4529,7 @@ export const rules = {
 	array: <Item extends RuleChain>(item?: Item): RuleChain<OutputOf<Item>[]> =>
 		new RuleChain().array(item),
 	enum: <const V extends readonly (string | number | boolean)[]>(
-		values: V,
+		values: V | ((field: FieldContext) => V),
 	): RuleChain<V[number]> => new RuleChain().enum(values),
 	literal: <V extends string | number | boolean>(value: V): RuleChain<V> =>
 		new RuleChain().literal(value),

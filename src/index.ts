@@ -21,6 +21,11 @@ export type {
 } from "./formats.js";
 export type { MessagesProviderContract } from "./MessagesProvider.js";
 export { SimpleMessagesProvider } from "./MessagesProvider.js";
+export {
+	assertNativeAvailable,
+	isNativeAvailable,
+	RuneNativeRequiredError,
+} from "./native.js";
 export type {
 	AsyncCompiledRule,
 	AsyncRuleValidator,
@@ -31,8 +36,10 @@ export type {
 	DatabaseRuleOptions,
 	FieldContext,
 	Infer,
+	RecordKeysCallback,
 	RuleChain,
 	RuleValidator,
+	UnionNoMatchCallback,
 	ValidateOptions,
 	ValidationError,
 	ValidationMessageParams,

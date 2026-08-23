@@ -7,8 +7,9 @@ import {
 	setValidationTranslator,
 } from "../../src/index.js";
 import {
+	assertNativeAvailable,
 	isNativeAvailable,
-	warnNativeUnavailableOnce,
+	RuneNativeRequiredError,
 } from "../../src/native.js";
 
 /**
@@ -275,21 +276,32 @@ describe("rune > translator integration", () => {
 	});
 });
 
-describe("rune > native fallback visibility (audit 2026-06-13)", () => {
-	it("warns at most once when the native engine is unavailable (no silent fallback)", () => {
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-		try {
-			warnNativeUnavailableOnce();
-			warnNativeUnavailableOnce();
-			// A silent fallback made validation platform-dependent; surfacing it
-			// exactly once is the contract — not zero, not per-validate spam.
-			expect(warn).toHaveBeenCalledTimes(1);
-			expect(warn).toHaveBeenCalledWith(
-				expect.stringContaining("platform-dependent"),
-			);
-		} finally {
-			warn.mockRestore();
+describe("rune > no silent fallback to the TypeScript validator", () => {
+	it("refuses to validate without the engine, rather than substituting for it", () => {
+		if (isNativeAvailable()) {
+			// The engine is here, so the guard passes — which is the whole point.
+			expect(() => assertNativeAvailable()).not.toThrow();
+			return;
 		}
+		// A one-time warning used to let the TypeScript validator take over, so
+		// the same code could reach different verdicts on two machines.
+		expect(() => assertNativeAvailable()).toThrow(RuneNativeRequiredError);
+		expect(() => assertNativeAvailable()).toThrow(/RUNE_NAPI_REQUIRED/);
+	});
+
+	it("keeps the TypeScript path for what the engine cannot run", async () => {
+		// A translator has no Rust counterpart — the engine renders default
+		// messages — so TS is the ONLY implementation there, not a second one
+		// that could disagree. It must still validate, engine or no engine.
+		const validator = schema({ name: rules.string().minLength(3) });
+		await expect(
+			validator.validate(
+				{ name: "ab" },
+				{ messagesProvider: { getMessage: () => "too short" } },
+			),
+		).rejects.toMatchObject({
+			messages: [expect.objectContaining({ message: "too short" })],
+		});
 	});
 });
 

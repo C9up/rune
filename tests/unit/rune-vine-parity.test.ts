@@ -330,7 +330,9 @@ describe("errors namespace (VineJS parity)", () => {
 			expect((err as InstanceType<typeof errors.E_VALIDATION_ERROR>).code).toBe(
 				"E_VALIDATION_ERROR",
 			);
-			expect((err as InstanceType<typeof errors.E_VALIDATION_ERROR>).status).toBe(422);
+			expect(
+				(err as InstanceType<typeof errors.E_VALIDATION_ERROR>).status,
+			).toBe(422);
 		}
 	});
 
@@ -367,8 +369,12 @@ describe("Vine option parity — uuid / distinct / in / notIn", () => {
 	it("distinct ignores null and undefined items", () => {
 		const v = schema({ tags: rules.array().distinct() });
 		// VineJS: helpers.isDistinct([1, null, 2, null, 4, 5]) === true
-		expect(v.validateResult({ tags: [1, null, 2, null, 4, 5] }).valid).toBe(true);
-		expect(v.validateResult({ tags: [1, undefined, 2, undefined] }).valid).toBe(true);
+		expect(v.validateResult({ tags: [1, null, 2, null, 4, 5] }).valid).toBe(
+			true,
+		);
+		expect(v.validateResult({ tags: [1, undefined, 2, undefined] }).valid).toBe(
+			true,
+		);
 		// Real duplicates are still caught.
 		expect(v.validateResult({ tags: [1, 2, 2] }).valid).toBe(false);
 	});
