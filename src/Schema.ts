@@ -3002,8 +3002,13 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Must be a mobile number in E.164 form. Named deviation from VineJS: rune
-	 * carries no per-locale numbering plans, so there is no `locale` option.
+	 * Must be a mobile number (VineJS/Adonis `mobile()`).
+	 *
+	 * With no `locale`, the number must be in E.164 form. With one or more,
+	 * it must match one of their numbering plans, as in VineJS. rune carries
+	 * its own plans rather than validator.js', so it knows fewer locales — an
+	 * unknown one raises `UNSUPPORTED_LOCALE` at schema build, naming the ones
+	 * it does know, rather than silently accepting anything at request time.
 	 */
 	mobile(options?: { locale?: string | string[]; strictMode?: boolean }): this {
 		const locales = options?.locale ? [options.locale].flat() : null;

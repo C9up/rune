@@ -157,9 +157,8 @@ export function isPostalCode(v: string, countryCode: string): boolean | null {
 }
 
 /**
- * Mobile numbers in E.164 form. Named deviation from VineJS: rune does NOT
- * carry per-locale numbering plans, so `locale` is not accepted — a caller that
- * needs one writes a `.regex()` or a custom rule.
+ * Mobile numbers in E.164 form — the locale-less check. Per-locale plans live
+ * in `MOBILE_LOCALES`; see {@link isMobileForLocale}.
  */
 export const isMobile = (v: string): boolean =>
 	E164_RE.test(v.replace(/[ .-]/g, ""));
