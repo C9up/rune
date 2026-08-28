@@ -20,7 +20,16 @@ const platformMap: Record<string, string> = {
 	"win32-x64": "win32-x64-msvc",
 };
 
-let native: { validate: (json: string) => string } | undefined;
+/**
+ * The engine's surface, as the Rust declares it.
+ *
+ * Derived from `./native/generated.js` — written by `pnpm build:napi-types`
+ * from napi-derive's own `type-def` output — rather than restated here, where
+ * nothing would notice a `pub fn` gaining a parameter or changing its return.
+ */
+type NativeRune = typeof import("./native/generated.js");
+
+let native: NativeRune | undefined;
 let loadError: unknown;
 
 try {
