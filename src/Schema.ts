@@ -188,6 +188,18 @@ export interface CreateRuleOptions {
 	isAsync?: boolean;
 }
 
+// `isAsync: true` genuinely produces an AsyncCompiledRule — a different
+// discriminant (`__rune: "asyncRule"`) that `.use()` routes to the awaited
+// register. Saying otherwise, as a cast did, told the compiler the opposite of
+// what runs.
+export function createRule(
+	validator: AsyncRuleValidator<undefined>,
+	options: CreateRuleOptions & { isAsync: true },
+): () => AsyncCompiledRule;
+export function createRule<Options>(
+	validator: AsyncRuleValidator<Options>,
+	options: CreateRuleOptions & { isAsync: true },
+): (options: Options) => AsyncCompiledRule;
 export function createRule(
 	validator: RuleValidator<undefined>,
 	options?: CreateRuleOptions,
@@ -197,18 +209,18 @@ export function createRule<Options>(
 	options?: CreateRuleOptions,
 ): (options: Options) => CompiledRule;
 export function createRule<Options>(
-	validator: RuleValidator<Options>,
+	validator: RuleValidator<Options> | AsyncRuleValidator<Options>,
 	ruleOptions?: CreateRuleOptions,
-): (options: Options) => CompiledRule {
+): (options: Options) => CompiledRule | AsyncCompiledRule {
 	if (ruleOptions?.isAsync) {
 		// VineJS expresses "async" as an option on createRule, so honour it by
 		// BUILDING the async rule rather than refusing: `.use()` routes an
 		// async-marked rule to the awaited register.
-		const asyncBuilder = createAsyncRule(
-			validator as unknown as AsyncRuleValidator<Options>,
-			{ ...ruleOptions, isAsync: undefined },
-		);
-		return asyncBuilder as unknown as (options: Options) => CompiledRule;
+		const asyncBuilder = createAsyncRule(validator, {
+			...ruleOptions,
+			isAsync: undefined,
+		});
+		return asyncBuilder;
 	}
 	return (options: Options): CompiledRule => ({
 		__rune: "rule",
