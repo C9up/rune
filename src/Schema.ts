@@ -2893,11 +2893,31 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Must match a regular expression (TS-only — never dispatched to Rust). */
+	/**
+	 * Must match a regular expression (TS-only — never dispatched to Rust).
+	 *
+	 * `toJSONSchema()` emits the expression's SOURCE. JSON Schema's `pattern`
+	 * has nowhere to carry flags, so `i`, `m` and `s` do not survive into the
+	 * emitted schema even though they are honoured here — a `/abc/i` validates
+	 * case-insensitively and exports as case-sensitive. Keep that in mind when
+	 * the emitted schema is handed to another validator.
+	 */
 	regex(pattern: RegExp): this {
+		// `test()` advances `lastIndex` on a global or sticky expression, so the
+		// SAME value alternates between valid and invalid across calls. Reset it
+		// before each test rather than stripping the flags: `y` anchors the
+		// match at `lastIndex`, and dropping it would let the pattern match
+		// anywhere instead.
+		const matches = (value: string): boolean => {
+			pattern.lastIndex = 0;
+			return pattern.test(value);
+		};
 		this.#pushRule({
 			name: "regex",
-			validate: (v) => typeof v === "string" && pattern.test(v),
+			// The source is carried so `toJSONSchema()` can emit the constraint;
+			// without it the emitted schema silently accepts anything.
+			args: { pattern: pattern.source },
+			validate: (v) => typeof v === "string" && matches(v),
 			message: "Invalid format",
 		});
 		return this;
@@ -3131,7 +3151,7 @@ export class RuleChain<Output = unknown> {
 	 *
 	 * Checksums are run where the country defines a short, well-defined one
 	 * (BE, DE, NL, IT, PT, LU, CH); the others are FORMAT-only, which is stated
-	 * rather than implied. An unknown country LEVES rather than accepting the
+	 * rather than implied. An unknown country RAISES rather than accepting the
 	 * value unchecked.
 	 */
 	vat(options: VatOptions | ((field: FieldContext) => VatOptions)): this {
@@ -3340,7 +3360,7 @@ export class RuleChain<Output = unknown> {
 		return this.#stringMutation("toCamelCase", toCamelCase);
 	}
 
-	/** HTML-escape `& < > " '` (VineJS `escape`). */
+	/** HTML-escape the eight characters VineJS `escape` does. */
 	escape(): this {
 		return this.#stringMutation("escape", escapeHtml);
 	}

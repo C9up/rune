@@ -167,10 +167,13 @@ export const isMobile = (v: string): boolean =>
 export function escapeHtml(v: string): string {
 	return v
 		.replace(/&/g, "&amp;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#x27;")
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&#x27;");
+		.replace(/\//g, "&#x2F;")
+		.replace(/\\/g, "&#x5C;")
+		.replace(/`/g, "&#96;");
 }
 
 /** Options accepted by `normalizeEmail` (subset of VineJS's). */
