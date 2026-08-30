@@ -1850,6 +1850,7 @@ export class RuleChain<Output = unknown> {
 	#nestedSchema: Record<string, RuleChain> | null = null;
 	#arrayItemChain: RuleChain | null = null;
 	#allowUnknown = false;
+	#denyUnknown = false;
 	#metadata: Record<string, unknown> | null = null;
 	/** Extensions / MIME types declared by `file()` / `mimeTypes()`. */
 	#declaredExtnames: readonly string[] | null = null;
@@ -1933,6 +1934,11 @@ export class RuleChain<Output = unknown> {
 	get allowsUnknown(): boolean {
 		return this.#allowUnknown;
 	}
+
+	/** Whether an undeclared key fails the payload rather than being dropped. */
+	get deniesUnknown(): boolean {
+		return this.#denyUnknown;
+	}
 	/** Free-form JSON Schema metadata attached with `meta()`. */
 	get metadata(): Record<string, unknown> | null {
 		return this.#metadata;
@@ -1980,6 +1986,7 @@ export class RuleChain<Output = unknown> {
 		next.#dateFormats = this.#dateFormats;
 		next.#coercions = [...this.#coercions];
 		next.#allowUnknown = this.#allowUnknown;
+		next.#denyUnknown = this.#denyUnknown;
 		next.#metadata = this.#metadata ? { ...this.#metadata } : null;
 		next.#declaredExtnames = this.#declaredExtnames;
 		next.#declaredMimeTypes = this.#declaredMimeTypes;
@@ -2290,6 +2297,23 @@ export class RuleChain<Output = unknown> {
 	 */
 	allowUnknownProperties(): this {
 		this.#allowUnknown = true;
+		this.#denyUnknown = false;
+		return this;
+	}
+
+	/**
+	 * Fail the payload on a key the shape does not declare, instead of dropping
+	 * it.
+	 *
+	 * A deliberate addition: upstream offers keep-or-drop and nothing else, and
+	 * dropping stays the default so a migrated schema behaves the same. This is
+	 * for an API whose contract is that it refuses what it does not understand
+	 * — where a client sending `emial` should be told, not silently ignored and
+	 * left wondering why the address never changed.
+	 */
+	denyUnknownProperties(): this {
+		this.#denyUnknown = true;
+		this.#allowUnknown = false;
 		return this;
 	}
 
@@ -3976,6 +4000,24 @@ export class RuleChain<Output = unknown> {
 						(candidate) => candidate.predicate?.(source) === true,
 					) ?? grp.branches.find((candidate) => candidate.predicate === null);
 				if (branch) shape = { ...shape, ...branch.shape };
+			}
+			if (this.#denyUnknown) {
+				const declared = new Set(Object.keys(shape));
+				const undeclared = Object.keys(source).filter(
+					(key) => !declared.has(key),
+				);
+				if (undeclared.length > 0) {
+					// Named one by one, and the shape listed: a typo is the common
+					// case, and "unknown field" without the alternatives leaves the
+					// caller to guess which spelling was expected.
+					for (const key of undeclared) {
+						errors.push({
+							field: field ? `${field}.${key}` : key,
+							rule: "unknownField",
+							message: `unknown field \`${key}\`, expected one of ${[...declared].join(", ")}`,
+						});
+					}
+				}
 			}
 			for (const [nestedField, chain] of Object.entries(shape)) {
 				const nestedResult = chain._validateWithTransform(
