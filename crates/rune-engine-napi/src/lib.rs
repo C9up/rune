@@ -13,8 +13,7 @@ pub fn validate(request_json: String) -> Result<String> {
 
         let validated = rune_engine::validate(&request);
 
-        serde_json::to_string(&validated)
-            .map_err(|e| format!("Serialization error: {}", e))
+        serde_json::to_string(&validated).map_err(|e| format!("Serialization error: {}", e))
     });
 
     match result {

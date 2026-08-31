@@ -7,4 +7,4 @@
 
 pub mod engine;
 
-pub use engine::{validate, ValidationRequest, ValidationResult, ValidationError};
+pub use engine::{validate, ValidationError, ValidationRequest, ValidationResult};

@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
 /// Email regex — compiled once.
-static EMAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap()
-});
+static EMAIL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap());
 
 /// UUID regex — case-insensitive, matches the TS `UUID_RE` exactly.
 static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -252,7 +251,11 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
     ValidationResult {
         valid,
         errors,
-        data: if valid { Some(serde_json::Value::Object(validated)) } else { None },
+        data: if valid {
+            Some(serde_json::Value::Object(validated))
+        } else {
+            None
+        },
     }
 }
 
@@ -268,18 +271,16 @@ fn validate_rule(
                 return Some(err(field, "string", "Must be a string"));
             }
         }
-        "number" => {
-            match value {
-                serde_json::Value::Number(n) => {
-                    if let Some(f) = n.as_f64() {
-                        if f.is_nan() || f.is_infinite() {
-                            return Some(err(field, "number", "Must be a number"));
-                        }
+        "number" => match value {
+            serde_json::Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    if f.is_nan() || f.is_infinite() {
+                        return Some(err(field, "number", "Must be a number"));
                     }
                 }
-                _ => return Some(err(field, "number", "Must be a number")),
             }
-        }
+            _ => return Some(err(field, "number", "Must be a number")),
+        },
         "boolean" => {
             if !value.is_boolean() {
                 return Some(err(field, "boolean", "Must be a boolean"));
@@ -359,7 +360,13 @@ fn validate_rule(
         "minLength" => {
             let min = match params.get("min").and_then(|v| v.as_f64()) {
                 Some(v) => v,
-                None => return Some(err(field, "minLength", "Invalid minLength rule: missing parameter")),
+                None => {
+                    return Some(err(
+                        field,
+                        "minLength",
+                        "Invalid minLength rule: missing parameter",
+                    ))
+                }
             };
             if (sized_length(value) as f64) < min {
                 return Some(err(field, "minLength", "Too short"));
@@ -368,7 +375,13 @@ fn validate_rule(
         "maxLength" => {
             let max = match params.get("max").and_then(|v| v.as_f64()) {
                 Some(v) => v,
-                None => return Some(err(field, "maxLength", "Invalid maxLength rule: missing parameter")),
+                None => {
+                    return Some(err(
+                        field,
+                        "maxLength",
+                        "Invalid maxLength rule: missing parameter",
+                    ))
+                }
             };
             let len = sized_length(value);
             if !(len >= 0 && (len as f64) <= max) {
@@ -378,7 +391,13 @@ fn validate_rule(
         "fixedLength" => {
             let size = match params.get("size").and_then(|v| v.as_f64()) {
                 Some(v) => v,
-                None => return Some(err(field, "fixedLength", "Invalid fixedLength rule: missing parameter")),
+                None => {
+                    return Some(err(
+                        field,
+                        "fixedLength",
+                        "Invalid fixedLength rule: missing parameter",
+                    ))
+                }
             };
             if (sized_length(value) as f64) != size {
                 return Some(err(field, "fixedLength", "Wrong length"));
@@ -394,7 +413,13 @@ fn validate_rule(
         },
         "alphaNumeric" => match value.as_str() {
             Some(s) if !s.is_empty() && alpha_matches(s, params, true) => {}
-            _ => return Some(err(field, "alphaNumeric", "Must contain only letters and numbers")),
+            _ => {
+                return Some(err(
+                    field,
+                    "alphaNumeric",
+                    "Must contain only letters and numbers",
+                ))
+            }
         },
         "startsWith" => {
             let substring = params.get("substring").and_then(|v| v.as_str());
@@ -466,33 +491,57 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn make_request(schema: HashMap<String, FieldSchema>, data: serde_json::Value) -> ValidationRequest {
+    fn make_request(
+        schema: HashMap<String, FieldSchema>,
+        data: serde_json::Value,
+    ) -> ValidationRequest {
         ValidationRequest { schema, data }
     }
 
     #[test]
     fn test_valid_data() {
         let mut schema = HashMap::new();
-        schema.insert("name".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![
-                RuleDefinition { name: "string".to_string(), params: serde_json::json!(null) },
-                RuleDefinition { name: "min".to_string(), params: serde_json::json!({"min": 3}) },
-            ],
-            optional: false,
-            transforms: vec![],
-        });
-        schema.insert("email".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![
-                RuleDefinition { name: "string".to_string(), params: serde_json::json!(null) },
-                RuleDefinition { name: "email".to_string(), params: serde_json::json!(null) },
-            ],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "name".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![
+                    RuleDefinition {
+                        name: "string".to_string(),
+                        params: serde_json::json!(null),
+                    },
+                    RuleDefinition {
+                        name: "min".to_string(),
+                        params: serde_json::json!({"min": 3}),
+                    },
+                ],
+                optional: false,
+                transforms: vec![],
+            },
+        );
+        schema.insert(
+            "email".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![
+                    RuleDefinition {
+                        name: "string".to_string(),
+                        params: serde_json::json!(null),
+                    },
+                    RuleDefinition {
+                        name: "email".to_string(),
+                        params: serde_json::json!(null),
+                    },
+                ],
+                optional: false,
+                transforms: vec![],
+            },
+        );
 
-        let req = make_request(schema, serde_json::json!({"name": "Kaen", "email": "kaen@c9up.com"}));
+        let req = make_request(
+            schema,
+            serde_json::json!({"name": "Kaen", "email": "kaen@c9up.com"}),
+        );
         let result = validate(&req);
         assert!(result.valid);
         assert!(result.data.is_some());
@@ -501,15 +550,24 @@ mod tests {
     #[test]
     fn test_invalid_data() {
         let mut schema = HashMap::new();
-        schema.insert("name".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![
-                RuleDefinition { name: "string".to_string(), params: serde_json::json!(null) },
-                RuleDefinition { name: "min".to_string(), params: serde_json::json!({"min": 3}) },
-            ],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "name".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![
+                    RuleDefinition {
+                        name: "string".to_string(),
+                        params: serde_json::json!(null),
+                    },
+                    RuleDefinition {
+                        name: "min".to_string(),
+                        params: serde_json::json!({"min": 3}),
+                    },
+                ],
+                optional: false,
+                transforms: vec![],
+            },
+        );
 
         let req = make_request(schema, serde_json::json!({"name": "Ka"}));
         let result = validate(&req);
@@ -521,12 +579,18 @@ mod tests {
     #[test]
     fn test_required_field() {
         let mut schema = HashMap::new();
-        schema.insert("name".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![RuleDefinition { name: "string".to_string(), params: serde_json::json!(null) }],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "name".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![RuleDefinition {
+                    name: "string".to_string(),
+                    params: serde_json::json!(null),
+                }],
+                optional: false,
+                transforms: vec![],
+            },
+        );
 
         let req = make_request(schema, serde_json::json!({}));
         let result = validate(&req);
@@ -537,12 +601,18 @@ mod tests {
     #[test]
     fn test_optional_field() {
         let mut schema = HashMap::new();
-        schema.insert("bio".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![RuleDefinition { name: "string".to_string(), params: serde_json::json!(null) }],
-            optional: true,
-            transforms: vec![],
-        });
+        schema.insert(
+            "bio".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![RuleDefinition {
+                    name: "string".to_string(),
+                    params: serde_json::json!(null),
+                }],
+                optional: true,
+                transforms: vec![],
+            },
+        );
 
         let req = make_request(schema, serde_json::json!({}));
         let result = validate(&req);
@@ -552,15 +622,24 @@ mod tests {
     #[test]
     fn test_trim_transform() {
         let mut schema = HashMap::new();
-        schema.insert("name".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![
-                RuleDefinition { name: "string".to_string(), params: serde_json::json!(null) },
-                RuleDefinition { name: "min".to_string(), params: serde_json::json!({"min": 3}) },
-            ],
-            optional: false,
-            transforms: vec!["trim".to_string()],
-        });
+        schema.insert(
+            "name".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![
+                    RuleDefinition {
+                        name: "string".to_string(),
+                        params: serde_json::json!(null),
+                    },
+                    RuleDefinition {
+                        name: "min".to_string(),
+                        params: serde_json::json!({"min": 3}),
+                    },
+                ],
+                optional: false,
+                transforms: vec!["trim".to_string()],
+            },
+        );
 
         let req = make_request(schema, serde_json::json!({"name": "  Kaen  "}));
         let result = validate(&req);
@@ -571,12 +650,18 @@ mod tests {
     #[test]
     fn test_email_rejects_newline() {
         let mut schema = HashMap::new();
-        schema.insert("email".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![RuleDefinition { name: "email".to_string(), params: serde_json::json!(null) }],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "email".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![RuleDefinition {
+                    name: "email".to_string(),
+                    params: serde_json::json!(null),
+                }],
+                optional: false,
+                transforms: vec![],
+            },
+        );
 
         let req = make_request(schema, serde_json::json!({"email": "test@test.com\n"}));
         let result = validate(&req);
@@ -586,15 +671,24 @@ mod tests {
     #[test]
     fn test_positive_rejects_infinity() {
         let mut schema = HashMap::new();
-        schema.insert("amount".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![
-                RuleDefinition { name: "number".to_string(), params: serde_json::json!(null) },
-                RuleDefinition { name: "positive".to_string(), params: serde_json::json!(null) },
-            ],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "amount".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![
+                    RuleDefinition {
+                        name: "number".to_string(),
+                        params: serde_json::json!(null),
+                    },
+                    RuleDefinition {
+                        name: "positive".to_string(),
+                        params: serde_json::json!(null),
+                    },
+                ],
+                optional: false,
+                transforms: vec![],
+            },
+        );
 
         // JSON doesn't have Infinity so this tests a normal negative
         let req = make_request(schema, serde_json::json!({"amount": -5}));
@@ -614,12 +708,18 @@ mod tests {
     #[test]
     fn test_number_type_check() {
         let mut schema = HashMap::new();
-        schema.insert("age".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![RuleDefinition { name: "number".to_string(), params: serde_json::json!(null) }],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "age".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![RuleDefinition {
+                    name: "number".to_string(),
+                    params: serde_json::json!(null),
+                }],
+                optional: false,
+                transforms: vec![],
+            },
+        );
 
         let req = make_request(schema, serde_json::json!({"age": "not a number"}));
         let result = validate(&req);
@@ -632,12 +732,18 @@ mod tests {
         // `min` without a preceding type rule must REJECT an array/object/bool
         // (previously it fell through to PASS — fail-open).
         let mut schema = HashMap::new();
-        schema.insert("q".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![RuleDefinition { name: "min".to_string(), params: serde_json::json!({"min": 3}) }],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "q".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![RuleDefinition {
+                    name: "min".to_string(),
+                    params: serde_json::json!({"min": 3}),
+                }],
+                optional: false,
+                transforms: vec![],
+            },
+        );
         let req = make_request(schema, serde_json::json!({"q": [1, 2, 3, 4, 5]}));
         let result = validate(&req);
         assert!(!result.valid, "min on an array must fail closed");
@@ -650,15 +756,24 @@ mod tests {
         // would wrongly reject it. Code-point counting (matching the TS
         // fallback's [...str].length) accepts it.
         let mut schema = HashMap::new();
-        schema.insert("s".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![
-                RuleDefinition { name: "string".to_string(), params: serde_json::json!(null) },
-                RuleDefinition { name: "max".to_string(), params: serde_json::json!({"max": 1}) },
-            ],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "s".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![
+                    RuleDefinition {
+                        name: "string".to_string(),
+                        params: serde_json::json!(null),
+                    },
+                    RuleDefinition {
+                        name: "max".to_string(),
+                        params: serde_json::json!({"max": 1}),
+                    },
+                ],
+                optional: false,
+                transforms: vec![],
+            },
+        );
         let req = make_request(schema, serde_json::json!({"s": "é"}));
         assert!(validate(&req).valid, "one code point must satisfy max=1");
     }
@@ -666,19 +781,40 @@ mod tests {
     #[test]
     fn test_boolean_type_check() {
         let mut schema = HashMap::new();
-        schema.insert("active".to_string(), FieldSchema {
-            bail: false,
-            rules: vec![RuleDefinition { name: "boolean".to_string(), params: serde_json::json!(null) }],
-            optional: false,
-            transforms: vec![],
-        });
+        schema.insert(
+            "active".to_string(),
+            FieldSchema {
+                bail: false,
+                rules: vec![RuleDefinition {
+                    name: "boolean".to_string(),
+                    params: serde_json::json!(null),
+                }],
+                optional: false,
+                transforms: vec![],
+            },
+        );
 
         let req = make_request(schema, serde_json::json!({"active": "yes"}));
         let result = validate(&req);
         assert!(!result.valid);
 
         let req2 = make_request(
-            { let mut s = HashMap::new(); s.insert("active".to_string(), FieldSchema { bail: false, rules: vec![RuleDefinition { name: "boolean".to_string(), params: serde_json::json!(null) }], optional: false, transforms: vec![] }); s },
+            {
+                let mut s = HashMap::new();
+                s.insert(
+                    "active".to_string(),
+                    FieldSchema {
+                        bail: false,
+                        rules: vec![RuleDefinition {
+                            name: "boolean".to_string(),
+                            params: serde_json::json!(null),
+                        }],
+                        optional: false,
+                        transforms: vec![],
+                    },
+                );
+                s
+            },
             serde_json::json!({"active": true}),
         );
         assert!(validate(&req2).valid);
@@ -690,20 +826,40 @@ mod tests {
         // path, otherwise the same schema reports differently depending on
         // whether the native binary happened to be loadable.
         let mut schema = HashMap::new();
-        schema.insert("code".to_string(), FieldSchema {
-            bail: true,
-            rules: vec![
-                RuleDefinition { name: "string".to_string(), params: serde_json::Value::Null },
-                RuleDefinition { name: "minLength".to_string(), params: serde_json::json!({ "min": 5 }) },
-                RuleDefinition { name: "alphaNumeric".to_string(), params: serde_json::Value::Null },
-            ],
-            optional: false,
-            transforms: vec![],
-        });
-        let req = ValidationRequest { schema, data: serde_json::json!({ "code": "a!" }) };
+        schema.insert(
+            "code".to_string(),
+            FieldSchema {
+                bail: true,
+                rules: vec![
+                    RuleDefinition {
+                        name: "string".to_string(),
+                        params: serde_json::Value::Null,
+                    },
+                    RuleDefinition {
+                        name: "minLength".to_string(),
+                        params: serde_json::json!({ "min": 5 }),
+                    },
+                    RuleDefinition {
+                        name: "alphaNumeric".to_string(),
+                        params: serde_json::Value::Null,
+                    },
+                ],
+                optional: false,
+                transforms: vec![],
+            },
+        );
+        let req = ValidationRequest {
+            schema,
+            data: serde_json::json!({ "code": "a!" }),
+        };
         let out = validate(&req);
         assert!(!out.valid);
-        assert_eq!(out.errors.len(), 1, "bail must report a single rule, got {:?}", out.errors);
+        assert_eq!(
+            out.errors.len(),
+            1,
+            "bail must report a single rule, got {:?}",
+            out.errors
+        );
         assert_eq!(out.errors[0].rule, "minLength");
     }
 
