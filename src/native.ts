@@ -51,13 +51,13 @@ export function validateNative(requestJson: string): {
 } {
 	if (!native) {
 		throw new Error(
-			`[RUNE_NAPI_NOT_FOUND] Rust validation engine not available: ${loadError ?? "binary not found"}`,
+			`[E_RUNE_NAPI_NOT_FOUND] Rust validation engine not available: ${loadError ?? "binary not found"}`,
 		);
 	}
 	const result = JSON.parse(native.validate(requestJson));
 	if (typeof result.valid !== "boolean" || !Array.isArray(result.errors)) {
 		throw new Error(
-			`[RUNE_NAPI_INVALID_RESPONSE] Rust engine returned unexpected shape: ${JSON.stringify(result)}`,
+			`[E_RUNE_NAPI_INVALID_RESPONSE] Rust engine returned unexpected shape: ${JSON.stringify(result)}`,
 		);
 	}
 	return result;
@@ -80,10 +80,10 @@ function unavailableReason(): string {
 
 /** Raised when a schema needs the Rust engine and it is not there. */
 export class RuneNativeRequiredError extends Error {
-	readonly code = "RUNE_NAPI_REQUIRED" as const;
+	readonly code = "E_RUNE_NAPI_REQUIRED" as const;
 	constructor() {
 		super(
-			`[RUNE_NAPI_REQUIRED] The Rust validation engine is required but not loaded — ${unavailableReason()}.\n` +
+			`[E_RUNE_NAPI_REQUIRED] The Rust validation engine is required but not loaded — ${unavailableReason()}.\n` +
 				"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
 		);
 		this.name = "RuneNativeRequiredError";

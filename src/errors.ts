@@ -8,7 +8,13 @@ export class RuneError extends Error {
 	constructor(code: string, message: string, options?: { hint?: string }) {
 		super(message);
 		this.name = "RuneError";
-		this.code = `RUNE_${code}`;
+		// One namespace, one prefix. `E_` is what every framework code carries,
+		// and the package name after it says which package raised it — without
+		// it, `E_FORBIDDEN` would mean three different things across the
+		// ecosystem and an application could not tell them apart. A code that
+		// already starts with `E_` is passed through untouched: that is how the
+		// AdonisJS identifiers keep the exact spelling a consumer branches on.
+		this.code = code.startsWith("E_") ? code : `E_RUNE_${code}`;
 		this.hint = options?.hint;
 	}
 }

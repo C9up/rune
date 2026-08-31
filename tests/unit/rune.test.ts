@@ -286,7 +286,7 @@ describe("rune > no silent fallback to the TypeScript validator", () => {
 		// A one-time warning used to let the TypeScript validator take over, so
 		// the same code could reach different verdicts on two machines.
 		expect(() => assertNativeAvailable()).toThrow(RuneNativeRequiredError);
-		expect(() => assertNativeAvailable()).toThrow(/RUNE_NAPI_REQUIRED/);
+		expect(() => assertNativeAvailable()).toThrow(/E_RUNE_NAPI_REQUIRED/);
 	});
 
 	it("keeps the TypeScript path for what the engine cannot run", async () => {
