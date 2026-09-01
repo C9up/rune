@@ -13,10 +13,6 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
 });
 
-/// ASCII letters only — mirrors the TS `^[a-zA-Z]+$`.
-
-/// ASCII letters and digits — mirrors the TS `^[a-zA-Z0-9]+$`.
-
 /// Code-point length for a string, element count for an array, else `-1`.
 /// Mirrors the TS `sizedLength` helper (`[...v].length` counts code points).
 fn sized_length(value: &serde_json::Value) -> i64 {
