@@ -128,14 +128,17 @@ for (const struct of structs) {
 for (const fn of fns) {
   out.push(docBlock(fn.js_doc))
   // napi-derive emits the whole declaration for a function, unlike a struct
-  // where `def` holds only the members.
+  // where `def` holds only the members — and it has emitted it three ways:
+  // fully qualified, bare `function name(...)` (napi-derive 3), and just the
+  // signature after the name (napi-derive 2). Concatenating the name onto the
+  // napi 3 shape produced `function validatefunction validate(...)`.
   const declaration = fn.def.trim()
-  out.push(
-    declaration.startsWith('export declare function')
-      ? `${declaration};`
-      : `export declare function ${fn.name}${declaration};`,
-    '',
-  )
+  const rendered = declaration.startsWith('export declare function')
+    ? declaration
+    : declaration.startsWith('function ')
+      ? `export declare ${declaration}`
+      : `export declare function ${fn.name}${declaration}`
+  out.push(`${rendered};`, '')
 }
 
 const stale = Object.keys(CALLBACK_REFINEMENTS).filter((k) => !used.has(k))

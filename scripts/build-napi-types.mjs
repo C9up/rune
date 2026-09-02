@@ -7,9 +7,12 @@
  * cargo a `/tmp/...` path the native proc-macro cannot write to, so the
  * type-def file comes back empty and the build fails for no visible reason.
  *
- * One crate at a time on purpose: napi-derive APPENDS to `TYPE_DEF_TMP_PATH`
- * while cargo compiles, and a parallel build interleaves the writes —
- * definitions go missing, silently, and the generated file comes out short.
+ * One crate at a time on purpose: with napi-derive 2 the writes all went to a
+ * single `TYPE_DEF_TMP_PATH` and a parallel build interleaved them —
+ * definitions went missing, silently, and the generated file came out short.
+ * napi-derive 3 writes one file per crate into `NAPI_TYPE_DEF_TMP_FOLDER`
+ * instead, so the collision is gone; the loop stays because it also gives a
+ * per-crate error when a crate emits nothing.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -28,11 +31,14 @@ const scratch = mkdtempSync(join(tmpdir(), 'napi-types-'))
 try {
   const lines = []
   for (const crate of CRATES) {
-    const perCrate = join(scratch, `${crate}.jsonl`)
+    // napi-derive 3 names the file after CARGO_PKG_NAME inside the folder, and
+    // panics outright if it sees the old `TYPE_DEF_TMP_PATH` — that variable is
+    // how it detects an out-of-date toolchain.
+    const perCrate = join(scratch, crate)
     writeFileSync(perCrate, '')
     execFileSync('cargo', ['build', '-p', crate], {
       cwd: packageRoot,
-      env: { ...process.env, TYPE_DEF_TMP_PATH: perCrate },
+      env: { ...process.env, NAPI_TYPE_DEF_TMP_FOLDER: scratch },
       stdio: ['ignore', 'ignore', 'inherit'],
     })
     const emitted = readFileSync(perCrate, 'utf8').split('\n').filter(Boolean)
