@@ -365,7 +365,11 @@ fn validate_rule(
                 }
             };
             if (sized_length(value) as f64) < min {
-                return Some(err(field, "minLength", "Too short"));
+                return Some(err(
+                    field,
+                    "minLength",
+                    &format!("Must have at least {} characters", min),
+                ));
             }
         }
         "maxLength" => {
@@ -381,7 +385,11 @@ fn validate_rule(
             };
             let len = sized_length(value);
             if !(len >= 0 && (len as f64) <= max) {
-                return Some(err(field, "maxLength", "Too long"));
+                return Some(err(
+                    field,
+                    "maxLength",
+                    &format!("Must not exceed {} characters", max),
+                ));
             }
         }
         "fixedLength" => {
@@ -396,7 +404,11 @@ fn validate_rule(
                 }
             };
             if (sized_length(value) as f64) != size {
-                return Some(err(field, "fixedLength", "Wrong length"));
+                return Some(err(
+                    field,
+                    "fixedLength",
+                    &format!("Must be exactly {} characters", size),
+                ));
             }
         }
         "uuid" => match value.as_str() {
@@ -421,14 +433,26 @@ fn validate_rule(
             let substring = params.get("substring").and_then(|v| v.as_str());
             match (value.as_str(), substring) {
                 (Some(s), Some(sub)) if s.starts_with(sub) => {}
-                _ => return Some(err(field, "startsWith", "Invalid prefix")),
+                _ => {
+                    return Some(err(
+                        field,
+                        "startsWith",
+                        &format!("Must start with {}", substring.unwrap_or_default()),
+                    ))
+                }
             }
         }
         "endsWith" => {
             let substring = params.get("substring").and_then(|v| v.as_str());
             match (value.as_str(), substring) {
                 (Some(s), Some(sub)) if s.ends_with(sub) => {}
-                _ => return Some(err(field, "endsWith", "Invalid suffix")),
+                _ => {
+                    return Some(err(
+                        field,
+                        "endsWith",
+                        &format!("Must end with {}", substring.unwrap_or_default()),
+                    ))
+                }
             }
         }
         "in" | "enum" => {
@@ -464,7 +488,13 @@ fn validate_rule(
             };
             match value.as_f64() {
                 Some(n) if n.is_finite() && n >= min && n <= max => {}
-                _ => return Some(err(field, "range", "Out of range")),
+                _ => {
+                    return Some(err(
+                        field,
+                        "range",
+                        &format!("Must be between {} and {}", min, max),
+                    ))
+                }
             }
         }
         _ => {
