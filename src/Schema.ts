@@ -552,6 +552,37 @@ export function setGlobalErrorReporter(
 	globalErrorReporter = reporter;
 }
 
+/**
+ * Copy an object's own keys, minus `__proto__`.
+ *
+ * Only the paths that keep keys the schema never declared need this —
+ * `allowUnknownProperties()` and `record()`, whose keys are data. `JSON.parse`
+ * is happy to produce a real own `__proto__` key, and while spreading it here
+ * leaves rune's own object alone, it hands the consumer a payload that poisons
+ * whatever it is assigned to: `Object.assign(model, validated)` writes through
+ * the inherited setter and replaces the target's prototype. Dropping undeclared
+ * keys is what makes a validated payload safe to hand to a mass assignment, so
+ * this is that same rule applied to the one key name that is never data.
+ *
+ * NAMED DEVIATION (hardening): VineJS keeps it — its compiler emits a
+ * `for…in` copy that assigns straight into the output, which replaces that
+ * output's prototype outright. Parity here would mean shipping the bug.
+ *
+ * `constructor` and `prototype` are left alone deliberately: they are only
+ * reachable through a recursive third-party merge, and unlike `__proto__` they
+ * are plausible dictionary keys that a `record()` has every right to carry.
+ */
+function copyWithoutProtoKey(
+	source: Record<string, unknown>,
+): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const key of Object.keys(source)) {
+		if (key === "__proto__") continue;
+		out[key] = source[key];
+	}
+	return out;
+}
+
 /** Read the process-wide error reporter. */
 export function getGlobalErrorReporter():
 	| ErrorReporterFactory
@@ -4008,7 +4039,7 @@ export class RuleChain<Output = unknown> {
 			// is the opt-in, as in VineJS.
 			const source: Record<string, unknown> = transformed;
 			const obj: Record<string, unknown> = this.#allowUnknown
-				? { ...source }
+				? copyWithoutProtoKey(source)
 				: {};
 			transformed = obj;
 			// A conditional group contributes its branch's properties for THIS
@@ -4072,7 +4103,7 @@ export class RuleChain<Output = unknown> {
 			);
 		}
 		if (this.#recordValueChain && isPlainObject(transformed)) {
-			const obj: Record<string, unknown> = { ...transformed };
+			const obj: Record<string, unknown> = copyWithoutProtoKey(transformed);
 			transformed = obj;
 			for (const key of Object.keys(obj)) {
 				const res = this.#recordValueChain._validateWithTransform(
