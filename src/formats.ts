@@ -30,8 +30,9 @@ function isIpV6(v: string): boolean {
 	if (halves.length > 2) return false;
 	const expand = (part: string): string[] =>
 		part === "" ? [] : part.split(":");
-	const head = expand(halves[0]);
-	const tail = halves.length === 2 ? expand(halves[1]) : [];
+	const [headPart = "", tailPart] = halves;
+	const head = expand(headPart);
+	const tail = tailPart === undefined ? [] : expand(tailPart);
 	const groups = [...head, ...tail];
 	// A trailing IPv4 literal occupies two groups.
 	const last = groups.at(-1);
@@ -87,8 +88,10 @@ export function isIban(v: string): boolean {
 export function isCoordinates(v: string): boolean {
 	const parts = v.split(",");
 	if (parts.length !== 2) return false;
-	const lat = Number(parts[0].trim());
-	const lng = Number(parts[1].trim());
+	const [latRaw, lngRaw] = parts;
+	if (latRaw === undefined || lngRaw === undefined) return false;
+	const lat = Number(latRaw.trim());
+	const lng = Number(lngRaw.trim());
 	if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
 	return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
 }
@@ -210,10 +213,10 @@ export function normalizeEmail(
 	const removeDots = options.gmail_remove_dots ?? options.gmailRemoveDots;
 	if (allLowercase !== false) local = local.toLowerCase();
 	if (GMAIL_DOMAINS.has(domain)) {
-		if (removeSubaddress) local = local.split("+")[0];
+		if (removeSubaddress) local = local.split("+")[0] ?? local;
 		if (removeDots) local = local.replace(/\./g, "");
 	} else if (removeSubaddress) {
-		local = local.split("+")[0];
+		local = local.split("+")[0] ?? local;
 	}
 	return `${local}@${domain}`;
 }
@@ -615,7 +618,7 @@ export function isEmail(value: string, options: EmailOptions = {}): boolean {
 	if (options.require_tld !== false) {
 		if (labels.length < 2) return false;
 		// A TLD is alphabetic and at least two characters.
-		const tld = labels[labels.length - 1];
+		const tld = labels.at(-1) ?? "";
 		if (tld.length < 2 || !/^[a-zA-Z]+$/.test(tld)) return false;
 	}
 	if (!labels.every(isDnsLabel)) return false;
@@ -626,7 +629,7 @@ export function isEmail(value: string, options: EmailOptions = {}): boolean {
 	) {
 		// Gmail: 6..30 chars, letters/digits/dots only, no leading/trailing dot,
 		// no doubled dot — and dots are ignored for the length check.
-		const username = local.split("+")[0];
+		const username = local.split("+")[0] ?? local;
 		if (!/^[a-zA-Z0-9.]+$/.test(username)) return false;
 		if (username.startsWith(".") || username.endsWith(".")) return false;
 		if (username.includes("..")) return false;
@@ -755,8 +758,8 @@ function luhnLike(digits: string): boolean {
 function swissUidChecksum(digits: string): boolean {
 	const weights = [5, 4, 3, 2, 7, 6, 5, 4];
 	let sum = 0;
-	for (let i = 0; i < 8; i++) {
-		sum += (digits.charCodeAt(i) - 48) * weights[i];
+	for (const [i, weight] of weights.entries()) {
+		sum += (digits.charCodeAt(i) - 48) * weight;
 	}
 	const remainder = sum % 11;
 	if (remainder === 10) return false;

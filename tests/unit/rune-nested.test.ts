@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { rules, schema } from "../../src/index.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 describe("rune > nested object schemas", () => {
 	it("validates a nested object shape and surfaces field-paths in errors", () => {
 		const s = schema({
@@ -26,8 +33,8 @@ describe("rune > nested object schemas", () => {
 		expect(result.valid).toBe(false);
 		// The 'object' type rule short-circuits — no .name traversal.
 		expect(result.errors).toHaveLength(1);
-		expect(result.errors[0].field).toBe("user");
-		expect(result.errors[0].rule).toBe("object");
+		expect(defined(result.errors[0]).field).toBe("user");
+		expect(defined(result.errors[0]).rule).toBe("object");
 	});
 
 	it("returns transformed nested values (e.g., trimmed) in result.data", () => {
@@ -52,7 +59,7 @@ describe("rune > array item validation", () => {
 
 		const bad = s.validateResult({ tags: ["hi", "x", "ok"] });
 		expect(bad.valid).toBe(false);
-		expect(bad.errors[0].field).toBe("tags.1");
+		expect(defined(bad.errors[0]).field).toBe("tags.1");
 	});
 
 	it("accepts arrays without an item-chain (just a type check)", () => {
@@ -93,6 +100,6 @@ describe("rune > rules.any() and chain edge cases", () => {
 		// needed for runtime-shape testing.
 		const result = s.validateResult([1, 2, 3]);
 		expect(result.valid).toBe(false);
-		expect(result.errors[0].field).toBe("_root");
+		expect(defined(result.errors[0]).field).toBe("_root");
 	});
 });

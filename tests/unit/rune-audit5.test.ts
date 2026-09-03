@@ -9,6 +9,13 @@ import rune, {
 	setValidationTranslator,
 } from "../../src/index.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 describe("rune > audit 5", () => {
 	it("nested objects DROP undeclared keys unless allowUnknownProperties()", () => {
 		// The mass-assignment guarantee held at the top level but not one level
@@ -169,7 +176,7 @@ describe("rune > audit 6", () => {
 	it("getProperties() hands back clones, not the live chains", () => {
 		const base = rules.any().object({ id: rules.number() });
 		const props = base.getProperties();
-		props?.id.optional();
+		defined(props?.id).optional();
 		// Mutating the copy must not relax the source.
 		expect(schema({ u: base }).validateResult({ u: {} }).valid).toBe(false);
 	});

@@ -149,7 +149,7 @@ export function parseWithFormat(value: string, format: string): Date | null {
 			pattern += token[1];
 			i += token[0].length;
 		} else {
-			pattern += format[i].replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			pattern += (format[i] ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 			i += 1;
 		}
 	}
@@ -162,6 +162,9 @@ export function parseWithFormat(value: string, format: string): Date | null {
 	let offset: string | undefined;
 	order.forEach((t, idx) => {
 		const raw = m[idx + 1];
+		// Every token in `order` contributed a capture group to the pattern that
+		// just matched, so each one has a value.
+		if (raw === undefined) return;
 		if (t === "A" || t === "a") {
 			meridiem = raw.toLowerCase() as "am" | "pm";
 			return;

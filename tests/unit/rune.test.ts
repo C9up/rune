@@ -12,6 +12,13 @@ import {
 	RuneNativeRequiredError,
 } from "../../src/native.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 /**
  * Minimal stand-in for a translator (e.g. `@c9up/rosetta`). `bindRosetta`
  * accepts any object exposing `t(key, params)`, so rune stays agnostic and is
@@ -86,7 +93,7 @@ describe("rune > schema validation", () => {
 		const s = schema({ name: rules.string() });
 		const result = s.validateResult({});
 		expect(result.valid).toBe(false);
-		expect(result.errors[0].rule).toBe("required");
+		expect(defined(result.errors[0]).rule).toBe("required");
 	});
 
 	it("optional fields skip validation when absent", () => {
@@ -163,7 +170,7 @@ describe("rune > rule types", () => {
 				.message("Please enter a valid email address"),
 		});
 		const result = s.validateResult({ email: "bad" });
-		expect(result.errors[0].message).toBe("Please enter a valid email address");
+		expect(defined(result.errors[0]).message).toBe("Please enter a valid email address");
 	});
 
 	it("preserves custom message on min/max", () => {
@@ -178,11 +185,11 @@ describe("rune > rule types", () => {
 
 		const tooShort = s.validateResult({ name: "abc" });
 		expect(tooShort.valid).toBe(false);
-		expect(tooShort.errors[0].message).toBe("Name too short");
+		expect(defined(tooShort.errors[0]).message).toBe("Name too short");
 
 		const tooLong = s.validateResult({ name: "abcdefghijkl" });
 		expect(tooLong.valid).toBe(false);
-		expect(tooLong.errors[0].message).toBe("Name too long");
+		expect(defined(tooLong.errors[0]).message).toBe("Name too long");
 	});
 });
 
@@ -216,7 +223,7 @@ describe("rune > security & edge cases", () => {
 		const s = schema({ name: rules.string() });
 		const result = s.validateResult(null as unknown as Record<string, unknown>);
 		expect(result.valid).toBe(false);
-		expect(result.errors[0].field).toBe("_root");
+		expect(defined(result.errors[0]).field).toBe("_root");
 	});
 
 	it("handles undefined input to schema.validate", () => {
@@ -240,7 +247,7 @@ describe("rune > security & edge cases", () => {
 				.custom("slug", (v) => typeof v === "string" && /^[a-z-]+$/.test(v)),
 		});
 		const result = s.validateResult({ x: "NOT_A_SLUG" });
-		expect(result.errors[0].message).toBe("Failed custom rule: slug");
+		expect(defined(result.errors[0]).message).toBe("Failed custom rule: slug");
 	});
 });
 
@@ -255,10 +262,10 @@ describe("rune > translator integration", () => {
 
 		const s = schema({ email: rules.string().email() });
 		const result = s.validateResult({});
-		expect(result.errors[0].message).toBe("email est requis");
+		expect(defined(result.errors[0]).message).toBe("email est requis");
 
 		const invalid = s.validateResult({ email: "bad" });
-		expect(invalid.errors[0].message).toBe("Email invalide");
+		expect(defined(invalid.errors[0]).message).toBe("Email invalide");
 	});
 
 	it("keeps explicit custom messages over translations", () => {
@@ -272,7 +279,7 @@ describe("rune > translator integration", () => {
 		});
 
 		const result = s.validateResult({ name: "abc" });
-		expect(result.errors[0].message).toBe("Custom min message");
+		expect(defined(result.errors[0]).message).toBe("Custom min message");
 	});
 });
 

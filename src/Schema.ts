@@ -798,7 +798,15 @@ export function parseByteSize(size: number | string): number {
 			hint: 'Use a byte count, or "2mb" / "512kb" / "1gb".',
 		});
 	}
-	return Math.round(Number(match[1]) * BYTE_UNITS[match[2].toLowerCase()]);
+	const [, amount, unit] = match;
+	const multiplier =
+		unit === undefined ? undefined : BYTE_UNITS[unit.toLowerCase()];
+	if (amount === undefined || multiplier === undefined) {
+		throw new RuneError("INVALID_SIZE", `file(): cannot read size '${size}'.`, {
+			hint: 'Use a byte count, or "2mb" / "512kb" / "1gb".',
+		});
+	}
+	return Math.round(Number(amount) * multiplier);
 }
 
 /**

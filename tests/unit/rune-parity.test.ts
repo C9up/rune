@@ -7,6 +7,13 @@ import {
 	schema,
 } from "../../src/index.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 /**
  * Failure-path coverage for the VineJS-parity surface added to rune. Every rule
  * is asserted to REJECT invalid input (not just accept valid) — the missing
@@ -170,7 +177,7 @@ describe("rune parity > validateOrThrow (E_VALIDATION_ERROR)", () => {
 				expect(err.code).toBe("E_VALIDATION_ERROR");
 				expect(err.status).toBe(422);
 				expect(err.messages.length).toBeGreaterThan(0);
-				expect(err.messages[0].rule).toBe("email");
+				expect(defined(err.messages[0]).rule).toBe("email");
 			}
 		}
 	});
@@ -192,7 +199,7 @@ describe("rune parity > SimpleMessagesProvider custom messages", () => {
 			{ messagesProvider: provider },
 		);
 		expect(r.valid).toBe(false);
-		expect(r.errors[0].message).toContain("too short");
+		expect(defined(r.errors[0]).message).toContain("too short");
 	});
 });
 

@@ -16,6 +16,13 @@ import rune, {
 	schema,
 } from "../../src/index.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 afterEach(() => {
 	rune.convertEmptyStringsToNull = false;
 	rune.errorReporter = null;
@@ -37,7 +44,7 @@ describe("rune > tryValidate — the tuple form", () => {
 
 		expect(data).toBeNull();
 		expect(error).toBeInstanceOf(RuneValidationError);
-		expect(error?.messages[0].field).toBe("email");
+		expect(defined(error?.messages[0]).field).toBe("email");
 	});
 
 	it("does the same asynchronously", async () => {
@@ -472,9 +479,10 @@ describe("rune > a regex rule answers the same thing every time", () => {
 		expect(s.validateResult({ code: "ABC" }).valid).toBe(true);
 		// JSON Schema's `pattern` has nowhere to put `i`, so the export is the
 		// bare source — documented on the method.
-		expect(
-			(s.toJSONSchema().properties as Record<string, Record<string, unknown>>)
-				.code.pattern,
-		).toBe("^abc$");
+		const properties = s.toJSONSchema().properties as Record<
+			string,
+			Record<string, unknown>
+		>;
+		expect(defined(properties.code).pattern).toBe("^abc$");
 	});
 });
