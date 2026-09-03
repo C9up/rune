@@ -15,7 +15,6 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
-
 describe("rune > audit 5", () => {
 	it("nested objects DROP undeclared keys unless allowUnknownProperties()", () => {
 		// The mass-assignment guarantee held at the top level but not one level

@@ -7,7 +7,6 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
-
 describe("rune > nested object schemas", () => {
 	it("validates a nested object shape and surfaces field-paths in errors", () => {
 		const s = schema({

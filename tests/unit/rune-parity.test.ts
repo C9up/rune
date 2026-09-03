@@ -13,7 +13,6 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
-
 /**
  * Failure-path coverage for the VineJS-parity surface added to rune. Every rule
  * is asserted to REJECT invalid input (not just accept valid) — the missing

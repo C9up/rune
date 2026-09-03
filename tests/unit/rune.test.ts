@@ -18,7 +18,6 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
-
 /**
  * Minimal stand-in for a translator (e.g. `@c9up/rosetta`). `bindRosetta`
  * accepts any object exposing `t(key, params)`, so rune stays agnostic and is
@@ -170,7 +169,9 @@ describe("rune > rule types", () => {
 				.message("Please enter a valid email address"),
 		});
 		const result = s.validateResult({ email: "bad" });
-		expect(defined(result.errors[0]).message).toBe("Please enter a valid email address");
+		expect(defined(result.errors[0]).message).toBe(
+			"Please enter a valid email address",
+		);
 	});
 
 	it("preserves custom message on min/max", () => {
