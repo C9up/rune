@@ -1956,6 +1956,15 @@ export class RuleChain<Output = unknown> {
 		for (const chain of [
 			...(this.#tupleChains ?? []),
 			...(this.#unionChains ?? []).map((b) => b.chain),
+			// A conditional group's branches are merged into the shape at
+			// validation time exactly like the nested schema above, so a rule
+			// declared in one is as real as any other. Leaving them out here left
+			// the sync path seeing a schema with nothing to await: it did not
+			// refuse, and the rule never ran — a `unique`/`exists`/`verifyContent`
+			// inside a `group.if(...)` silently checked nothing.
+			...this.#groups.flatMap((group) =>
+				group.branches.flatMap((branch) => Object.values(branch.shape)),
+			),
 		]) {
 			if (chain.hasAsyncRulesDeep) return true;
 		}
