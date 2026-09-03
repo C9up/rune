@@ -13,6 +13,34 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$").unwrap()
 });
 
+/// JavaScript's `Number(string)`, for the spellings a body can carry.
+///
+/// Rust's `f64` parser is not the same function: it does not read the `0x` /
+/// `0b` / `0o` prefixes that JS does, so `"0x10"` came back refused here while
+/// the TypeScript path — which calls `Number()` and is the VineJS behaviour —
+/// coerced it to 16. Same schema, same input, two verdicts, decided by whether
+/// the application happened to install a messages provider.
+///
+/// It also accepts a few spellings JS does not (`"inf"`, `"nan"`), which need
+/// no special case: both are non-finite and the caller refuses those anyway.
+fn js_number(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    // A radix prefix takes no sign in JS, so anything else falls through to the
+    // ordinary parser — which is what rejects `"-0x10"`, as JS does.
+    let radix = match trimmed.get(..2) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("0x") => Some(16),
+        Some(prefix) if prefix.eq_ignore_ascii_case("0b") => Some(2),
+        Some(prefix) if prefix.eq_ignore_ascii_case("0o") => Some(8),
+        _ => None,
+    };
+    match radix {
+        Some(radix) => u128::from_str_radix(&trimmed[2..], radix)
+            .ok()
+            .map(|n| n as f64),
+        None => trimmed.parse::<f64>().ok(),
+    }
+}
+
 /// Code-point length for a string, element count for an array, else `-1`.
 /// Mirrors the TS `sizedLength` helper (`[...v].length` counts code points).
 fn sized_length(value: &serde_json::Value) -> i64 {
@@ -183,7 +211,7 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
             match rule.name.as_str() {
                 "number" => {
                     if let Some(text) = val.as_str() {
-                        if let Ok(n) = text.trim().parse::<f64>() {
+                        if let Some(n) = js_number(text) {
                             if let Some(num) = serde_json::Number::from_f64(n) {
                                 val = serde_json::Value::Number(num);
                             }

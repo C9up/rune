@@ -50,6 +50,46 @@ const CASES: ReadonlyArray<
 	["enum", rules.string().enum(["a", "b"]), "c"],
 ];
 
+/**
+ * Coercion decides what the application receives, not just whether it passes —
+ * so the two engines have to produce the same VALUE, not only the same verdict.
+ */
+const COERCIONS: ReadonlyArray<
+	[name: string, chain: RuleChain, input: unknown]
+> = [
+	["a numeric string", rules.number(), "42"],
+	["a padded numeric string", rules.number(), " 42 "],
+	// JS `Number()` reads radix prefixes; Rust's f64 parser does not, and
+	// this one came back refused natively while TypeScript coerced it to 16.
+	["a hexadecimal string", rules.number(), "0x10"],
+	["a binary string", rules.number(), "0b101"],
+	["an octal string", rules.number(), "0o17"],
+	// A sign in front of a radix prefix is not a number in JS either.
+	["a signed hexadecimal string", rules.number(), "-0x10"],
+	["exponent notation", rules.number(), "1e3"],
+	["an empty string", rules.number(), ""],
+	["a non-finite spelling", rules.number(), "Infinity"],
+	["the usual boolean spellings", rules.boolean(), "on"],
+	["a boolean-ish number", rules.boolean(), 1],
+	["a word that is not a boolean", rules.boolean(), "yes"],
+];
+
+describe("rune > native and TypeScript engines coerce alike", () => {
+	for (const [name, chain, input] of COERCIONS) {
+		it(`agrees on ${name}`, () => {
+			const s = schema({ v: chain });
+			const viaNative = s.validateResult({ v: input });
+			const viaTypeScript = s.validateResult(
+				{ v: input },
+				{ messagesProvider: forceTypeScript },
+			);
+
+			expect(viaNative.valid).toBe(viaTypeScript.valid);
+			expect(viaNative.data?.v).toEqual(viaTypeScript.data?.v);
+		});
+	}
+});
+
 describe("rune > native and TypeScript engines agree", () => {
 	for (const [name, chain, rejected] of CASES) {
 		it(`${name} refuses the same value on both paths`, () => {
