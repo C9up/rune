@@ -4,21 +4,10 @@
  * @implements FR40
  */
 
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { arch, platform } from "node:process";
-import { fileURLToPath } from "node:url";
-
-const require2 = createRequire(import.meta.url);
-const __dirname2 = dirname(fileURLToPath(import.meta.url));
-
-const platformMap: Record<string, string> = {
-	"linux-x64": "linux-x64-gnu",
-	"linux-arm64": "linux-arm64-gnu",
-	"darwin-x64": "darwin-x64",
-	"darwin-arm64": "darwin-arm64",
-	"win32-x64": "win32-x64-msvc",
-};
+import {
+	loadNativeBinary,
+	unavailableReason as vendorUnavailableReason,
+} from "./vendor/nativeBinary.js";
 
 /**
  * The engine's surface, as the Rust declares it.
@@ -29,17 +18,9 @@ const platformMap: Record<string, string> = {
  */
 type NativeRune = typeof import("./native/generated.js");
 
-let native: NativeRune | undefined;
-let loadError: unknown;
-
-try {
-	const suffix = platformMap[`${platform}-${arch}`];
-	if (suffix) {
-		native = require2(join(__dirname2, `../index.${suffix}.node`));
-	}
-} catch (e) {
-	loadError = e;
-}
+const attempt = loadNativeBinary<NativeRune>();
+const native = attempt.loaded ? attempt.binary : undefined;
+const loadError = attempt.loaded ? undefined : attempt.cause;
 
 /**
  * Validate data via the Rust NAPI engine.
@@ -69,13 +50,10 @@ export function isNativeAvailable(): boolean {
 
 /** Why the engine could not be loaded, phrased for whoever has to fix it. */
 function unavailableReason(): string {
-	const target = `${platform}-${arch}`;
 	if (loadError !== undefined) {
 		return `failed to load (${loadError instanceof Error ? loadError.message : String(loadError)})`;
 	}
-	return platformMap[target] !== undefined
-		? "binary not found"
-		: `no prebuilt binary for ${target}`;
+	return vendorUnavailableReason();
 }
 
 /** Raised when a schema needs the Rust engine and it is not there. */
