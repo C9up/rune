@@ -439,10 +439,19 @@ describe("rune > URLs with options", () => {
 	});
 
 	it("accepts only the schemes it was given", () => {
-		expect(isUrlWithOptions("ftp://acme.test", { protocols: ["ftp"] })).toBe(
-			true,
+		expect(isUrlWithOptions("acme.test", { protocols: ["https"] })).toBe(false);
+		expect(isUrlWithOptions("https://acme.test", { protocols: ["ftp"] })).toBe(
+			false,
 		);
-		expect(isUrlWithOptions("ftp://acme.test")).toBe(false);
+		// The default list is http/https/ftp, as the reference one is. It used
+		// to stop at http/https, which made this helper disagree with
+		// `helpers.isURL()` about the very same string.
+		expect(isUrlWithOptions("ftp://acme.test")).toBe(true);
+		// What the allow-list is actually for: the schemes that turn a link
+		// into code stay out, listed or not.
+		expect(isUrlWithOptions("javascript:alert(1)")).toBe(false);
+		expect(isUrlWithOptions("data:text/html,<script>")).toBe(false);
+		expect(isUrlWithOptions("mailto:a@acme.test")).toBe(false);
 	});
 
 	it("requires a dotted host unless told otherwise", () => {
@@ -463,5 +472,68 @@ describe("rune > URLs with options", () => {
 
 	it("rejects something that is not a URL at all", () => {
 		expect(isUrlWithOptions("http://")).toBe(false);
+	});
+});
+
+describe("rune > normalizeUrl: query strings and unusual schemes", () => {
+	// Checked against the `normalize-url` package these paths were transcribed
+	// from. Two answers differ from it on purpose and are marked below.
+
+	it("leaves a scheme it was not told about completely alone", () => {
+		// Normalising a URL whose scheme has no defined authority or path
+		// semantics can only guess, so rune declines rather than guess.
+		expect(normalizeUrl("myapp://Acme.Test/Path/")).toBe(
+			"myapp://Acme.Test/Path/",
+		);
+		// Naming the scheme opts it in: now the trailing slash goes, and the
+		// scheme itself survives.
+		expect(
+			normalizeUrl("myapp://Acme.Test/Path/", { customProtocols: ["myapp"] }),
+		).toBe("myapp://Acme.Test/Path");
+		expect(
+			normalizeUrl("other://Acme.Test/Path/", { customProtocols: ["myapp"] }),
+		).toBe("other://Acme.Test/Path/");
+	});
+
+	it("reads a custom scheme however it was spelled in the option", () => {
+		expect(
+			normalizeUrl("myapp://acme.test/x/", {
+				customProtocols: ["  MYAPP:  ", "", "   "],
+			}),
+		).toBe("myapp://acme.test/x");
+	});
+
+	it("keeps a valueless query key valueless while sorting", () => {
+		// `?flag` and `?flag=` are different requests to many servers, so a
+		// round-trip through URLSearchParams must not turn one into the other.
+		expect(normalizeUrl("https://acme.test/?flag&a=1&b")).toBe(
+			"https://acme.test/?a=1&b&flag",
+		);
+		expect(normalizeUrl("https://acme.test/?flag")).toBe(
+			"https://acme.test/?flag",
+		);
+	});
+
+	it("keeps an encoded reserved character encoded through the sort", () => {
+		// NAMED DEVIATION. Sorting round-trips the query through
+		// URLSearchParams, which DECODES `%2F` to `/`; the reference package
+		// lets that stand and answers `?a=/?`. A slash decoded inside a value
+		// no longer means what it meant, so rune parks these behind a token and
+		// restores them afterwards.
+		expect(normalizeUrl("https://acme.test/?a=%2F%3F")).toBe(
+			"https://acme.test/?a=%2F%3F",
+		);
+		expect(normalizeUrl("https://acme.test/?b=%2F&a=1")).toBe(
+			"https://acme.test/?a=1&b=%2F",
+		);
+	});
+
+	it("makes malformed percent-encoding well-formed", () => {
+		// NAMED DEVIATION. `%zz` decodes to nothing; the reference hands it back
+		// as it arrived, still malformed. rune escapes the stray `%`, so the
+		// result is a URL that parses and round-trips.
+		expect(normalizeUrl("https://acme.test/?a=%zz")).toBe(
+			"https://acme.test/?a=%25zz",
+		);
 	});
 });

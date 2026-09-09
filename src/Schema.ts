@@ -5070,11 +5070,24 @@ function sizedLength(value: unknown): number {
 	return -1;
 }
 
-/** WHATWG URL validity — accepts only http/https to avoid `mailto:` etc. */
+/**
+ * WHATWG URL validity, restricted to the protocols a link may safely be — the
+ * point of the allow-list is to refuse `javascript:`, `data:` and `mailto:`,
+ * which this list does exactly as the reference one does.
+ *
+ * `ftp` belongs in it: leaving it out made `url()` refuse what
+ * `helpers.isURL()` accepted, so the same string passed or failed depending on
+ * which half of this package you asked. Narrow it per call with
+ * `url({ protocols: ["https"] })`.
+ */
 function isValidUrl(value: string): boolean {
 	try {
 		const url = new URL(value);
-		return url.protocol === "http:" || url.protocol === "https:";
+		return (
+			url.protocol === "http:" ||
+			url.protocol === "https:" ||
+			url.protocol === "ftp:"
+		);
 	} catch {
 		return false;
 	}

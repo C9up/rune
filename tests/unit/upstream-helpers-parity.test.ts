@@ -146,3 +146,89 @@ describe("rune > helpers parity", () => {
 		}
 	});
 });
+
+describe("rune > helpers: the format predicates", () => {
+	// Every expectation below was read off the reference implementation run on
+	// the same inputs, not from the regex. Three of them are regressions: the
+	// first version of this port accepted an empty `isAscii`, refused
+	// `ftp://` and refused a parenthesised coordinate pair.
+
+	it("isString / isNumeric answer about the VALUE, not its shape", () => {
+		expect(h.isString("abc")).toBe(true);
+		expect(h.isString(42)).toBe(false);
+		expect(h.isString(null)).toBe(false);
+		// A boxed String is an object, and upstream says false.
+		expect(h.isString(new String("x"))).toBe(false);
+
+		expect(h.isNumeric("42")).toBe(true);
+		expect(h.isNumeric("4.2")).toBe(true);
+		expect(h.isNumeric("-3")).toBe(true);
+		expect(h.isNumeric("1e3")).toBe(true);
+		// A blank string IS numeric here: the helper is `!Number.isNaN(Number(v))`
+		// and `Number("")` is 0. Upstream answers the same, and the `number()`
+		// RULE deliberately does not — see the coercion deviation. Do not use
+		// this helper to decide whether a form field was filled in.
+		expect(h.isNumeric("")).toBe(true);
+		expect(h.isNumeric("  ")).toBe(true);
+		expect(h.isNumeric("abc")).toBe(false);
+	});
+
+	it("isAlpha / isAlphaNumeric / isAscii all refuse an empty string", () => {
+		expect(h.isAlpha("abc")).toBe(true);
+		expect(h.isAlpha("ab1")).toBe(false);
+		expect(h.isAlpha("")).toBe(false);
+
+		expect(h.isAlphaNumeric("abc123")).toBe(true);
+		expect(h.isAlphaNumeric("ab-1")).toBe(false);
+		expect(h.isAlphaNumeric("")).toBe(false);
+
+		expect(h.isAscii("abc123!")).toBe(true);
+		expect(h.isAscii("é")).toBe(false);
+		// REGRESSION: a scan over an empty string is vacuously true, so this
+		// answered `true` and `ascii()` passed a value with nothing in it.
+		expect(h.isAscii("")).toBe(false);
+	});
+
+	it("isJWT / isIBAN / isCreditCard check structure, then the check digits", () => {
+		expect(h.isJWT("eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig")).toBe(true);
+		expect(h.isJWT("a.b")).toBe(false);
+
+		expect(h.isIBAN("CH9300762011623852957")).toBe(true);
+		// One digit short: the structure is plausible, the checksum is not.
+		expect(h.isIBAN("GB82WEST1234569876543")).toBe(false);
+
+		expect(h.isCreditCard("4111111111111111")).toBe(true);
+		expect(h.isCreditCard("1234567890123456")).toBe(false);
+	});
+
+	it("isIP accepts both families, and can be pinned to one", () => {
+		expect(h.isIP("127.0.0.1")).toBe(true);
+		expect(h.isIP("::1")).toBe(true);
+		expect(h.isIP("999.1.1.1")).toBe(false);
+		expect(h.isIP("::1", 4)).toBe(false);
+		expect(h.isIP("127.0.0.1", 4)).toBe(true);
+	});
+
+	it("isLatLong accepts the parenthesised pair a map widget hands back", () => {
+		expect(h.isLatLong("12.34,56.78")).toBe(true);
+		// REGRESSION: refused, while upstream accepts it.
+		expect(h.isLatLong("(12.34, 56.78)")).toBe(true);
+		expect(h.isLatLong("91,181")).toBe(false);
+		expect(h.isLatLong("abc")).toBe(false);
+	});
+
+	it("isURL admits ftp by default and can be narrowed", () => {
+		expect(h.isURL("https://a.com")).toBe(true);
+		// REGRESSION: the helper said true and the `url()` rule said false, so
+		// one string got two verdicts depending on which half you asked.
+		expect(h.isURL("ftp://a.com")).toBe(true);
+		expect(h.isURL("ftp://a.com", { protocols: ["https"] })).toBe(false);
+		expect(h.isURL("not a url")).toBe(false);
+	});
+
+	it("isMobilePhone answers per locale, and null for one it has no table for", () => {
+		expect(h.isMobilePhone("+41791234567", "fr-CH")).toBe(true);
+		expect(h.isMobilePhone("abc", "fr-CH")).toBe(false);
+		expect(h.isMobilePhone("nope", "zz-ZZ")).toBeNull();
+	});
+});

@@ -211,6 +211,35 @@ describe("rune > a provider reaches every rule", () => {
 	});
 });
 
+describe("rune > url() and the helper answer alike", () => {
+	it("accepts the same schemes from the rule as from the helper", () => {
+		// These were two implementations: the helper allowed ftp, the rule did
+		// not, so one string passed or failed depending on which half of the
+		// package you asked.
+		const s = schema({ u: rules.string().url() });
+		expect(s.validateResult({ u: "https://acme.test" }).valid).toBe(true);
+		expect(s.validateResult({ u: "ftp://acme.test" }).valid).toBe(true);
+		expect(s.validateResult({ u: "not a url" }).valid).toBe(false);
+	});
+
+	it("still refuses the schemes that turn a link into code", () => {
+		const s = schema({ u: rules.string().url() });
+		for (const hostile of [
+			"javascript:alert(1)",
+			"data:text/html,<script>alert(1)</script>",
+			"mailto:a@acme.test",
+		]) {
+			expect(s.validateResult({ u: hostile }).valid).toBe(false);
+		}
+	});
+
+	it("can be narrowed to one scheme per call", () => {
+		const s = schema({ u: rules.string().url({ protocols: ["https"] }) });
+		expect(s.validateResult({ u: "https://acme.test" }).valid).toBe(true);
+		expect(s.validateResult({ u: "ftp://acme.test" }).valid).toBe(false);
+	});
+});
+
 describe("rune > the catalogue is reachable", () => {
 	it("keys every entry by a name some rule can report", () => {
 		// An entry nothing reports is dead weight that reads like a promise:

@@ -23,9 +23,14 @@ const IPV4_RE =
 	/^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 const E164_RE = /^\+?[1-9]\d{6,14}$/;
 
-/** Code-point scan rather than a control-character regex, which lints as suspicious. */
+/**
+ * Code-point scan rather than a control-character regex, which lints as
+ * suspicious. The length guard is not decoration: `every` is vacuously true on
+ * an empty string, so `ascii()` accepted `""` — the reference pattern
+ * (`/^[\x00-\x7F]+$/`) requires at least one character.
+ */
 export const isAscii = (v: string): boolean =>
-	[...v].every((c) => (c.codePointAt(0) ?? 0) <= 0x7f);
+	v.length > 0 && [...v].every((c) => (c.codePointAt(0) ?? 0) <= 0x7f);
 export const isHexCode = (v: string): boolean => HEX_RE.test(v);
 export const isUlid = (v: string): boolean => ULID_RE.test(v);
 export const isJwt = (v: string): boolean => JWT_RE.test(v);
@@ -97,8 +102,11 @@ export function isCoordinates(v: string): boolean {
 	if (parts.length !== 2) return false;
 	const [latRaw, lngRaw] = parts;
 	if (latRaw === undefined || lngRaw === undefined) return false;
-	const lat = Number(latRaw.trim());
-	const lng = Number(lngRaw.trim());
+	// `(12.34, 56.78)` is the shape a map widget hands back, and the reference
+	// admits it — its latitude pattern allows a leading `(` and its longitude
+	// pattern a trailing `)`, each independently of the other.
+	const lat = Number(latRaw.trim().replace(/^\(/, ""));
+	const lng = Number(lngRaw.trim().replace(/\)$/, ""));
 	if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
 	return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
 }
@@ -436,7 +444,9 @@ export function isUrlWithOptions(
 	// first, so neither form is silently ignored.
 	const requireProtocol =
 		(options.require_protocol ?? options.requireProtocol) !== false;
-	const protocols = options.protocols ?? ["http", "https"];
+	// The reference default is http/https/ftp. Narrow it per call with
+	// `{ protocols: ["https"] }` — dropping ftp here refused a valid URL.
+	const protocols = options.protocols ?? ["http", "https", "ftp"];
 	const candidate =
 		requireProtocol || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
 			? value
