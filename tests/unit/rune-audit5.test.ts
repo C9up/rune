@@ -4,6 +4,7 @@ import rune, {
 	create,
 	createRule,
 	RuneError,
+	RuneValidationError,
 	rules,
 	schema,
 	setValidationTranslator,
@@ -991,5 +992,63 @@ describe("rune > audit 11 — root failures and file content", () => {
 		});
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("verifyContent");
+	});
+});
+
+describe("rune > audit 12 — tryValidate and the reporter agree", () => {
+	const reporter = () => ({
+		hasErrors: true,
+		createError: () =>
+			new RuneValidationError([
+				{ field: "a", rule: "custom", message: "from the reporter" },
+			]),
+		report: () => undefined,
+	});
+
+	it("tryValidate hands back the error the reporter built", () => {
+		// `validateOrThrow` honoured the bound reporter and `tryValidate` did
+		// not, so the two entry points disagreed about the same run: a caller who
+		// moved from one to the other silently lost the reporter's error shape.
+		const v = create({ a: rules.string() });
+		v.errorReporter = reporter;
+		const [error, data] = v.tryValidateSync({ a: 1 });
+		expect(data).toBeNull();
+		expect(error?.messages[0]?.message).toBe("from the reporter");
+		v.errorReporter = null;
+	});
+
+	it("the async tuple carries it too", async () => {
+		const v = create({ a: rules.string() });
+		v.errorReporter = reporter;
+		const [error] = await v.tryValidate({ a: 1 });
+		expect(error?.messages[0]?.message).toBe("from the reporter");
+		v.errorReporter = null;
+	});
+
+	it("without a reporter the tuple still carries rune's own error", () => {
+		const [error] = create({ a: rules.string() }).tryValidateSync({ a: 1 });
+		expect(error).toBeInstanceOf(RuneValidationError);
+		expect(error?.messages[0]?.rule).toBe("string");
+	});
+
+	it("a reporter error that is not a validation failure is THROWN", () => {
+		// The tuple's first slot is a validation failure. Widening it to carry an
+		// arbitrary Error is what would make `tryValidate` worthless — so an error
+		// that is not one propagates instead of being disguised as one.
+		const v = create({ a: rules.string() });
+		v.errorReporter = () => ({
+			hasErrors: true,
+			createError: () => new Error("boom"),
+			report: () => undefined,
+		});
+		expect(() => v.tryValidateSync({ a: 1 })).toThrowError("boom");
+		v.errorReporter = null;
+	});
+
+	it("a valid payload is untouched by the reporter", () => {
+		const v = create({ a: rules.string() });
+		v.errorReporter = reporter;
+		expect(v.tryValidateSync({ a: "ok" })).toEqual([null, { a: "ok" }]);
+		v.errorReporter = null;
 	});
 });

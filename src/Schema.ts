@@ -1621,6 +1621,29 @@ export function schema(
 		return { valid: false, errors };
 	}
 
+	/**
+	 * The failure `tryValidate` hands back — the reporter's own error when one is
+	 * bound, because a reporter that decides the shape of a thrown failure has to
+	 * decide the shape of a returned one too, or the two entry points disagree
+	 * about the same run.
+	 *
+	 * A reporter error that is NOT a validation failure is THROWN rather than
+	 * returned: `tryValidate` promises a tuple for a rejected payload, not for
+	 * anything at all going wrong, and widening the tuple to carry an arbitrary
+	 * Error is what would make it worthless. VineJS draws the line in the same
+	 * place — its `tryValidate` catches only its own ValidationError.
+	 */
+	function reportedFailure(
+		result: ValidationResult<Record<string, unknown>>,
+	): RuneValidationError {
+		const reported = reporterError?.();
+		if (reported === undefined) {
+			return new RuneValidationError(result.errors.map(toErrorNode));
+		}
+		if (reported instanceof RuneValidationError) return reported;
+		throw reported;
+	}
+
 	function validateOrThrow(
 		data: unknown,
 		options?: ValidateOptions,
@@ -1712,7 +1735,7 @@ export function schema(
 	): [RuneValidationError, null] | [null, Record<string, unknown>] {
 		const result = validateResult(data, options);
 		if (result.valid) return [null, result.data];
-		return [new RuneValidationError(result.errors.map(toErrorNode)), null];
+		return [reportedFailure(result), null];
 	}
 
 	/** Async counterpart of {@link tryValidate}. */
@@ -1722,7 +1745,7 @@ export function schema(
 	): Promise<[RuneValidationError, null] | [null, Record<string, unknown>]> {
 		const result = await validateResultAsync(data, options);
 		if (result.valid) return [null, result.data];
-		return [new RuneValidationError(result.errors.map(toErrorNode)), null];
+		return [reportedFailure(result), null];
 	}
 
 	async function validateOrThrowAsync(
@@ -2784,8 +2807,10 @@ export class RuleChain<Output = unknown> {
 
 	/**
 	 * Uploaded file with VineJS `nativeFile` options — `minSize`, `maxSize`,
-	 * `mimeTypes`. Same structural contract as {@link file}: rune never reads
-	 * bytes, so the MIME type is the one the upload REPORTS.
+	 * `mimeTypes`. Same structural contract as {@link file}, and the same
+	 * guarantee: declaring `mimeTypes` is a SECURITY statement, so the leading
+	 * bytes are read and confronted with the declaration. The reported type is
+	 * checked too, but it is the uploader's word and never the last one.
 	 */
 	nativeFile(options?: {
 		minSize?: number | string;
@@ -2854,8 +2879,11 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Allowed MIME types (VineJS `nativeFile().mimeTypes()`). The type is the one
-	 * the upload REPORTS — rune never reads bytes, see {@link file}.
+	 * Allowed MIME types (VineJS `nativeFile().mimeTypes()`).
+	 *
+	 * This rule checks the type the upload REPORTS. Declaring the list also arms
+	 * the magic-number check, so the bytes have to agree — see
+	 * {@link verifyContent}.
 	 */
 	mimeTypes(types: readonly string[]): this {
 		const allowed = types.map((t) => t.toLowerCase());
