@@ -1,10 +1,10 @@
 /**
  * @module @c9up/rune/types
  * @description
- * Type-only surface, mirroring `@vinejs/vine/types`.
+ * Type-only surface, on its own subpath as upstream's is.
  *
  * A separate subpath so a consumer can `import type { FieldContext } from
- * "@c9up/rune/types"` exactly as it would from Vine — importing types through
+ * "@c9up/rune/types"` exactly as it would upstream — importing types through
  * the value entrypoint pulls the whole module graph into a file that only
  * needed a signature.
  */

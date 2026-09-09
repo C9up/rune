@@ -11,7 +11,7 @@ import rune, {
 	schema,
 } from "../../src/index.js";
 
-describe("rune > public API (VineJS shape)", () => {
+describe("rune > public API (upstream shape)", () => {
 	it("exposes a default export carrying types and validator factories", () => {
 		expect(typeof rune.string).toBe("function");
 		expect(typeof rune.date).toBe("function");
@@ -38,7 +38,7 @@ describe("rune > public API (VineJS shape)", () => {
 	});
 });
 
-describe("rune > optional vs nullable output (VineJS split)", () => {
+describe("rune > optional vs nullable output (upstream split)", () => {
 	it("optional() accepts null but drops the key", () => {
 		const v = schema({ bio: rules.string().optional() });
 		expect(v.validateOrThrow({ bio: null })).toEqual({});
@@ -111,7 +111,7 @@ describe("rune > createRule implicit + FieldContext", () => {
 		expect(res.errors[0]?.rule).toBe("customRequired");
 	});
 
-	it("exposes the VineJS field context and lets a rule mutate the value", () => {
+	it("exposes the upstream field context and lets a rule mutate the value", () => {
 		let captured: Record<string, unknown> = {};
 		const spy = createRule((v, _o, field) => {
 			captured = {
@@ -173,7 +173,7 @@ describe("rune > unique/exists Lucid options form", () => {
 });
 
 describe("rune > string mutations and extra formats", () => {
-	it("applies the VineJS mutations", () => {
+	it("applies the upstream mutations", () => {
 		expect(
 			schema({ v: rules.string().toUpperCase() }).validateOrThrow({ v: "ab" })
 				.v,
@@ -244,10 +244,10 @@ describe("rune > date extras", () => {
 });
 
 /**
- * `validate()` now IS the VineJS contract: async, returns the payload, throws.
+ * `validate()` now IS the upstream contract: async, returns the payload, throws.
  * The never-throwing forms rune also offers are named for what they do.
  */
-describe("rune > validate() follows the VineJS contract", () => {
+describe("rune > validate() follows the upstream contract", () => {
 	it("resolves to the payload and throws on failure", async () => {
 		const v = schema({ email: rules.string().email() });
 		await expect(v.validate({ email: "a@b.io" })).resolves.toEqual({
@@ -274,7 +274,7 @@ describe("rune > validate() follows the VineJS contract", () => {
 	});
 });
 
-describe("rune > union.if / union.else (VineJS parity)", () => {
+describe("rune > union.if / union.else (upstream parity)", () => {
 	const shape = () =>
 		rules.union([
 			rules.union.if(
@@ -313,7 +313,7 @@ describe("rune > union.if / union.else (VineJS parity)", () => {
 	});
 });
 
-describe("errors namespace (VineJS parity)", () => {
+describe("errors namespace (upstream parity)", () => {
 	it("exposes E_VALIDATION_ERROR so an Adonis-style catch matches", async () => {
 		const v = schema({ name: rules.string().minLength(2) });
 
@@ -350,7 +350,7 @@ describe("errors namespace (VineJS parity)", () => {
 	});
 });
 
-describe("Vine option parity — uuid / distinct / in / notIn", () => {
+describe("upstream option parity — uuid / distinct / in / notIn", () => {
 	it("uuid({ version }) enforces the requested versions", () => {
 		const v4 = "9f1b8c2e-4b3a-4d5e-8f2a-1c3d5e7f9a1b"; // version nibble = 4
 		const v1 = "9f1b8c2e-4b3a-1d5e-8f2a-1c3d5e7f9a1b"; // version nibble = 1
@@ -363,7 +363,7 @@ describe("Vine option parity — uuid / distinct / in / notIn", () => {
 		expect(only4.validateResult({ id: v4 }).valid).toBe(true);
 		expect(only4.validateResult({ id: v1 }).valid).toBe(false);
 
-		// A single number, not just an array (VineJS accepts both).
+		// A single number, not just an array (upstream accepts both).
 		const one = schema({ id: rules.string().uuid({ version: 1 }) });
 		expect(one.validateResult({ id: v1 }).valid).toBe(true);
 		expect(one.validateResult({ id: v4 }).valid).toBe(false);
@@ -371,7 +371,7 @@ describe("Vine option parity — uuid / distinct / in / notIn", () => {
 
 	it("distinct ignores null and undefined items", () => {
 		const v = schema({ tags: rules.array().distinct() });
-		// VineJS: helpers.isDistinct([1, null, 2, null, 4, 5]) === true
+		// upstream: helpers.isDistinct([1, null, 2, null, 4, 5]) === true
 		expect(v.validateResult({ tags: [1, null, 2, null, 4, 5] }).valid).toBe(
 			true,
 		);

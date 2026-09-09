@@ -17,12 +17,20 @@
 
 import { describe, expect, it } from "vitest";
 import { type RuleChain, rules, schema } from "../../src/index.js";
-import type { MessagesProviderContract } from "../../src/MessagesProvider.js";
+import {
+	type MessagesProviderContract,
+	SimpleMessagesProvider,
+} from "../../src/MessagesProvider.js";
 
 /** Forces the TypeScript traversal without changing a single rule. */
-const forceTypeScript: MessagesProviderContract = {
-	getMessage: (rawMessage) => rawMessage,
-};
+// Installing ANY provider is what pushes a schema off the native path, and the
+// message has to come back rendered — a default is a `{{ field }}` template
+// now, so a provider that returned it verbatim would compare two strings that
+// no application ever sees. An empty catalogue is the smallest REAL provider:
+// it matches no key and falls through to interpolating the default.
+const forceTypeScript: MessagesProviderContract = new SimpleMessagesProvider(
+	{},
+);
 
 /** One rule, and a value it must refuse. */
 const CASES: ReadonlyArray<

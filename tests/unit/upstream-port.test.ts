@@ -1,6 +1,6 @@
 /**
  * The per-locale tables, the two normalisers and the JSON Schema emitter, all
- * transcribed from what VineJS actually calls — validator.js 13.15.35 and
+ * transcribed from what upstream actually calls — validator.js 13.15.35 and
  * normalize-url 9.0.1.
  *
  * Each case here was produced by RUNNING the upstream implementation, not by
@@ -27,7 +27,7 @@ describe("rune > the tables carry validator.js's coverage", () => {
 	it("covers every locale validator.js does, and then some", () => {
 		// rune shipped a hand-picked subset — 41 numbering plans out of 169, 48
 		// postal codes out of 70. A caller asking for `sw-KE` got a thrown error
-		// where VineJS validated the number.
+		// where upstream validated the number.
 		expect(SUPPORTED_MOBILE_LOCALES.length).toBe(169);
 		expect(SUPPORTED_POSTAL_CODES.length).toBe(71);
 		expect(SUPPORTED_PASSPORTS.length).toBe(61);
@@ -74,7 +74,7 @@ describe("rune > the tables carry validator.js's coverage", () => {
 	});
 
 	it("mobile() with no locale means ANY plan, not just E.164", () => {
-		// VineJS defaults the locale to "any": the number matches SOME plan.
+		// upstream defaults the locale to "any": the number matches SOME plan.
 		const any = schema({ n: rules.string().mobile() });
 		expect(any.validateResult({ n: "07911123456" }).valid).toBe(true);
 		expect(any.validateResult({ n: "+33612345678" }).valid).toBe(true);
@@ -86,7 +86,7 @@ describe("rune > the tables carry validator.js's coverage", () => {
 	});
 });
 
-describe("rune > the normalisers behave as VineJS's do", () => {
+describe("rune > the normalisers behave as upstream's do", () => {
 	it("normalizeEmail applies the provider rules by default", () => {
 		expect(normalizeEmail("A.D.A+news@GMail.com")).toBe("ada@gmail.com");
 		expect(normalizeEmail("A.B@googlemail.com")).toBe("ab@gmail.com");
@@ -183,7 +183,7 @@ describe("rune > the JSON Schema says what the validator does", () => {
 		expect(node(rules.number().in([1, 2])).enum).toEqual([1, 2]);
 	});
 
-	it("reads a bare IP version, the way VineJS is called", () => {
+	it("reads a bare IP version, the way upstream is called", () => {
 		expect(node(rules.string().ipAddress(6)).format).toBe("ipv6");
 		expect(node(rules.string().ipAddress({ version: 6 })).format).toBe("ipv6");
 		expect(node(rules.string().ipAddress()).format).toBe("ipv4");
@@ -203,7 +203,7 @@ describe("rune > the JSON Schema says what the validator does", () => {
 	});
 
 	it("keeps a nullable field REQUIRED, because the key must be there", () => {
-		// VineJS drops it from `required`, but its own validator refuses `{}` —
+		// upstream drops it from `required`, but its own validator refuses `{}` —
 		// so the schema it emits contradicts the validator it describes.
 		const v = create({ a: rules.string().nullable() });
 		expect(v.validateResult({}).valid).toBe(false);

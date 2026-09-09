@@ -1,10 +1,10 @@
 /**
- * SimpleMessagesProvider — VineJS-compatible message lookup.
+ * SimpleMessagesProvider — upstream-compatible message lookup.
  *
  * Resolves an error message for a `(rule, field)` pair using a `'field.rule'`
  * → template map, human-readable field labels, wildcard (`*`) segments for
  * array items, and mustache `{{ field }}` interpolation. Mirrors
- * `@vinejs/vine`'s provider so validators authored against Vine's message
+ * `the upstream package`'s provider so validators authored against upstream's message
  * conventions behave identically here.
  */
 
@@ -38,6 +38,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Mustache-style `{{ token }}` interpolation with dotted-path lookup.
+ *
+ * Exported because the default message templates are rendered on BOTH paths:
+ * through a provider when one is installed, and directly against the catalogue
+ * when none is. A second copy of this would let the two drift, and a template
+ * that renders one way with a provider and another way without it is worse
+ * than no template at all.
+ */
+export function interpolate(message: string, data: MessageArgs): string {
+	if (!message.includes("{{")) {
+		return message;
+	}
+	return message.replace(/{{(.*?)}}/g, (_match, rawKey: string) => {
+		const tokens = rawKey.trim().split(".");
+		let output: unknown = data;
+		for (const token of tokens) {
+			if (!isRecord(output)) {
+				return "";
+			}
+			output = Object.hasOwn(output, token) ? output[token] : undefined;
+		}
+		return output === undefined || output === null ? "" : String(output);
+	});
+}
+
+/**
  * Contract any messages provider must satisfy — a single `getMessage` lookup.
  * Keeping it an interface lets consumers swap in their own (e.g. i18n-backed)
  * provider without importing the concrete class.
@@ -53,7 +79,7 @@ export interface MessagesProviderContract {
 
 /**
  * Replace a dotted field path's numeric segments with `*` so array items share
- * a single wildcard message key — `tags.0.name` → `tags.*.name` (VineJS parity).
+ * a single wildcard message key — `tags.0.name` → `tags.*.name` (upstream parity).
  */
 export function toWildcardPath(field: string): string {
 	return field
@@ -71,26 +97,8 @@ export class SimpleMessagesProvider implements MessagesProviderContract {
 		this.#fields = fields ?? {};
 	}
 
-	/** Mustache-style `{{ token }}` interpolation with dotted-path lookup. */
-	#interpolate(message: string, data: MessageArgs): string {
-		if (!message.includes("{{")) {
-			return message;
-		}
-		return message.replace(/{{(.*?)}}/g, (_match, rawKey: string) => {
-			const tokens = rawKey.trim().split(".");
-			let output: unknown = data;
-			for (const token of tokens) {
-				if (!isRecord(output)) {
-					return "";
-				}
-				output = Object.hasOwn(output, token) ? output[token] : undefined;
-			}
-			return output === undefined || output === null ? "" : String(output);
-		});
-	}
-
 	/**
-	 * Resolve a message. Priority (VineJS order):
+	 * Resolve a message. Priority (upstream order):
 	 *   1. field-specific   `user.email.required`
 	 *   2. wildcard path     `*.required` / `tags.*.minLength`
 	 *   3. generic rule      `required`
@@ -112,20 +120,20 @@ export class SimpleMessagesProvider implements MessagesProviderContract {
 
 		const fieldMessage = this.#messages[`${path}.${rule}`];
 		if (fieldMessage !== undefined) {
-			return this.#interpolate(fieldMessage, data);
+			return interpolate(fieldMessage, data);
 		}
 
 		const wildcardMessage = this.#messages[`${field.wildCardPath}.${rule}`];
 		if (wildcardMessage !== undefined) {
-			return this.#interpolate(wildcardMessage, data);
+			return interpolate(wildcardMessage, data);
 		}
 
 		const ruleMessage = this.#messages[rule];
 		if (ruleMessage !== undefined) {
-			return this.#interpolate(ruleMessage, data);
+			return interpolate(ruleMessage, data);
 		}
 
-		return this.#interpolate(rawMessage, data);
+		return interpolate(rawMessage, data);
 	}
 
 	toJSON(): { messages: ValidationMessages; fields: ValidationFields } {

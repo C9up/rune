@@ -5,7 +5,7 @@ import { bindHostResolver, RuneError, rules, schema } from "../../src/index.js";
 const ok = (chain: () => ReturnType<typeof rules.string>, value: unknown) =>
 	schema({ v: chain() }).validateResult({ v: value }).valid;
 
-describe("rune > format rules (VineJS parity)", () => {
+describe("rune > format rules (upstream parity)", () => {
 	it("ulid / jwt / ascii / hexCode", () => {
 		expect(ok(() => rules.string().ulid(), "01ARZ3NDEKTSV4RRFFQ69G5FAV")).toBe(
 			true,
@@ -131,7 +131,7 @@ describe("rune > format rules (VineJS parity)", () => {
 	});
 });
 
-describe("rune > format rule options (VineJS)", () => {
+describe("rune > format rule options (upstream)", () => {
 	it("alpha / alphaNumeric honour allowSpaces, underscores and dashes", () => {
 		expect(ok(() => rules.string().alpha(), "abc def")).toBe(false);
 		expect(

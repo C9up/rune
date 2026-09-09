@@ -1,5 +1,5 @@
 /**
- * VineJS surface a migrated validator calls: the union fallback, record key
+ * upstream surface a migrated validator calls: the union fallback, record key
  * checks, and enum choices — including the callback form, which is how a list
  * that depends on the request is computed per validation.
  */
@@ -26,7 +26,9 @@ describe("rune > union().otherwise()", () => {
 		};
 		const [error] = await rune.tryValidate({ schema, data: { id: true } });
 		expect(error).not.toBeNull();
-		expect(error?.messages[0]?.message).toMatch(/does not match/i);
+		expect(error?.messages[0]?.message).toBe(
+			"Invalid value provided for id field",
+		);
 	});
 
 	it("does not run the fallback when a branch matched", async () => {

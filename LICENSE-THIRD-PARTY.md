@@ -1,7 +1,7 @@
 # Third-party notices
 
-rune has no runtime dependencies. Two of its modules are transcribed from
-libraries VineJS calls, so that a schema written against VineJS behaves the same
+rune has no runtime dependencies. Two of its modules are transcribed from the
+libraries the reference implementation calls, so that a schema behaves the same
 way without installing them. Both are MIT-licensed, and their notices are
 reproduced below as that licence requires.
 

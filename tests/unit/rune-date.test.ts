@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { rules, schema, setDateTransform } from "../../src/index.js";
 
 /**
- * `rules.date()` — VineJS `vine.date()` parity. Parsing is done in-package
+ * `rules.date()` — upstream `date()` parity. Parsing is done in-package
  * (rune stays zero-dependency, so no dayjs) and must stay calendar-strict: a
  * regex-shaped check would accept dates that do not exist.
  */
@@ -82,9 +82,11 @@ describe("rune > date", () => {
 			checkOut: "2026-06-25",
 		});
 		expect(bad.valid).toBe(false);
-		expect(bad.errors[0]?.rule).toBe("afterField");
+		// Upstream namespaces every date comparison by the type that owns it —
+		// the rule name IS the key a messages provider looks up.
+		expect(bad.errors[0]?.rule).toBe("date.afterField");
 
-		// VineJS compares at DAY granularity by default (`options.compare || "day"`),
+		// upstream compares at DAY granularity by default (`options.compare || "day"`),
 		// so a later clock time on the SAME day is not "after".
 		const byDefault = schema({
 			a: rules.date(),
@@ -149,7 +151,7 @@ describe("rune > date", () => {
 });
 
 describe("rune > date grammar and callable operands", () => {
-	it("parses the Day.js tokens VineJS formats use", () => {
+	it("parses the Day.js tokens upstream formats use", () => {
 		const cases: Array<[string, string, [number, number, number]]> = [
 			["D/M/YYYY", "5/6/2026", [2026, 5, 5]],
 			["YY-MM-DD", "26-06-25", [2026, 5, 25]],
@@ -195,9 +197,9 @@ describe("rune > date grammar and callable operands", () => {
 	});
 });
 
-describe("rune > date comparison granularity (VineJS default)", () => {
+describe("rune > date comparison granularity (upstream default)", () => {
 	it("literal comparisons are day-granular by default", () => {
-		// Vine: `options.compare || "day"`. `after('2026-06-25')` means a LATER
+		// upstream: `options.compare || "day"`. `after('2026-06-25')` means a LATER
 		// DAY, so the same day at any clock time is not after it.
 		const s = schema({ d: rules.date().after("2026-06-25") });
 		// Naive times: the day boundary is the LOCAL one, as with dayjs.

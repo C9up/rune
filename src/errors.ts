@@ -21,7 +21,7 @@ export class RuneError extends Error {
 
 /**
  * A single validation failure in a {@link RuneValidationError} — mirrors the
- * VineJS `SimpleErrorReporter` node shape `{ message, rule, field, index?, meta? }`.
+ * upstream `SimpleErrorReporter` node shape `{ message, rule, field, index?, meta? }`.
  */
 export interface RuneErrorNode {
 	/** Human-readable (already interpolated) error message. */
@@ -30,19 +30,19 @@ export interface RuneErrorNode {
 	rule: string;
 	/** Dotted field path, e.g. `user.email` or `tags.0`. */
 	field: string;
-	/** Array index when the field is an array item (VineJS parity). */
+	/** Array index when the field is an array item (upstream parity). */
 	index?: number;
 	/** Rule metadata carried for reporters/i18n (e.g. `{ min: 3 }`). */
 	meta?: Record<string, unknown>;
 }
 
 /**
- * Thrown by {@link ValidationSchema.validateOrThrow} — VineJS's
+ * Thrown by {@link ValidationSchema.validateOrThrow} — upstream's
  * `E_VALIDATION_ERROR`. Carries the structured `messages` array and an HTTP
- * `status` (422) so web layers can render it directly, matching AdonisJS/VineJS.
+ * `status` (422) so web layers can render it directly, matching upstream.
  */
 export class RuneValidationError extends Error {
-	/** Internal error code for programmatic handling (VineJS parity). */
+	/** Internal error code for programmatic handling (upstream parity). */
 	readonly code = "E_VALIDATION_ERROR";
 	/** HTTP status for the failure (422 Unprocessable Entity). */
 	readonly status = 422;
@@ -68,7 +68,7 @@ export class RuneValidationError extends Error {
 }
 
 /**
- * VineJS-compatible alias. Adonis/Vine code catches on the error's NAME:
+ * upstream-compatible alias. upstream code catches on the error's NAME:
  *
  *   import { errors } from '@c9up/rune'
  *   if (error instanceof errors.E_VALIDATION_ERROR) { ... }

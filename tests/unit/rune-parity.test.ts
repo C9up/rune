@@ -14,7 +14,7 @@ function defined<T>(value: T | null | undefined): T {
 }
 
 /**
- * Failure-path coverage for the VineJS-parity surface added to rune. Every rule
+ * Failure-path coverage for the upstream-parity surface added to rune. Every rule
  * is asserted to REJECT invalid input (not just accept valid) — the missing
  * failure-path test is exactly what let bug-3262 (silent bypass) through.
  */
@@ -203,10 +203,10 @@ describe("rune parity > SimpleMessagesProvider custom messages", () => {
 });
 
 /**
- * VineJS validates each field in bail mode by default (`FieldOptions.bail: true`
- * in `@vinejs/vine`), i.e. it stops at that field's first failing rule.
+ * upstream validates each field in bail mode by default (`FieldOptions.bail: true`
+ * in `the upstream package`), i.e. it stops at that field's first failing rule.
  */
-describe("rune > bail defaults to VineJS behaviour", () => {
+describe("rune > bail defaults to upstream behaviour", () => {
 	it("stops at the first failing rule of a field", () => {
 		const s = schema({ code: rules.string().minLength(5).alphaNumeric() });
 		const res = s.validateResult({ code: "a!" });

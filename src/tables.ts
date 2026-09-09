@@ -1,7 +1,7 @@
 /**
  * Per-locale format tables.
  *
- * VineJS delegates postal codes, mobile numbering plans, passport numbers and
+ * upstream delegates postal codes, mobile numbering plans, passport numbers and
  * VAT numbers to `validator.js`. rune has zero runtime dependencies, so the
  * tables are transcribed here from validator.js 13.15.35 rather than pulled in
  * as a dependency — same patterns, same coverage, no install.

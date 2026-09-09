@@ -1,5 +1,5 @@
 /**
- * The `vine.helpers` surface, checked against @vinejs/vine 4.4.0.
+ * The `helpers` surface, checked against the upstream package 4.4.0.
  *
  * Every expectation here was read off the upstream package running locally,
  * not recalled: the boolean lists, the `isDistinct` identity semantics and the
@@ -10,7 +10,7 @@ import rune, { rules, schema } from "../../src/index.js";
 
 const h = rune.helpers;
 
-describe("rune > vine.helpers parity", () => {
+describe("rune > helpers parity", () => {
 	it("carries the whole upstream surface", () => {
 		// The 39 upstream names, minus `asDayJS` (replaced by `asDate`, a named
 		// deviation so no date library becomes part of rune's contract).

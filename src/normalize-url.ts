@@ -1,7 +1,7 @@
 /**
- * URL normalisation, as VineJS's `normalizeUrl()` performs it.
+ * URL normalisation, as upstream's `normalizeUrl()` performs it.
  *
- * VineJS delegates to the `normalize-url` package. rune has zero runtime
+ * upstream delegates to the `normalize-url` package. rune has zero runtime
  * dependencies, so the algorithm is transcribed here from normalize-url 9.0.1 —
  * same options, same defaults, same output.
  *

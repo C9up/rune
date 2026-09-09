@@ -2,16 +2,22 @@ import { describe, expect, it } from "vitest";
 import { createRule, rules, schema } from "../../src/index.js";
 
 /**
- * Cross-field / `.use()` rules (VineJS parity). These schemas always run on the
+ * Cross-field / `.use()` rules (upstream parity). These schemas always run on the
  * TS engine because a `.use()` rule cannot be serialized to Rust — the point of
  * these tests is precisely the JS FieldContext (root `data`, `parent`, `meta`,
  * `report`) that Rust never sees.
  */
 
 // A reusable "matches another field" rule — the canonical cross-field case.
+// It reports under a rule name the FRAMEWORK also ships, so the framework's
+// default template owns the text (upstream behaves the same way). The args are
+// what that template interpolates — omit them and the message renders with a
+// hole where the other field's name belongs.
 const sameAs = createRule<string>((value, otherField, field) => {
 	if (value !== field.data[otherField]) {
-		field.report(`Must match ${otherField}`, "sameAs");
+		field.report(`Must match ${otherField}`, "sameAs", undefined, {
+			otherField,
+		});
 	}
 });
 
@@ -41,7 +47,9 @@ describe("rune > cross-field (.use)", () => {
 		expect(r.errors).toContainEqual({
 			field: "passwordConfirmation",
 			rule: "sameAs",
-			message: "Must match password",
+			message:
+				"The passwordConfirmation field and password field must be the same",
+			meta: { otherField: "password" },
 		});
 	});
 
@@ -178,7 +186,7 @@ describe("rune > .use coexists with legacy rules", () => {
 	it("standard + custom + use rules all run together", () => {
 		const s = schema({
 			// bail(false): the point here is that all three registers run, which by
-			// definition needs the exhaustive mode (VineJS bails per field by default).
+			// definition needs the exhaustive mode (upstream bails per field by default).
 			code: rules
 				.string()
 				.bail(false)

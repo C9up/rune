@@ -17,7 +17,7 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
 ///
 /// Rust's `f64` parser is not the same function: it does not read the `0x` /
 /// `0b` / `0o` prefixes that JS does, so `"0x10"` came back refused here while
-/// the TypeScript path — which calls `Number()` and is the VineJS behaviour —
+/// the TypeScript path — which calls `Number()` and is the upstream behaviour —
 /// coerced it to 16. Same schema, same input, two verdicts, decided by whether
 /// the application happened to install a messages provider.
 ///
@@ -89,15 +89,15 @@ pub struct FieldSchema {
     pub optional: bool,
     #[serde(default)]
     pub transforms: Vec<String>, // e.g., ["trim"]
-    /// Stop at this field's first failing rule (VineJS `FieldOptions.bail`,
+    /// Stop at this field's first failing rule (upstream `FieldOptions.bail`,
     /// which defaults to `true`). Defaults to `true` here too so a payload
-    /// omitting the flag behaves like VineJS rather than reporting every rule.
+    /// omitting the flag behaves like upstream rather than reporting every rule.
     #[serde(default = "default_bail")]
     pub bail: bool,
 }
 
-/// serde default for [`FieldSchema::bail`] — VineJS bails per field by default.
-/// Character check backing `alpha` / `alphaNumeric`, honouring the VineJS
+/// serde default for [`FieldSchema::bail`] — upstream bails per field by default.
+/// Character check backing `alpha` / `alphaNumeric`, honouring the upstream
 /// options. These rules are in STANDARD_RULES, so a schema using them is routed
 /// here — implementing the options only on the TS side would have made them
 /// silently inert whenever the native binary was loadable.
@@ -195,7 +195,7 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
             }
         }
 
-        // Coerce before validating, mirroring the TS path: VineJS accepts "32"
+        // Coerce before validating, mirroring the TS path: upstream accepts "32"
         // for a number and "on"/"true" for a boolean unless the rule is strict.
         // Both engines must agree, otherwise the same schema behaves differently
         // depending on whether the native binary happened to load.
@@ -879,7 +879,7 @@ mod tests {
 
     #[test]
     fn bail_stops_at_the_first_failing_rule() {
-        // VineJS bails per field by default; the engine must agree with the TS
+        // upstream bails per field by default; the engine must agree with the TS
         // path, otherwise the same schema reports differently depending on
         // whether the native binary happened to be loadable.
         let mut schema = HashMap::new();
@@ -922,7 +922,7 @@ mod tests {
 
     #[test]
     fn bail_defaults_to_true_when_absent_from_the_payload() {
-        // An older caller that omits the flag must get VineJS behaviour, not the
+        // An older caller that omits the flag must get upstream behaviour, not the
         // exhaustive mode that silently diverged from it.
         let req: ValidationRequest = serde_json::from_str(
             r#"{"schema":{"code":{"rules":[{"name":"minLength","params":{"min":5}},{"name":"alphaNumeric"}]}},"data":{"code":"a!"}}"#,

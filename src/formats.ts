@@ -1,7 +1,7 @@
 /**
- * Format validators backing the VineJS string/number/array rules.
+ * Format validators backing the upstream string/number/array rules.
  *
- * VineJS delegates these to `validator.js`. rune has zero runtime dependencies,
+ * upstream delegates these to `validator.js`. rune has zero runtime dependencies,
  * so each check is implemented here. The per-locale tables (mobile numbers,
  * postal codes, passports, VAT) are transcribed in `tables.ts`, and an unknown
  * locale **fails closed** rather than waving the value through — an unchecked
@@ -119,7 +119,7 @@ export function isPostalCode(v: string, countryCode: string): boolean | null {
 }
 
 /**
- * The locale-less check behind `mobile()` with no `locale` — VineJS's `"any"`:
+ * The locale-less check behind `mobile()` with no `locale` — upstream's `"any"`:
  * the number matches SOME numbering plan.
  *
  * Named addition: a well-formed E.164 number is also accepted, so a number for
@@ -129,7 +129,7 @@ export const isMobile = (v: string): boolean =>
 	Object.values(MOBILE_LOCALES).some((re) => re.test(v)) ||
 	E164_RE.test(v.replace(/[ .-]/g, ""));
 
-/** HTML-escape the five characters that break out of markup (VineJS `escape`). */
+/** HTML-escape the five characters that break out of markup (upstream `escape`). */
 export function escapeHtml(v: string): string {
 	return v
 		.replace(/&/g, "&amp;")
@@ -144,7 +144,7 @@ export function escapeHtml(v: string): string {
 
 /**
  * Options accepted by `normalizeEmail`, in validator.js's spelling — the names
- * VineJS forwards. Every one defaults to `true`, as it does there: normalising
+ * upstream forwards. Every one defaults to `true`, as it does there: normalising
  * is what the caller asked for, so the provider-specific rules are ON and an
  * option is how you turn one OFF.
  */
@@ -292,7 +292,7 @@ const OUTLOOK_DOMAINS = [
 
 /**
  * Normalise an address to the form its provider actually delivers to
- * (VineJS `normalizeEmail`, which delegates to validator.js).
+ * (upstream `normalizeEmail`, which delegates to validator.js).
  *
  * Named deviation: validator.js returns `false` when the rules empty the local
  * part. That can only happen for an address `email()` would already have
@@ -393,7 +393,7 @@ export function isPassport(v: string, countryCode: string): boolean | null {
 	return re.test(v.replace(/\s/g, "").toUpperCase());
 }
 
-/** Options accepted by `alpha()` / `alphaNumeric()` (VineJS spelling). */
+/** Options accepted by `alpha()` / `alphaNumeric()` (upstream spelling). */
 export interface AlphaOptions {
 	allowSpaces?: boolean;
 	allowUnderscores?: boolean;
@@ -409,7 +409,7 @@ export function alphaPattern(base: string, options: AlphaOptions = {}): RegExp {
 	return new RegExp(`^[${base}${extra}]+$`);
 }
 
-/** Options accepted by `url()` — the validator.js names VineJS forwards. */
+/** Options accepted by `url()` — the validator.js names upstream forwards. */
 export interface UrlOptions {
 	/** validator.js spelling — takes precedence over the camelCase alias. */
 	require_protocol?: boolean;
@@ -431,7 +431,7 @@ export function isUrlWithOptions(
 	value: string,
 	options: UrlOptions = {},
 ): boolean {
-	// VineJS forwards validator.js options verbatim, so a transcribed Adonis
+	// upstream forwards validator.js options verbatim, so a transcribed Adonis
 	// validator arrives in snake_case. Both spellings are honoured, snake_case
 	// first, so neither form is silently ignored.
 	const requireProtocol =
@@ -475,7 +475,7 @@ export function isMobileForLocale(v: string, locale: string): boolean | null {
 }
 
 /**
- * Options accepted by `email()` — the validator.js names VineJS forwards.
+ * Options accepted by `email()` — the validator.js names upstream forwards.
  * Implemented here rather than delegated: rune carries no runtime dependency,
  * so every check it claims to do, it does itself.
  */
@@ -639,7 +639,7 @@ export function isEmail(value: string, options: EmailOptions = {}): boolean {
 	return true;
 }
 
-/** Options accepted by `vat()` (VineJS 4.2 `vatRule`). */
+/** Options accepted by `vat()` (upstream 4.2 `vatRule`). */
 export interface VatOptions {
 	countryCode: string | string[];
 }
@@ -655,11 +655,11 @@ export const SUPPORTED_VAT_COUNTRIES = Object.keys(VAT_RULES);
  * against the value AS WRITTEN and against a form stripped of separators and
  * uppercased.
  *
- * `pattern` is the country's shape as VineJS validates it. `legacy` is the
+ * `pattern` is the country's shape as upstream validates it. `legacy` is the
  * shape rune validated before those were transcribed — kept because the two
- * disagree in both directions (VineJS's `GB` demands the spaces, rune's `IE`
+ * disagree in both directions (upstream's `GB` demands the spaces, rune's `IE`
  * knows the old-style number) and dropping either would refuse numbers one of
- * them accepts today. Matching as written is what VineJS does; the stripped
+ * them accepts today. Matching as written is what upstream does; the stripped
  * retry is rune's own tolerance, and it is why `BY` still works — its prefix
  * carries a space no register writes twice.
  */

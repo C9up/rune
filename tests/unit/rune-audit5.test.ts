@@ -54,14 +54,14 @@ describe("rune > audit 5", () => {
 		expect(() => rules.file({ size: "2 bananas" })).toThrow(RuneError);
 	});
 
-	it("range takes the VineJS tuple", () => {
+	it("range takes the upstream tuple", () => {
 		const s = schema({ age: rules.number().range([18, 60]) });
 		expect(s.validateResult({ age: 30 }).valid).toBe(true);
 		expect(s.validateResult({ age: 17 }).valid).toBe(false);
 		expect(s.validateResult({ age: 61 }).valid).toBe(false);
 	});
 
-	it("parse() receives the VineJS context", () => {
+	it("parse() receives the upstream context", () => {
 		let seen: Record<string, unknown> = {};
 		const s = schema({
 			currency: rules.string(),
@@ -262,7 +262,7 @@ describe("rune > audit 6", () => {
 		expect("issues" in bad && bad.issues[0]?.path).toEqual(["a"]);
 	});
 
-	it("exposes vine.helpers", () => {
+	it("exposes the helpers namespace", () => {
 		expect(rune.helpers.isTrue("on")).toBe(true);
 		expect(rune.helpers.isFalse("0")).toBe(true);
 		// "off" and "no" are not on upstream's negative list, "yes" is not on
@@ -412,7 +412,7 @@ describe("rune > audit 7 — object composition, introspection, JSON Schema", ()
 		});
 		const v = create(userSchema);
 		const chain = v.schema;
-		// VineJS keeps the compiled object schema, not a bare field map.
+		// upstream keeps the compiled object schema, not a bare field map.
 		expect(chain).toBeInstanceOf(Object);
 		if (chain instanceof Object && "partial" in chain) {
 			const relaxed = create((chain as ReturnType<typeof rules.any>).partial());
@@ -498,7 +498,7 @@ describe("rune > audit 7 — object composition, introspection, JSON Schema", ()
 	});
 });
 
-describe("rune > nativeFile fluent API (VineJS)", () => {
+describe("rune > nativeFile fluent API (upstream)", () => {
 	it("chains minSize / maxSize / mimeTypes", async () => {
 		// mimeTypes() turns the content check on, so the payload carries real bytes
 		// and the schema runs async. The fluent form names the failing constraint.
@@ -518,15 +518,15 @@ describe("rune > nativeFile fluent API (VineJS)", () => {
 		expect(
 			(await run({ size: 100, type: "application/pdf", buffer: PDF })).errors[0]
 				?.rule,
-		).toBe("minSize");
+		).toBe("nativeFile.minSize");
 		expect(
 			(await run({ size: 5_000_000, type: "application/pdf", buffer: PDF }))
 				.errors[0]?.rule,
-		).toBe("maxSize");
+		).toBe("nativeFile.maxSize");
 		expect(
 			(await run({ size: 5000, type: "image/png", buffer: PDF })).errors[0]
 				?.rule,
-		).toBe("mimeTypes");
+		).toBe("nativeFile.mimeTypes");
 	});
 });
 
@@ -540,7 +540,7 @@ describe("rune > audit 8 — les trois derniers manques", () => {
 					field.report("Must be even", "even");
 				}
 			},
-			// VineJS metadata is a MODIFIER, not a static fragment: it receives the
+			// upstream metadata is a MODIFIER, not a static fragment: it receives the
 			// node built from the declarative rules and returns the node to use.
 			{ toJSONSchema: (node) => ({ ...node, multipleOf: 2 }) },
 		);
@@ -634,9 +634,9 @@ describe("rune > audit 8 — les trois derniers manques", () => {
 	});
 });
 
-describe("rune > audit 8 — formes exactes de l'API Vine 4.x", () => {
-	it("errorReporter accepte la FABRIQUE de Vine et l'observer", () => {
-		// Vine: `errorReporter: () => ErrorReporterContract`. Une fabrique est
+describe("rune > audit 8 — the exact shapes of the upstream 4.x API", () => {
+	it("errorReporter accepts upstream's FACTORY and the observer", () => {
+		// upstream: `errorReporter: () => ErrorReporterContract`. A factory is
 		// distinguée d'un observer par l'ARITÉ, jamais en l'appelant pour voir.
 		const collected: string[] = [];
 		const reporter = () => ({
@@ -673,7 +673,7 @@ describe("rune > audit 8 — formes exactes de l'API Vine 4.x", () => {
 		expect(v.validateResult({}).valid).toBe(false);
 	});
 
-	it("toCamelCase() dispatche sur la forme, comme Vine", () => {
+	it("toCamelCase() dispatches on the shape, as upstream does", () => {
 		// Sur un objet : les CLÉS.
 		const keys = schema({
 			u: rules.any().object({ first_name: rules.string() }).toCamelCase(),
@@ -690,8 +690,8 @@ describe("rune > audit 8 — formes exactes de l'API Vine 4.x", () => {
 	});
 
 	it("helpers.optional() rend un record de propriétés à spreader", () => {
-		// VineJS garde ce transformateur sous `helpers`; `optional()` au niveau
-		// racine est un TYPE de schéma (VineOptional), pas un transformateur.
+		// upstream garde ce transformateur sous `helpers`; `optional()` au niveau
+		// root is a schema TYPE upstream, not a transformer.
 		const shape = { id: rules.number(), name: rules.string() };
 		const v = schema({
 			u: rules.any().object({ ...rune.helpers.optional(shape) }),
@@ -728,7 +728,7 @@ describe("rune > audit 9 — contrat du reporter, types optional/null, JSON Sche
 			rows: rules.array(rules.any().object({ email: rules.string() })),
 		});
 		v.errorReporter = factory;
-		// VineJS : c'est createError() du reporter qui produit l'erreur finale.
+		// upstream : c'est createError() du reporter qui produit l'erreur finale.
 		expect(() => v.validateOrThrow({ rows: [{ email: 1 }] })).toThrow(MyError);
 		expect(seen[0]?.path).toBe("rows.0.email");
 		expect(seen[0]?.name).toBe("email");
@@ -771,7 +771,7 @@ describe("rune > audit 9 — contrat du reporter, types optional/null, JSON Sche
 	});
 
 	it("optional() et null() sont des TYPES de schéma", () => {
-		// VineJS builder.d.ts:135/144 — pas des modificateurs.
+		// upstream builder.d.ts:135/144 — pas des modificateurs.
 		const opt = schema({ a: rune.optional() });
 		expect(opt.validateResult({}).valid).toBe(true);
 		expect(opt.validateResult({ a: 1 }).valid).toBe(false);
@@ -831,7 +831,7 @@ describe("rune > audit 10 — confirmed(as), ~standard.jsonSchema, vat, meta", (
 		});
 		const res = v.validateResult({ password: "a", passwordConfirm: "b" });
 		expect(res.valid).toBe(false);
-		// VineJS reporte là où l'utilisateur doit corriger.
+		// upstream reporte là où l'utilisateur doit corriger.
 		expect(res.errors[0]?.field).toBe("passwordConfirm");
 		expect(res.errors[0]?.rule).toBe("confirmed");
 		// L'alias déprécié marche toujours.
@@ -848,7 +848,7 @@ describe("rune > audit 10 — confirmed(as), ~standard.jsonSchema, vat, meta", (
 		expect(v["~standard"].jsonSchema.input()).toMatchObject({
 			properties: { a: { type: "string", minLength: 2 } },
 		});
-		// output() REFUSES, as VineJS's does: a transform can produce anything,
+		// output() REFUSES, as upstream's does: a transform can produce anything,
 		// so a schema claiming to describe the result would be a guess. rune used
 		// to hand back the INPUT schema, which was that guess dressed as an
 		// answer.
@@ -902,7 +902,7 @@ describe("rune > audit 11 — root failures and file content", () => {
 	const PNG = new Uint8Array([
 		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13,
 	]);
-	/** A reporter that decides its own failure shape, as VineJS lets it. */
+	/** A reporter that decides its own failure shape, as upstream lets it. */
 	const reporterFactory = () => ({
 		hasErrors: true,
 		createError: () => new Error("from the reporter"),
@@ -1107,7 +1107,7 @@ describe("rune > audit 13 — async rules and the messages provider", () => {
 	});
 
 	it("the messages provider receives a FIELD CONTEXT, not a path string", () => {
-		// A provider transcribed from the VineJS convention reads getFieldPath(),
+		// A provider transcribed from the upstream convention reads getFieldPath(),
 		// name and wildCardPath off the field. rune handed it a string, so all
 		// three came back undefined.
 		const seen: Array<Record<string, unknown>> = [];
@@ -1186,11 +1186,11 @@ describe("rune > audit 13 — async rules and the messages provider", () => {
 });
 
 describe("rune > audit 14", () => {
-	it("{ async: true } — the spelling VineJS documents — awaits the rule", async () => {
-		// VineJS's docs show `vine.createRule(fn, { async: true })`; its code reads
+	it("{ async: true } — the spelling upstream documents — awaits the rule", async () => {
+		// upstream's docs show `createRule(fn, { async: true })`; its code reads
 		// only `isAsync`, so upstream builds this rule SYNCHRONOUS and drops the
 		// Promise: the payload validates while the rule is still refusing it.
-		// Verified against @vinejs/vine 4.4.0, which returns the value unchanged.
+		// Verified against the upstream package 4.4.0, which returns the value unchanged.
 		const rejects = createRule(
 			(_value: unknown, _options: undefined, field) =>
 				new Promise<void>((resolve) => {

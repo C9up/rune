@@ -1,5 +1,5 @@
 /**
- * The predicate surface a custom rule writes against — VineJS `vine.helpers`.
+ * The predicate surface a custom rule writes against — upstream `helpers`.
  *
  * A rule built with `createRule` gets a value and has to decide. These are the
  * checks it would otherwise reimplement: the boolean coercions, the format

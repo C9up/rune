@@ -68,9 +68,9 @@ describe("rune > audit 3 regressions", () => {
 		expect(res.errors[0]?.rule).toBe("asyncRequired");
 	});
 
-	it("accepts a FieldContext as report()'s third argument, like VineJS", () => {
+	it("accepts a FieldContext as report()'s third argument, like upstream", () => {
 		const plugin = createRule((_v, _o, field) => {
-			// A VineJS plugin passes the context itself, not a path string.
+			// A upstream plugin passes the context itself, not a path string.
 			field.report("Boom", "ported", field);
 		});
 		const s = schema({
@@ -82,7 +82,7 @@ describe("rune > audit 3 regressions", () => {
 	});
 });
 
-describe("rune > number/boolean coercion (VineJS)", () => {
+describe("rune > number/boolean coercion (upstream)", () => {
 	it("coerces a numeric string and keeps the coerced value", () => {
 		const s = schema({ age: rules.number().min(18) });
 		const out = s.validateOrThrow({ age: "25" });
@@ -132,7 +132,7 @@ describe("rune > number/boolean coercion (VineJS)", () => {
 	});
 });
 
-describe("rune > object composition and the Vine entrypoint shapes", () => {
+describe("rune > object composition and the upstream entrypoint shapes", () => {
 	const shape = () =>
 		rules.any().object({
 			id: rules.number(),
@@ -142,7 +142,7 @@ describe("rune > object composition and the Vine entrypoint shapes", () => {
 
 	it("pick / omit return spreadable properties, partial returns a schema", () => {
 		const base = shape();
-		// VineJS types these `Pick<Properties, Keys>` / `Omit<…>`: a properties
+		// upstream types these `Pick<Properties, Keys>` / `Omit<…>`: a properties
 		// RECORD, so the idiomatic composition is a spread.
 		const picked = base.pick(["id", "name"]);
 		expect(Object.keys(picked)).toEqual(["id", "name"]);
@@ -172,14 +172,14 @@ describe("rune > object composition and the Vine entrypoint shapes", () => {
 		expect(() => rules.string().pick(["a"])).toThrow(/object\(\) shape/);
 	});
 
-	it("create() and compile() accept rune.object(...) like vine does", () => {
+	it("create() and compile() accept rune.object(...) as upstream does", () => {
 		const v = create(rules.any().object({ n: rules.number() }));
 		expect(v.validateOrThrow({ n: "7" })).toEqual({ n: 7 });
 		const c = compile(rules.any().object({ n: rules.number() }));
 		expect(c.validateOrThrow({ n: 7 })).toEqual({ n: 7 });
 	});
 
-	it("the default export offers the one-shot Vine helpers", async () => {
+	it("the default export offers the one-shot helpers", async () => {
 		expect(
 			await rune.validate({ schema: { n: rune.number() }, data: { n: "12" } }),
 		).toEqual({ n: 12 });

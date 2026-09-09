@@ -17,7 +17,7 @@
  *
  * ## Named deviation: this subpath is `/testing`, not `/factories`
  *
- * VineJS ships the same capability as `@vinejs/vine/factories` — `fieldContext`
+ * upstream ships the same capability as `the upstream test factories` — `fieldContext`
  * plus a `ValidatorFactory` whose `execute` / `executeAsync` run one rule. rune
  * keeps the capability and drops the name: every package in this repo puts its
  * test surface on `/testing` (`@c9up/ream/testing`, `@c9up/atlas/testing`), and
@@ -25,10 +25,10 @@
  * `fieldContext` → {@link fieldContext}, `execute` → {@link runRule},
  * `executeAsync` → {@link runRuleAsync}.
  *
- * There is deliberately no `VineString` / `VineNumber` / `VineObject`
- * equivalent to export: rune has no per-type class to hand out — a chain starts
- * with `rules.string()` and stays one object. Those names are upstream's product
- * identity, which this package mirrors in shape and never in naming.
+ * There is deliberately no per-type class to export the way upstream does:
+ * rune has none to hand out — a chain starts with `rules.string()` and stays
+ * one object. Those class names are upstream's product identity, which this
+ * package mirrors in shape and never in naming.
  */
 
 import { RuneError } from "./errors.js";

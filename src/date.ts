@@ -1,9 +1,9 @@
 /**
- * Date parsing for `rules.date()` — VineJS `vine.date()` parity.
+ * Date parsing for `rules.date()` — upstream `date()` parity.
  *
- * VineJS delegates parsing to dayjs. rune has **zero runtime dependencies** and
+ * upstream delegates parsing to dayjs. rune has **zero runtime dependencies** and
  * keeps it that way, so the formats it accepts are implemented here: ISO 8601,
- * unix timestamps, and a small token grammar covering the shapes VineJS users
+ * unix timestamps, and a small token grammar covering the shapes upstream users
  * actually pass (`DD/MM/YYYY`, `YYYY-MM-DD HH:mm:ss`, …).
  *
  * Every parse is calendar-strict: `2026-02-31` and `2026-13-01` match the
@@ -229,7 +229,7 @@ export function parseWithFormat(value: string, format: string): Date | null {
 /**
  * Parse a value against the configured formats. `Date` instances pass straight
  * through (already parsed); numbers and numeric strings are read as timestamps
- * only when the `x`/`X` format is enabled, matching VineJS.
+ * only when the `x`/`X` format is enabled, matching upstream.
  */
 export function parseDateValue(
 	value: unknown,
@@ -278,7 +278,7 @@ export function startOfDay(date: Date): Date {
 	return d;
 }
 
-/** Granularity of a date comparison (VineJS `{ compare }`, dayjs units). */
+/** Granularity of a date comparison (upstream `{ compare }`, dayjs units). */
 export type CompareUnit =
 	| "millisecond"
 	| "second"
@@ -290,7 +290,7 @@ export type CompareUnit =
 
 /**
  * Truncate a date to `unit`, so a comparison ignores everything finer.
- * VineJS compares at DAY granularity by default (`options.compare || "day"`),
+ * upstream compares at DAY granularity by default (`options.compare || "day"`),
  * which is why a bare `after('today')` is about the date, not the clock.
  */
 export function truncateTo(date: Date, unit: CompareUnit): number {

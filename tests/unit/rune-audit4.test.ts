@@ -70,7 +70,7 @@ describe("rune > audit 4", () => {
 			email: rules.string().email(),
 			age: rules.number().optional(),
 		});
-		// VineJS shape is `{ schema, refs }`, not a flat field map.
+		// upstream shape is `{ schema, refs }`, not a flat field map.
 		expect(v.toJSON()).toEqual({
 			schema: {
 				email: { rules: ["string", "email"], optional: false, nullable: false },
@@ -92,7 +92,7 @@ describe("rune > audit 4", () => {
 		expect(
 			v.validateResult({ name: "Ada" }, { meta: { tenantId: 3 } }).valid,
 		).toBe(true);
-		// Omitting metadata must be refused by the COMPILER (VineJS parity) — the
+		// Omitting metadata must be refused by the COMPILER (upstream parity) — the
 		// expect-error fails the build if that stops being true — and still guarded
 		// at runtime for a JS caller.
 		// @ts-expect-error withMetaData<T>() makes `meta` required
@@ -106,7 +106,7 @@ describe("rune > audit 4", () => {
 	});
 
 	it("createRule({ isAsync: true }) builds an awaited rule usable via .use()", async () => {
-		// VineJS expresses async as an option on createRule; honouring it means
+		// upstream expresses async as an option on createRule; honouring it means
 		// BUILDING the async rule, and `.use()` routing it to the awaited register.
 		let ran = false;
 		const slow = createRule(

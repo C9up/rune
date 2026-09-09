@@ -6,7 +6,7 @@
 
 export type { DateFormat } from "./date.js";
 /**
- * Namespace import, mirroring `import { errors } from '@vinejs/vine'` — Adonis
+ * Namespace import, mirroring `import { errors } from 'the upstream package'` — Adonis
  * code catches on `errors.E_VALIDATION_ERROR`, so the namespace has to exist at
  * the root and not only on the subpath.
  */
@@ -95,7 +95,7 @@ import {
 /**
  * A validator whose entry points REQUIRE `{ meta }`.
  *
- * VineJS refuses `validate(data)` once `withMetaData<T>()` declared metadata as
+ * upstream refuses `validate(data)` once `withMetaData<T>()` declared metadata as
  * required; keeping `meta` optional meant the guard existed at runtime but the
  * compiler still waved the missing-metadata call through.
  */
@@ -106,12 +106,13 @@ type WithRequiredMeta<V, M> = {
 };
 
 /**
- * Default export, mirroring `import vine from '@vinejs/vine'`.
+ * Default export: one object carrying the whole surface, imported as
+ * `import rune from "@c9up/rune"`.
  *
- * Named `rune`, not `vine` — the deviation is the package name, nothing else:
+ * The name is the deviation and the only one:
  * the type factories (`rune.string()`, `rune.date()`, …) and the validator
  * factories (`rune.create`, `rune.compile`) sit on one object exactly like
- * VineJS, so an Adonis validator transcribes line for line.
+ * upstream, so an Adonis validator transcribes line for line.
  */
 const rune = {
 	...rules,
@@ -120,7 +121,7 @@ const rune = {
 	compile,
 	createRule,
 	createAsyncRule,
-	// `group` carries its branch factories, mirroring `vine.group.if/else`.
+	// `group` carries its branch factories, mirroring `group.if/else`.
 	group: Object.assign(group, {
 		if: groupIf,
 		else: groupElse,
@@ -132,7 +133,7 @@ const rune = {
 	setDateTransform,
 	setValidationTranslator,
 	/**
-	 * Convert `""` to `null` before validating (VineJS
+	 * Convert `""` to `null` before validating (upstream
 	 * `convertEmptyStringsToNull`). An HTML form posts empty inputs as `""`, and
 	 * an optional field should read that as "absent", not as a present empty
 	 * string that fails `minLength`.
@@ -144,13 +145,13 @@ const rune = {
 		return getConvertEmptyStringsToNull();
 	},
 	/**
-	 * Predicate helpers VineJS exposes as `vine.helpers`, for writing custom
+	 * Predicate helpers upstream exposes as `helpers`, for writing custom
 	 * rules without reimplementing the same checks. The implementations, and the
 	 * three deviations rune keeps, live in `./helpers.js`.
 	 */
 	helpers: {
 		...runeHelpers,
-		/** Make every property of a shape optional (VineJS `helpers.optional`). */
+		/** Make every property of a shape optional (upstream `helpers.optional`). */
 		optional: (props: Record<string, RuleChain>): Record<string, RuleChain> =>
 			Object.fromEntries(
 				Object.entries(props).map(([key, chain]) => [
@@ -159,7 +160,7 @@ const rune = {
 				]),
 			),
 	},
-	/** One-shot validation, VineJS `vine.validate({ schema, data })`. */
+	/** One-shot validation, upstream `validate({ schema, data })`. */
 	validate<T extends Record<string, RuleChain>>(
 		options: { schema: T | RuleChain; data: unknown } & ValidateOptions,
 	) {
@@ -168,7 +169,7 @@ const rune = {
 		const { schema: fields, data, ...validateOptions } = options;
 		return create(fields as T).validate(data, validateOptions);
 	},
-	/** One-shot non-throwing validation, VineJS `vine.tryValidate`. */
+	/** One-shot non-throwing validation, upstream `tryValidate`. */
 	tryValidate<T extends Record<string, RuleChain>>(
 		options: { schema: T | RuleChain; data: unknown } & ValidateOptions,
 	) {
@@ -178,7 +179,7 @@ const rune = {
 		return create(fields as T).tryValidate(data, validateOptions);
 	},
 	/**
-	 * Type the `meta` passed to `validate(data, { meta })` (VineJS
+	 * Type the `meta` passed to `validate(data, { meta })` (upstream
 	 * `withMetaData`). Purely a typing seam — rune carries meta on the call.
 	 */
 	withMetaData<M extends Record<string, unknown>>(
@@ -227,18 +228,18 @@ const rune = {
 			});
 			return wrapped as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
 		}
-		// VineJS exposes BOTH spellings behind withMetaData; `compile` is the
+		// upstream exposes BOTH spellings behind withMetaData; `compile` is the
 		// one its own documentation uses, and it was missing here.
 		return { create: build, compile: build };
 	},
-	/** Process-wide error reporter (VineJS `vine.errorReporter`). */
+	/** Process-wide error reporter (upstream `errorReporter`). */
 	set errorReporter(reporter: Parameters<typeof setGlobalErrorReporter>[0],) {
 		setGlobalErrorReporter(reporter);
 	},
 	get errorReporter(): ReturnType<typeof getGlobalErrorReporter> {
 		return getGlobalErrorReporter();
 	},
-	/** Bind the global messages provider (VineJS `vine.messagesProvider`). */
+	/** Bind the global messages provider (upstream `messagesProvider`). */
 	set messagesProvider(provider: MessagesProviderContract | null) {
 		setGlobalMessagesProvider(provider);
 	},

@@ -11,6 +11,7 @@ import {
 	resolveOperand,
 	truncateTo,
 } from "./date.js";
+import { messages as defaultMessages, requiredMessage } from "./defaults.js";
 import type { RuneErrorNode } from "./errors.js";
 import { RuneError, RuneValidationError } from "./errors.js";
 import {
@@ -50,7 +51,7 @@ import type {
 	MessageFieldContext,
 	MessagesProviderContract,
 } from "./MessagesProvider.js";
-import { toWildcardPath } from "./MessagesProvider.js";
+import { interpolate, toWildcardPath } from "./MessagesProvider.js";
 import {
 	detectFileType,
 	extensionMatches,
@@ -73,17 +74,17 @@ export interface ValidationError {
 	field: string;
 	rule: string;
 	message: string;
-	/** Array index when the field is an array item (VineJS parity). */
+	/** Array index when the field is an array item (upstream parity). */
 	index?: number;
 	/** Rule metadata carried for reporters/i18n (e.g. `{ min: 3 }`). */
 	meta?: Record<string, unknown>;
 }
 
 /**
- * Field context handed to `.use()` rules — mirrors VineJS's field context. It
+ * Field context handed to `.use()` rules — mirrors upstream's field context. It
  * exposes the value plus the surrounding data so a rule can validate across
  * fields (e.g. `password === passwordConfirmation`), and a `report()` sink to
- * raise errors (VineJS reports instead of returning a boolean).
+ * raise errors (upstream reports instead of returning a boolean).
  */
 export interface FieldContext {
 	/** The current field value (post-transform). */
@@ -99,7 +100,7 @@ export interface FieldContext {
 	/** `true` while no error has been reported for this field yet. */
 	isValid: boolean;
 	/**
-	 * Last path segment — `city` for `address.city` (VineJS `name`).
+	 * Last path segment — `city` for `address.city` (upstream `name`).
 	 *
 	 * A NUMBER for an array item: `tags.0` has `name === 0`, not `"0"`. A rule
 	 * that branches on `typeof field.name === "number"` to tell an item from a
@@ -114,12 +115,12 @@ export interface FieldContext {
 	isDefined: boolean;
 	/** `true` when the value passed its type rule. */
 	isValidDataType: boolean;
-	/** The full dotted path — same value as {@link field}, VineJS spelling. */
+	/** The full dotted path — same value as {@link field}, upstream spelling. */
 	getFieldPath(): string;
-	/** Replace the value under validation (VineJS `mutate`). */
+	/** Replace the value under validation (upstream `mutate`). */
 	mutate(newValue: unknown): void;
 	/**
-	 * Report a validation failure. `field` and `args` are optional (VineJS
+	 * Report a validation failure. `field` and `args` are optional (upstream
 	 * passes four arguments); omitting them reports against this field with no
 	 * interpolation data.
 	 */
@@ -132,7 +133,7 @@ export interface FieldContext {
 }
 
 /**
- * A `.use()` rule validator — VineJS shape `(value, options, field)`. Report
+ * A `.use()` rule validator — upstream shape `(value, options, field)`. Report
  * failures via `field.report(...)`; the return value is ignored.
  */
 export type RuleValidator<Options = undefined> = (
@@ -144,7 +145,7 @@ export type RuleValidator<Options = undefined> = (
 /** A compiled `.use()` rule produced by {@link createRule}. */
 export interface CompiledRule {
 	readonly __rune: "rule";
-	/** Run even on `undefined`/`null` (VineJS implicit rules). */
+	/** Run even on `undefined`/`null` (upstream implicit rules). */
 	readonly implicit?: boolean;
 	readonly name?: string;
 	/** Modifier applied to this field's JSON Schema node. */
@@ -155,7 +156,7 @@ export interface CompiledRule {
 }
 
 /**
- * Turn a validator function into a reusable `.use()` rule — VineJS's
+ * Turn a validator function into a reusable `.use()` rule — upstream's
  * `createRule`. Returns a factory: call it with the rule's options to get a
  * `CompiledRule`, then attach it with `chain.use(rule(options))`.
  *
@@ -170,8 +171,8 @@ export interface CompiledRule {
  *     })
  */
 /**
- * Options accepted by {@link createRule} / {@link createAsyncRule} — VineJS
- * `vine.createRule(fn, { implicit, isAsync })`.
+ * Options accepted by {@link createRule} / {@link createAsyncRule} — upstream
+ * `createRule(fn, { implicit, isAsync })`.
  */
 export interface CreateRuleOptions {
 	/**
@@ -183,21 +184,21 @@ export interface CreateRuleOptions {
 	/** Rule name reported in errors when the validator does not pass one. */
 	name?: string;
 	/**
-	 * VineJS `toJSONSchema?: JsonSchemaModifier` — a FUNCTION receiving the node
+	 * upstream `toJSONSchema?: JsonSchemaModifier` — a FUNCTION receiving the node
 	 * built so far (plus the rule's options) and returning the modified node.
 	 * A static fragment could only ever add keys; a modifier can also narrow or
 	 * replace what the base rules produced.
 	 */
 	toJSONSchema?: JsonSchemaModifier;
 	/**
-	 * Declare the rule asynchronous (VineJS `{ isAsync: true }`).
+	 * Declare the rule asynchronous (upstream `{ isAsync: true }`).
 	 * {@link createAsyncRule} sets it; passing it to {@link createRule} routes
 	 * the rule to the async builder instead of silently producing a sync rule
 	 * whose Promise nobody awaits.
 	 */
 	isAsync?: boolean;
 	/**
-	 * The spelling VineJS DOCUMENTS for the same thing (`{ async: true }`).
+	 * The spelling upstream DOCUMENTS for the same thing (`{ async: true }`).
 	 * Its implementation reads only `isAsync`, so a rule written from the
 	 * documentation is built synchronous there and its Promise is dropped —
 	 * the rule reports into nothing and the payload validates. rune honours
@@ -212,7 +213,7 @@ type AsyncRuleFlag = { isAsync: true } | { async: true };
 // `isAsync: true` genuinely produces an AsyncCompiledRule — a different
 // discriminant (`__rune: "asyncRule"`) that `.use()` routes to the awaited
 // register. Saying otherwise, as a cast did, told the compiler the opposite of
-/** Was the validator declared `async`? Same test VineJS applies. */
+/** Was the validator declared `async`? Same test upstream applies. */
 function isAsyncFunction(fn: unknown): boolean {
 	return typeof fn === "function" && fn.constructor.name === "AsyncFunction";
 }
@@ -261,12 +262,12 @@ export function createRule<Options>(
 		ruleOptions?.async ||
 		isAsyncFunction(validator)
 	) {
-		// VineJS expresses "async" as an option on createRule, so honour it by
+		// upstream expresses "async" as an option on createRule, so honour it by
 		// BUILDING the async rule rather than refusing: `.use()` routes an
 		// async-marked rule to the awaited register.
 		//
 		// An `async` validator is routed there whether or not the option was
-		// passed — VineJS does the same (`metaData?.isAsync ||
+		// passed — upstream does the same (`metaData?.isAsync ||
 		// validator.constructor.name === "AsyncFunction"`). Without it the
 		// Promise was never awaited: the run reported `{ valid: true }` and the
 		// rule refused the value afterwards, into nothing.
@@ -329,7 +330,7 @@ export type PromiseRuleValidator<Options = undefined> = (
 /** A compiled async rule produced by {@link createAsyncRule}. */
 export interface AsyncCompiledRule {
 	readonly __rune: "asyncRule";
-	/** Run even on `undefined`/`null` (VineJS implicit rules). */
+	/** Run even on `undefined`/`null` (upstream implicit rules). */
 	readonly implicit?: boolean;
 	readonly name?: string;
 	/** Modifier applied to this field's JSON Schema node. */
@@ -380,16 +381,16 @@ export type ValidationResult<T = Record<string, unknown>> =
 
 /** Options for {@link ValidationSchema.validate}. */
 export interface ValidateOptions {
-	/** Runtime metadata exposed to `.use()` rules via `field.meta` (VineJS parity). */
+	/** Runtime metadata exposed to `.use()` rules via `field.meta` (upstream parity). */
 	meta?: Record<string, unknown>;
 	/**
-	 * VineJS-style messages provider. When supplied, default rule messages are
+	 * upstream-style messages provider. When supplied, default rule messages are
 	 * resolved through it (custom `.message()` overrides still win, and the
 	 * provider takes precedence over a globally bound translator).
 	 */
 	messagesProvider?: MessagesProviderContract;
 	/**
-	 * VineJS `errorReporter: () => ErrorReporterContract` — a FACTORY returning a
+	 * upstream `errorReporter: () => ErrorReporterContract` — a FACTORY returning a
 	 * reporter, so a transcribed Adonis reporter works as-is. A plain
 	 * `(error) => void` observer is also accepted.
 	 *
@@ -403,7 +404,7 @@ export interface ValidateOptions {
 }
 
 /**
- * VineJS `JsonSchemaModifier`: receives the JSON Schema node assembled from the
+ * upstream `JsonSchemaModifier`: receives the JSON Schema node assembled from the
  * declarative rules and returns the node to use instead.
  */
 export type JsonSchemaModifier = (
@@ -411,7 +412,7 @@ export type JsonSchemaModifier = (
 	options?: unknown,
 ) => Record<string, unknown>;
 
-/** VineJS `ErrorReporterContract`. */
+/** upstream `ErrorReporterContract`. */
 export interface ErrorReporterContract {
 	/** `true` once at least one error has been reported. */
 	hasErrors: boolean;
@@ -431,7 +432,7 @@ export type ErrorReporterFactory = () => ErrorReporterContract;
 
 /**
  * Normalise either accepted spelling into one "report this error" callback.
- * A factory is built ONCE per validation, so a stateful Vine reporter sees the
+ * A factory is built ONCE per validation, so a stateful upstream reporter sees the
  * whole run and can assemble its own error shape.
  */
 function toReporter(
@@ -456,7 +457,7 @@ function toReporter(
 	const built = (reporter as ErrorReporterFactory)();
 	return {
 		report(error) {
-			// VineJS hands the reporter a FieldContext, not a path string: a real
+			// upstream hands the reporter a FieldContext, not a path string: a real
 			// reporter reads `getFieldPath()` / `name` / `wildCardPath` off it.
 			built.report(
 				error.message,
@@ -470,7 +471,7 @@ function toReporter(
 }
 
 /**
- * The last segment of a dotted path, as the value VineJS puts on
+ * The last segment of a dotted path, as the value upstream puts on
  * `FieldContext.name` — a NUMBER for an array index, a string otherwise.
  */
 function fieldNameOf(path: string): string | number {
@@ -554,7 +555,7 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
 	/**
 	 * The object schema the validator was built from — always a chain, so
-	 * `validator.schema.partial()` / `.pick()` / `.omit()` work as in VineJS
+	 * `validator.schema.partial()` / `.pick()` / `.omit()` work as in upstream
 	 * whichever form `create()` received. The raw field map stays on
 	 * {@link fields}.
 	 */
@@ -566,7 +567,7 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	"~standard": {
 		version: 1;
 		vendor: string;
-		/** Standard JSON Schema v1 props (VineJS 4.3+). */
+		/** Standard JSON Schema v1 props (upstream 4.3+). */
 		jsonSchema: {
 			input(options?: JsonSchemaOptions): Record<string, unknown>;
 			output(options?: JsonSchemaOptions): Record<string, unknown>;
@@ -579,7 +580,7 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 		>;
 	};
 	/**
-	 * Error reporter for this validator (VineJS `validator.errorReporter`). A
+	 * Error reporter for this validator (upstream `validator.errorReporter`). A
 	 * per-call option still wins; this wins over the process-wide one.
 	 */
 	errorReporter:
@@ -587,17 +588,17 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 		| ((error: ValidationError) => void)
 		| null;
 	/**
-	 * Messages provider for this validator (VineJS `validator.messagesProvider`).
+	 * Messages provider for this validator (upstream `validator.messagesProvider`).
 	 * A per-call option still wins; this wins over the process-wide one.
 	 */
 	messagesProvider: MessagesProviderContract | null;
-	/** Introspection of the compiled schema — VineJS `{ schema, refs }` shape. */
+	/** Introspection of the compiled schema — upstream `{ schema, refs }` shape. */
 	toJSON(): { schema: SchemaIntrospection; refs: string[] };
-	/** JSON Schema for the compiled validator (VineJS `toJSONSchema`). */
+	/** JSON Schema for the compiled validator (upstream `toJSONSchema`). */
 	toJSONSchema(): Record<string, unknown>;
 	/**
 	 * Validate and return the payload, throwing {@link RuneValidationError} on
-	 * failure — the VineJS/Adonis contract (`validator.validate(data)`), async
+	 * failure — the upstream contract (`validator.validate(data)`), async
 	 * so a schema carrying `unique`/`exists` behaves like any other.
 	 *
 	 * The never-throwing, synchronous form rune also offers is
@@ -620,14 +621,14 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 		options?: ValidateOptions,
 	): Promise<ValidationResult<T>>;
 	/**
-	 * Throwing validation (VineJS/Adonis parity). Returns the validated data on
+	 * Throwing validation (upstream parity). Returns the validated data on
 	 * success; throws {@link RuneValidationError} (`E_VALIDATION_ERROR`, HTTP 422)
 	 * with a structured `.messages` array on failure.
 	 */
 	validateOrThrow(data: unknown, options?: ValidateOptions): T;
 	/**
 	 * Non-throwing validation returning `[error, null] | [null, data]`
-	 * (VineJS `tryValidate`).
+	 * (upstream `tryValidate`).
 	 */
 	tryValidate(
 		data: unknown,
@@ -664,7 +665,7 @@ interface PendingAsync {
 }
 
 /**
- * Global output mapper for `rules.date()` — VineJS's `VineDate.transform` seam.
+ * Global output mapper for `rules.date()` — upstream's date-transform seam.
  *
  * rune has zero runtime dependencies, so a validated date is a plain `Date`. A
  * consumer that wants its own type (e.g. a `@c9up/chronos` `DateTime`, which is
@@ -675,13 +676,13 @@ interface PendingAsync {
 let dateOutputTransform: ((value: Date) => unknown) | null = null;
 
 /**
- * Process-wide messages provider (VineJS `vine.messagesProvider`). A provider
+ * Process-wide messages provider (upstream `messagesProvider`). A provider
  * passed per call still wins — global is the fallback, not an override.
  */
 let globalMessagesProvider: MessagesProviderContract | null = null;
 
 /**
- * Process-wide error reporter (VineJS `vine.errorReporter = …`). A per-call
+ * Process-wide error reporter (upstream `errorReporter = …`). A per-call
  * option wins over a per-validator one, which wins over this.
  */
 let globalErrorReporter:
@@ -708,7 +709,7 @@ export function setGlobalErrorReporter(
  * keys is what makes a validated payload safe to hand to a mass assignment, so
  * this is that same rule applied to the one key name that is never data.
  *
- * NAMED DEVIATION (hardening): VineJS keeps it — its compiler emits a
+ * NAMED DEVIATION (hardening): upstream keeps it — its compiler emits a
  * `for…in` copy that assigns straight into the output, which replaces that
  * output's prototype outright. Parity here would mean shipping the bug.
  *
@@ -746,7 +747,7 @@ let hostResolver: HostResolver | null = null;
 /** See `rune.convertEmptyStringsToNull`. */
 let convertEmptyStringsToNull = false;
 
-/** Toggle the global `"" -> null` conversion (VineJS `convertEmptyStringsToNull`). */
+/** Toggle the global `"" -> null` conversion (upstream `convertEmptyStringsToNull`). */
 export function setConvertEmptyStringsToNull(enabled: boolean): void {
 	convertEmptyStringsToNull = enabled;
 }
@@ -873,7 +874,7 @@ function toDatabaseCheck(
 }
 
 /**
- * VineJS number coercion: a numeric string becomes a number, the rest is
+ * upstream number coercion: a numeric string becomes a number, the rest is
  * untouched.
  *
  * NAMED DEVIATION — an empty (or blank) string is left as-is, so `number()`
@@ -891,7 +892,7 @@ function coerceNumber(value: unknown): unknown {
 }
 
 /**
- * VineJS boolean coercion. It reads the SAME lists as `helpers.asBoolean`, so
+ * upstream boolean coercion. It reads the SAME lists as `helpers.asBoolean`, so
  * a custom rule and `boolean()` can never disagree about what `"1"` means.
  *
  * Deliberately not trimmed and not lowercased: doing either accepted `"TRUE"`,
@@ -903,9 +904,9 @@ function coerceBoolean(value: unknown): unknown {
 	return asBoolean(value) ?? value;
 }
 
-/** Options accepted by every date comparison (VineJS `{ compare, format }`). */
+/** Options accepted by every date comparison (upstream `{ compare, format }`). */
 export interface DateCompareOptions {
-	/** Granularity of the comparison. Defaults to `"day"`, like VineJS. */
+	/** Granularity of the comparison. Defaults to `"day"`, like upstream. */
 	compare?: CompareUnit;
 	/** Format used to parse the operand / sibling, when it is a string. */
 	format?: string;
@@ -1007,13 +1008,13 @@ function fileExtension(file: FileLike): string | null {
 }
 
 /**
- * What a `parse()` callback receives besides the value — VineJS's
+ * What a `parse()` callback receives besides the value — upstream's
  * `ParseFn = (value, ctx: Pick<FieldContext, 'data' | 'parent' | 'meta'>)`.
  */
 export type ParseContext = Pick<FieldContext, "data" | "parent" | "meta">;
 
 /**
- * A conditional set of properties merged into an object (VineJS `vine.group`).
+ * A conditional set of properties merged into an object (upstream `group`).
  * The first branch whose predicate matches contributes its shape; `otherwise`
  * is the unconditional fallback.
  */
@@ -1026,7 +1027,7 @@ export interface ConditionalGroup {
 }
 
 /**
- * Called when no union branch matched (VineJS `UnionNoMatchCallback`). Report
+ * Called when no union branch matched (upstream `UnionNoMatchCallback`). Report
  * through the field context; reporting nothing suppresses the generic error.
  */
 export type UnionNoMatchCallback = (
@@ -1035,7 +1036,7 @@ export type UnionNoMatchCallback = (
 ) => void;
 
 /**
- * Called with a record's keys (VineJS `RecordKeysCallback`). Report through the
+ * Called with a record's keys (upstream `RecordKeysCallback`). Report through the
  * field context; reporting nothing accepts the key set.
  */
 export type RecordKeysCallback = (keys: string[], field: FieldContext) => void;
@@ -1133,37 +1134,42 @@ function chainToJSONSchema(
 					? { min: "minProperties", max: "maxProperties" }
 					: { min: "minLength", max: "maxLength" };
 		for (const rule of chain.rules) {
-			const type = JSON_SCHEMA_TYPES[rule.name];
+			// A namespaced rule (`array.minLength`) means the same constraint as
+			// the bare one; the container it applies to is already resolved
+			// above. Match on the local half so namespacing a rule name never
+			// silently drops its JSON Schema constraint.
+			const localName = rule.name.slice(rule.name.lastIndexOf(".") + 1);
+			const type = JSON_SCHEMA_TYPES[localName];
 			if (type !== undefined) node.type = type;
 			const args = rule.args ?? {};
-			if (rule.name === "minLength") {
+			if (localName === "minLength") {
 				node[lengthKeys.min] = args.min ?? rule.param;
 			}
-			if (rule.name === "maxLength") {
+			if (localName === "maxLength") {
 				node[lengthKeys.max] = args.max ?? rule.param;
 			}
-			if (rule.name === "fixedLength") {
+			if (localName === "fixedLength") {
 				node[lengthKeys.min] = args.length ?? rule.param;
 				node[lengthKeys.max] = args.length ?? rule.param;
 			}
-			if (rule.name === "min") node.minimum = args.min ?? rule.param;
-			if (rule.name === "max") node.maximum = args.max ?? rule.param;
-			if (rule.name === "range") {
+			if (localName === "min") node.minimum = args.min ?? rule.param;
+			if (localName === "max") node.maximum = args.max ?? rule.param;
+			if (localName === "range") {
 				node.minimum = args.min;
 				node.maximum = args.max;
 			}
-			if (rule.name === "email") node.format = "email";
-			if (rule.name === "uuid") node.format = "uuid";
-			if (rule.name === "url") node.format = "uri";
-			if (rule.name === "date") node.format = "date-time";
-			if (rule.name === "regex" && typeof args.pattern === "string") {
+			if (localName === "email") node.format = "email";
+			if (localName === "uuid") node.format = "uuid";
+			if (localName === "url") node.format = "uri";
+			if (localName === "date") node.format = "date-time";
+			if (localName === "regex" && typeof args.pattern === "string") {
 				node.pattern = args.pattern;
 			}
-			if (rule.name === "enum" && Array.isArray(args.values)) {
+			if (localName === "enum" && Array.isArray(args.values)) {
 				node.enum = args.values;
 			}
-			if (rule.name === "literal" && "value" in args) {
-				// `enum` with a single member, as VineJS emits it: `const` says the
+			if (localName === "literal" && "value" in args) {
+				// `enum` with a single member, as upstream emits it: `const` says the
 				// same thing but only from draft 6 on, and a consumer reading an
 				// older dialect would drop the constraint silently.
 				node.enum = [args.value];
@@ -1171,39 +1177,39 @@ function chainToJSONSchema(
 				if (literalType !== undefined) node.type = literalType;
 			}
 			// A list of allowed values is an `enum`, whatever the value type.
-			if (rule.name === "in" && Array.isArray(args.values)) {
+			if (localName === "in" && Array.isArray(args.values)) {
 				node.enum = args.values;
 			}
-			if (rule.name === "boolean" && args.strict !== true) {
+			if (localName === "boolean" && args.strict !== true) {
 				// Non-strict `boolean()` accepts the string and numeric spellings
 				// too, so claiming `type: "boolean"` describes a validator that does
-				// not exist. rune's list carries `"off"`, which VineJS's does not.
+				// not exist. rune's list carries `"off"`, which upstream's does not.
 				node.enum = BOOLEAN_JSON_SCHEMA_VALUES;
 				delete node.type;
 			}
-			if (rule.name === "notEmpty") node.minItems = 1;
-			if (rule.name === "distinct") node.uniqueItems = true;
-			if (rule.name === "withoutDecimals") node.type = "integer";
-			if (rule.name === "positive") node.exclusiveMinimum = 0;
-			if (rule.name === "negative") node.exclusiveMaximum = 0;
-			if (rule.name === "nonNegative") node.minimum = 0;
-			if (rule.name === "nonPositive") node.maximum = 0;
-			if (rule.name === "nullType") node.type = "null";
-			if (rule.name === "ulid") node.pattern = "^[0-7][0-9A-HJKMNP-TV-Z]{25}$";
-			if (rule.name === "alpha" || rule.name === "alphaNumeric") {
+			if (localName === "notEmpty") node.minItems = 1;
+			if (localName === "distinct") node.uniqueItems = true;
+			if (localName === "withoutDecimals") node.type = "integer";
+			if (localName === "positive") node.exclusiveMinimum = 0;
+			if (localName === "negative") node.exclusiveMaximum = 0;
+			if (localName === "nonNegative") node.minimum = 0;
+			if (localName === "nonPositive") node.maximum = 0;
+			if (localName === "nullType") node.type = "null";
+			if (localName === "ulid") node.pattern = "^[0-7][0-9A-HJKMNP-TV-Z]{25}$";
+			if (localName === "alpha" || localName === "alphaNumeric") {
 				// The options widen the character class, so a pattern that ignores
 				// them refuses values the validator accepts.
-				const base = rule.name === "alpha" ? "a-zA-Z" : "a-zA-Z0-9";
+				const base = localName === "alpha" ? "a-zA-Z" : "a-zA-Z0-9";
 				node.pattern = `^[${base}${alphaExtraCharacters(args)}]+$`;
 			}
-			if (rule.name === "hexCode") {
+			if (localName === "hexCode") {
 				// `format: "color"` is not a JSON Schema format — no validator
 				// enforces it, so the constraint was being dropped.
 				node.pattern = "^#?([0-9a-f]{6}|[0-9a-f]{3}|[0-9a-f]{8})$";
 			}
-			if (rule.name === "ipAddress")
+			if (localName === "ipAddress")
 				node.format = args.version === 6 ? "ipv6" : "ipv4";
-			if (rule.name === "file" || rule.name === "nativeFile") {
+			if (localName === "file" || localName === "nativeFile") {
 				node.type = "string";
 				node.contentEncoding = "binary";
 			}
@@ -1295,7 +1301,7 @@ function isConditionalGroup(
 	return "__rune" in value && value.__rune === "group";
 }
 
-/** Build a conditional group (VineJS `vine.group([...])`). */
+/** Build a conditional group (upstream `group([...])`). */
 export function group(
 	branches: ReadonlyArray<{
 		predicate: ((data: Record<string, unknown>) => boolean) | null;
@@ -1305,7 +1311,7 @@ export function group(
 	return { __rune: "group", branches };
 }
 
-/** A predicate-guarded group branch (`vine.group.if`). */
+/** A predicate-guarded group branch (`group.if`). */
 export function groupIf(
 	predicate: (data: Record<string, unknown>) => boolean,
 	shape: Record<string, RuleChain>,
@@ -1316,7 +1322,7 @@ export function groupIf(
 	return { predicate, shape };
 }
 
-/** The unconditional fallback branch (`vine.group.else` / `.otherwise`). */
+/** The unconditional fallback branch (`group.else` / `.otherwise`). */
 export function groupElse(shape: Record<string, RuleChain>): {
 	predicate: null;
 	shape: Record<string, RuleChain>;
@@ -1324,7 +1330,7 @@ export function groupElse(shape: Record<string, RuleChain>): {
 	return { predicate: null, shape };
 }
 
-/** A union branch guarded by a predicate — `vine.union.if(...)`. */
+/** A union branch guarded by a predicate — `union.if(...)`. */
 export interface ConditionalBranch {
 	/** `null` for an unconditional branch (`union.else`). */
 	predicate: ((value: unknown, field: FieldContext) => boolean) | null;
@@ -1342,7 +1348,7 @@ function toUnionBranch(branch: UnionBranch): ConditionalBranch {
 }
 
 /**
- * Guarded union branch (VineJS `vine.union.if`). The predicate picks the branch;
+ * Guarded union branch (upstream `union.if`). The predicate picks the branch;
  * the chosen branch's OWN errors are reported, which is what makes a union
  * diagnosable — "matches nothing" tells the caller nothing about which shape it
  * nearly matched.
@@ -1354,16 +1360,16 @@ export function unionIf(
 	return { predicate, chain };
 }
 
-/** Fallback union branch (VineJS `vine.union.else`). */
+/** Fallback union branch (upstream `union.else`). */
 export function unionElse(chain: RuleChain): ConditionalBranch {
 	return { predicate: null, chain };
 }
 
-/** The checkbox-style truthies VineJS `accepted` recognises. */
+/** The checkbox-style truthies upstream `accepted` recognises. */
 const ACCEPTED_VALUES: readonly unknown[] = ["on", "1", "yes", "true", true, 1];
 
 /**
- * VineJS `accepted`. The list is CASE-SENSITIVE upstream, so `"YES"` is not an
+ * upstream `accepted`. The list is CASE-SENSITIVE upstream, so `"YES"` is not an
  * accepted value — lowercasing first silently widened what a consent checkbox
  * would take.
  */
@@ -1457,29 +1463,17 @@ const NATIVE_RULES: ReadonlySet<string> = new Set([
 ]);
 
 /** Default messages for standard rules — used only for translator-key fallback. */
-const STANDARD_MSGS: Readonly<Record<string, string>> = {
-	string: "Must be a string",
-	number: "Must be a number",
-	boolean: "Must be a boolean",
-	min: "Minimum",
-	max: "Maximum",
-	email: "Must be a valid email",
-	positive: "Must be positive",
-	minLength: "Too short",
-	maxLength: "Too long",
-	fixedLength: "Wrong length",
-	alpha: "Must contain only letters",
-	alphaNumeric: "Must contain only letters and numbers",
-	startsWith: "Invalid prefix",
-	endsWith: "Invalid suffix",
-	uuid: "Must be a valid UUID",
-	in: "Invalid value",
-	notIn: "Invalid value",
-	enum: "Invalid value",
-	range: "Out of range",
-	negative: "Must be negative",
-	nonNegative: "Must be positive or zero",
-};
+/**
+ * Types that prefix a rule they share with another type. Upstream reports an
+ * array's `minLength` as `array.minLength` — the name IS the key a messages
+ * provider and a translator look up, so reporting the bare name silently made
+ * every `array.minLength` message a caller wrote unreachable.
+ */
+const SIZED_OWNERS: ReadonlySet<string> = new Set(["array", "record"]);
+/** File types, which prefix their size and mime rules the same way. */
+const FILE_OWNERS: ReadonlySet<string> = new Set(["file", "nativeFile"]);
+/** The date type prefixes every one of its comparison rules. */
+const DATE_OWNER: ReadonlySet<string> = new Set(["date"]);
 
 const TYPE_RULE_NAMES: ReadonlySet<string> = new Set([
 	"string",
@@ -1487,7 +1481,7 @@ const TYPE_RULE_NAMES: ReadonlySet<string> = new Set([
 	"boolean",
 	"object",
 	"array",
-	// `optional()` / `null()` are schema TYPES in VineJS, not modifiers.
+	// `optional()` / `null()` are schema TYPES in upstream, not modifiers.
 	"optionalType",
 	"nullType",
 ]);
@@ -1517,7 +1511,7 @@ function ruleArgs(rule: RuleDef): Record<string, unknown> | undefined {
 /**
  * The field context a messages provider is handed.
  *
- * VineJS passes the whole `FieldContext`, and a provider transcribed from there
+ * upstream passes the whole `FieldContext`, and a provider transcribed from there
  * reads `getFieldPath()`, `name` or `wildCardPath` off it. rune used to pass
  * the path string, so every one of those reads came back `undefined`.
  */
@@ -1532,10 +1526,28 @@ function messageFieldContext(field: string): MessageFieldContext {
 /**
  * Resolve the final message for a failing rule. Precedence:
  *   1. explicit `.message()` override (always wins),
- *   2. a per-call {@link MessagesProviderContract} (VineJS parity),
+ *   2. a per-call {@link MessagesProviderContract} (upstream parity),
  *   3. a globally bound translator (rune's rosetta superset),
  *   4. the rule's raw default message.
  */
+function defaultTemplate(rule: RuleDef): string {
+	// The catalogue owns the default text; `rule.message` is what a rule with
+	// no catalogue entry (a `.use()` rule, anything a caller built) carries.
+	return defaultMessages[rule.name] ?? rule.message;
+}
+
+/** Interpolation data for a default template: the field label, then the args. */
+function templateData(
+	field: string,
+	args?: Record<string, unknown>,
+): Record<string, unknown> {
+	// `field` is the LAST segment, not the whole path — upstream renders
+	// `a.b` as "The b field ...", and a provider mapping labels reads the same
+	// way. Args come after so a rule reporting against another field can put
+	// its own `field` in and win.
+	return { field: fieldNameOf(field), ...args };
+}
+
 function resolveRuleMessage(
 	field: string,
 	rule: RuleDef,
@@ -1546,17 +1558,19 @@ function resolveRuleMessage(
 	}
 
 	const args = ruleArgs(rule);
+	const template = defaultTemplate(rule);
 	if (ctx.messagesProvider) {
 		return ctx.messagesProvider.getMessage(
-			rule.message,
+			template,
 			rule.name,
 			messageFieldContext(field),
 			args,
 		);
 	}
 
+	const rendered = interpolate(template, templateData(field, args));
 	if (!STANDARD_RULES.has(rule.name)) {
-		return rule.message;
+		return rendered;
 	}
 
 	const params: ValidationMessageParams = { field };
@@ -1566,30 +1580,99 @@ function resolveRuleMessage(
 		if (rule.name === "max" || rule.name === "maxLength")
 			params.max = rule.param;
 	}
-	// STANDARD_MSGS is the last-resort default for a standard rule: a rule object
-	// built without a message (or with an empty one) still gets the canonical
-	// text rather than an empty error. `rule.message` wins when it carries one.
-	return resolveValidationMessage(
-		`validation.${rule.name}`,
-		rule.message || STANDARD_MSGS[rule.name] || rule.name,
-		params,
-	);
+	return resolveValidationMessage(`validation.${rule.name}`, rendered, params);
 }
 
 /** Resolve the "required" message through provider → translator → fallback. */
 function resolveRequiredMessage(field: string, ctx: RunContext): string {
+	const template = requiredMessage;
 	if (ctx.messagesProvider) {
 		return ctx.messagesProvider.getMessage(
-			`${field} is required`,
+			template,
 			"required",
 			messageFieldContext(field),
 		);
 	}
 	return resolveValidationMessage(
 		"validation.required",
-		`${field} is required`,
+		interpolate(template, templateData(field)),
 		{ field },
 	);
+}
+
+/** The path a `report()` blames — its third argument when it names another. */
+function reportedFieldPath(
+	reportedField: string | FieldContext | undefined,
+	fallback: string,
+): string {
+	if (typeof reportedField === "string") return reportedField;
+	return reportedField?.getFieldPath() ?? fallback;
+}
+
+/**
+ * Resolve a message a rule reported through `field.report()`.
+ *
+ * A `.use()` rule carries its text inside `run`, so this is the only point a
+ * messages provider or a translator can reach it. Without this step every
+ * cross-field rule — `sameAs`, `notSameAs`, `confirmed`, the `*Field` date
+ * comparisons — and every rule built with `createRule` answered in English no
+ * matter which provider was installed, while a value rule declared two lines
+ * away honoured it.
+ */
+function resolveReportedMessage(
+	field: string,
+	rawMessage: string,
+	rule: string,
+	args: Record<string, unknown> | undefined,
+	ctx: RunContext,
+): string {
+	const template = defaultMessages[rule] ?? rawMessage;
+	if (ctx.messagesProvider) {
+		return ctx.messagesProvider.getMessage(
+			template,
+			rule,
+			messageFieldContext(field),
+			args,
+		);
+	}
+	const rendered = interpolate(template, templateData(field, args));
+	// Only a rule this package ships gets a translation key. A rule a caller
+	// wrote has a name we did not choose, and inventing `validation.<name>` for
+	// it would collide with their own keys.
+	if (defaultMessages[rule] === undefined) {
+		return rendered;
+	}
+	return resolveValidationMessage(`validation.${rule}`, rendered, { field });
+}
+
+/**
+ * Re-render the messages the Rust engine produced from the catalogue the
+ * TypeScript path uses.
+ *
+ * The engine carries its own copy of the default text — it must, it renders
+ * without calling back into JavaScript. Leaving that copy user-visible meant
+ * one schema answered differently depending on whether the native binary had
+ * loaded, and changing a default message took an edit in two languages that
+ * nothing checked had stayed in step. The engine's own string survives only
+ * for a rule the catalogue does not name.
+ */
+function renderNativeMessages(
+	fields: Record<string, RuleChain>,
+	errors: readonly ValidationError[],
+): ValidationError[] {
+	return errors.map((error) => {
+		const template = defaultMessages[error.rule];
+		if (template === undefined) {
+			return error;
+		}
+		const args = fields[error.field]?.rules.find(
+			(rule) => rule.name === error.rule,
+		)?.args;
+		return {
+			...error,
+			message: interpolate(template, templateData(error.field, args)),
+		};
+	});
 }
 
 /** Compute once: does any field rule prevent dispatching to Rust? */
@@ -1661,18 +1744,18 @@ export function schema(
 	fields: Record<string, RuleChain>,
 	objectChain?: RuleChain,
 ): ValidationSchema<Record<string, unknown>> {
-	// Per-validator reporter (VineJS `validator.errorReporter = …`), overridable
-	// per call. Mutable on purpose: that is how Vine exposes it.
+	// Per-validator reporter (upstream `validator.errorReporter = …`), overridable
+	// per call. Mutable on purpose: that is how upstream exposes it.
 	let validatorErrorReporter:
 		| ErrorReporterFactory
 		| ((error: ValidationError) => void)
 		| null = null;
-	// Per-validator messages provider (VineJS `validator.messagesProvider = …`).
+	// Per-validator messages provider (upstream `validator.messagesProvider = …`).
 	// Sits between the per-call provider and the global one, exactly as the
 	// reporter does: the narrower scope wins.
 	let validatorMessagesProvider: MessagesProviderContract | null = null;
-	// Whatever the process had installed WHEN this validator was built. VineJS
-	// captures at compile() so a later `vine.messagesProvider = …` cannot reach
+	// Whatever the process had installed WHEN this validator was built. upstream
+	// captures at compile() so a later `messagesProvider = …` cannot reach
 	// back into a validator that already exists, and rune captures the same way.
 	//
 	// NAMED DEVIATION — the capture is only honoured when something WAS
@@ -1685,7 +1768,7 @@ export function schema(
 	const createdWithMessagesProvider = globalMessagesProvider;
 	const createdWithErrorReporter = globalErrorReporter;
 	// Set by the last run; the throwing entry points prefer the reporter's own
-	// error, because VineJS lets the reporter decide the failure shape.
+	// error, because upstream lets the reporter decide the failure shape.
 	let reporterError: (() => Error) | undefined;
 
 	// Computed once at construction time, not per validate() call.
@@ -1699,7 +1782,7 @@ export function schema(
 	/**
 	 * The root value is not an object.
 	 *
-	 * VineJS routes EVERY failure through the reporter, root included, and lets
+	 * upstream routes EVERY failure through the reporter, root included, and lets
 	 * it decide the error shape. Returning the verdict directly left a bound
 	 * reporter unaware of the failure, so `validateOrThrow(null)` threw rune's
 	 * own error and — worse — the PREVIOUS run's reporter error, because
@@ -1754,7 +1837,10 @@ export function schema(
 			undefined;
 		if (!hasCustomRules && !validationTranslator && !provider) {
 			if (isNativeAvailable()) {
-				const native = validateWithRust(fields, data);
+				const rust = validateWithRust(fields, data);
+				const native = rust.valid
+					? rust
+					: { ...rust, errors: renderNativeMessages(fields, rust.errors) };
 				// Report here too: the native path returns before the TS traversal,
 				// so instrumenting only the latter left the reporter silent exactly
 				// when the fast path was taken.
@@ -1829,7 +1915,7 @@ export function schema(
 	 * A reporter error that is NOT a validation failure is THROWN rather than
 	 * returned: `tryValidate` promises a tuple for a rejected payload, not for
 	 * anything at all going wrong, and widening the tuple to carry an arbitrary
-	 * Error is what would make it worthless. VineJS draws the line in the same
+	 * Error is what would make it worthless. upstream draws the line in the same
 	 * place — its `tryValidate` catches only its own ValidationError.
 	 */
 	function reportedFailure(
@@ -1851,7 +1937,7 @@ export function schema(
 		if (result.valid) {
 			return result.data;
 		}
-		// The reporter decides the failure shape when one is bound (VineJS).
+		// The reporter decides the failure shape when one is bound (upstream).
 		throw reporterError
 			? reporterError()
 			: new RuneValidationError(result.errors.map(toErrorNode));
@@ -1931,7 +2017,7 @@ export function schema(
 
 	/**
 	 * Non-throwing validation returning a `[error, null] | [null, data]` tuple
-	 * (VineJS `tryValidate`), for when a failure is an expected code path.
+	 * (upstream `tryValidate`), for when a failure is an expected code path.
 	 */
 	function tryValidateSync(
 		data: unknown,
@@ -1960,16 +2046,16 @@ export function schema(
 		if (result.valid) {
 			return result.data;
 		}
-		// The reporter decides the failure shape when one is bound (VineJS).
+		// The reporter decides the failure shape when one is bound (upstream).
 		throw reporterError
 			? reporterError()
 			: new RuneValidationError(result.errors.map(toErrorNode));
 	}
 
 	/**
-	 * The VineJS contract: async, returns the payload, throws on failure. A
+	 * The upstream contract: async, returns the payload, throws on failure. A
 	 * schema carrying async rules works here without the caller having to know,
-	 * which is the whole point of Vine's single entry point.
+	 * which is the whole point of upstream's single entry point.
 	 */
 	async function validate(
 		data: unknown,
@@ -1979,12 +2065,12 @@ export function schema(
 	}
 
 	/**
-	 * Introspection of the compiled schema (VineJS `toJSON`): field names and the
+	 * Introspection of the compiled schema (upstream `toJSON`): field names and the
 	 * rules attached to each, enough to render a form or diff two schemas.
 	 */
 	function toJSON(): { schema: SchemaIntrospection; refs: string[] } {
-		// VineJS shape: `{ schema, refs }`. The flat `{ field: { rules } }` map was
-		// rune's own invention, so a consumer written against Vine read undefined.
+		// upstream shape: `{ schema, refs }`. The flat `{ field: { rules } }` map was
+		// rune's own invention, so a consumer written against upstream read undefined.
 		return {
 			schema: introspect(fields),
 			refs: Object.keys(fields),
@@ -1992,7 +2078,7 @@ export function schema(
 	}
 
 	/**
-	 * Emit a JSON Schema for the compiled validator (VineJS `toJSONSchema`).
+	 * Emit a JSON Schema for the compiled validator (upstream `toJSONSchema`).
 	 * Covers the rules that HAVE a JSON Schema equivalent; a custom rule
 	 * contributes its `jsonSchema` metadata when it declares one, and is
 	 * otherwise omitted rather than guessed at.
@@ -2002,7 +2088,7 @@ export function schema(
 	}
 
 	/**
-	 * Standard Schema v1 (`~standard`), the vendor-neutral contract VineJS also
+	 * Standard Schema v1 (`~standard`), the vendor-neutral contract upstream also
 	 * implements — lets a consumer validate without knowing it holds a rune
 	 * schema.
 	 */
@@ -2010,7 +2096,7 @@ export function schema(
 		version: 1 as const,
 		vendor: "rune",
 		/**
-		 * Standard JSON Schema v1 (`~standard.jsonSchema`), added by VineJS 4.3.
+		 * Standard JSON Schema v1 (`~standard.jsonSchema`), added by upstream 4.3.
 		 * `input` describes what may be sent, `output` what validation returns.
 		 */
 		jsonSchema: {
@@ -2020,7 +2106,7 @@ export function schema(
 			},
 			// The OUTPUT type is not derivable: `transform()` and `parse()` take
 			// arbitrary callbacks, so a schema claiming to describe the result
-			// would be a guess. VineJS refuses here too, and returning the input
+			// would be a guess. upstream refuses here too, and returning the input
 			// schema instead was the lie this replaces.
 			output: (options?: JsonSchemaOptions): never => {
 				assertJsonSchemaTarget(options?.target);
@@ -2059,7 +2145,7 @@ export function schema(
 
 	return {
 		fields,
-		/** Per-validator error reporter (VineJS `validator.errorReporter`). */
+		/** Per-validator error reporter (upstream `validator.errorReporter`). */
 		get errorReporter() {
 			return validatorErrorReporter;
 		},
@@ -2069,7 +2155,7 @@ export function schema(
 			| null,) {
 			validatorErrorReporter = reporter;
 		},
-		/** Per-validator messages provider (VineJS `validator.messagesProvider`). */
+		/** Per-validator messages provider (upstream `validator.messagesProvider`). */
 		get messagesProvider() {
 			return validatorMessagesProvider;
 		},
@@ -2077,7 +2163,7 @@ export function schema(
 			validatorMessagesProvider = provider;
 		},
 		// ALWAYS a chain, even when the validator was built from a bare field map:
-		// VineJS documents `createUserValidator.schema.partial()`, and returning
+		// upstream documents `createUserValidator.schema.partial()`, and returning
 		// the map left that broken on the most common Adonis path.
 		schema: objectChain ?? new RuleChain().object(fields),
 		"~standard": standard,
@@ -2094,13 +2180,13 @@ export function schema(
 }
 
 /**
- * VineJS's `vine.create(...)`. Same thing as {@link schema} — the Adonis
+ * upstream's `create(...)`. Same thing as {@link schema} — the Adonis
  * spelling is provided so a validator reads the same in both frameworks.
  */
 /**
- * VineJS's `vine.create(...)`. Accepts either a map of fields (rune's native
+ * upstream's `create(...)`. Accepts either a map of fields (rune's native
  * spelling) or the `RuleChain` produced by `rune.object({...})`, because
- * `vine.create(vine.object({...}))` is the form Adonis documents.
+ * `create(rune.object({...}))` is the documented form.
  */
 export function create<S extends Record<string, RuleChain>>(
 	fields: S,
@@ -2161,7 +2247,7 @@ export interface RuleDef {
 	/** Interpolation args exposed to i18n/messages providers (e.g. `{ min: 3 }`). */
 	args?: Record<string, unknown>;
 	/**
-	 * `field` is the context VineJS hands a rule — a callback-valued rule
+	 * `field` is the context upstream hands a rule — a callback-valued rule
 	 * (`in`, `notIn`, `enum`) reads `meta`/`parent` off it to compute its list
 	 * per request. Rules that do not need it simply declare one parameter.
 	 */
@@ -2180,7 +2266,7 @@ export interface RuleDef {
 	toJSONSchema?: JsonSchemaModifier;
 }
 
-/** A conditional-required condition (VineJS `requiredWhen` family). */
+/** A conditional-required condition (upstream `requiredWhen` family). */
 interface RequiredCondition {
 	kind: "exists" | "missing" | "when";
 	otherField: string;
@@ -2198,7 +2284,7 @@ const UUID_RE =
 /** Rule chain — fluent, phantom-typed validation builder. */
 /**
  * The value list accepted by `in` / `notIn` / `enum` — static, or computed at
- * validation time (VineJS parity).
+ * validation time (upstream parity).
  */
 export type AllowedValues =
 	| ReadonlyArray<string | number | boolean>
@@ -2221,7 +2307,7 @@ export class RuleChain<Output = unknown> {
 	#isOptional = false;
 	#isNullable = false;
 	/**
-	 * VineJS validates a field in bail mode by DEFAULT — it stops at that field's
+	 * upstream validates a field in bail mode by DEFAULT — it stops at that field's
 	 * first failing rule (`FieldOptions.bail: true`). rune defaulted to `false`
 	 * and reported every failing rule, which silently produced a different error
 	 * array for the same schema. `.bail(false)` restores the exhaustive mode.
@@ -2233,7 +2319,7 @@ export class RuleChain<Output = unknown> {
 	}> = [];
 	#preTransforms: Array<(value: unknown, ctx: ParseContext) => unknown> = [];
 	/**
-	 * Type coercions (VineJS accepts `"32"` for a number). Kept OUT of
+	 * Type coercions (upstream accepts `"32"` for a number). Kept OUT of
 	 * `#preTransforms` on purpose: a pre-transform forces the TS path, and the
 	 * Rust engine implements the very same coercion from the rule's `strict`
 	 * param, so both engines agree without giving up the native path.
@@ -2360,7 +2446,7 @@ export class RuleChain<Output = unknown> {
 	get recordValue(): RuleChain | null {
 		return this.#recordValueChain;
 	}
-	/** Whether this chain stops at its first failing rule (VineJS `bail`). */
+	/** Whether this chain stops at its first failing rule (upstream `bail`). */
 	get bails(): boolean {
 		return this.#bail;
 	}
@@ -2448,7 +2534,7 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Stop at the first failing rule for this field (VineJS bail). */
+	/** Stop at the first failing rule for this field (upstream bail). */
 	bail(enabled = true): this {
 		this.#bail = enabled;
 		return this;
@@ -2489,7 +2575,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Must be a number. Like VineJS, a numeric STRING is coerced (`"32"` → `32`)
+	 * Must be a number. Like upstream, a numeric STRING is coerced (`"32"` → `32`)
 	 * — HTML form bodies and query strings carry numbers as text, so requiring
 	 * `typeof v === "number"` rejected the values Adonis accepts. Pass
 	 * `{ strict: true }` to refuse anything that is not already a number.
@@ -2507,7 +2593,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Must be a boolean. Like VineJS, `"true"`, `"false"`, `"on"`, `"off"`,
+	 * Must be a boolean. Like upstream, `"true"`, `"false"`, `"on"`, `"off"`,
 	 * `"1"`, `"0"`, `1` and `0` are coerced; `{ strict: true }` refuses them.
 	 */
 	boolean(options?: { strict?: boolean }): RuleChain<boolean> {
@@ -2522,7 +2608,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Must be a date (VineJS `vine.date()`). ISO 8601 by default; pass `formats`
+	 * Must be a date (upstream `date()`). ISO 8601 by default; pass `formats`
 	 * for unix timestamps (`x` = ms, `X` = seconds) or a token format such as
 	 * `DD/MM/YYYY`. Parsing is calendar-strict — `2026-02-31` is rejected.
 	 *
@@ -2577,7 +2663,7 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Must be after the date held by a sibling field (VineJS `afterField`). */
+	/** Must be after the date held by a sibling field (upstream `afterField`). */
 	afterField(otherField: string, options?: DateCompareOptions): this {
 		return this.#compareDateField(
 			"afterField",
@@ -2597,12 +2683,12 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Must be the same instant as `operand` (VineJS `equals`). */
+	/** Must be the same instant as `operand` (upstream `equals`). */
 	equals(operand: unknown, options?: DateCompareOptions): this {
 		return this.#compareDate("equals", operand, (a, b) => a === b, options);
 	}
 
-	/** Must be after the sibling's date, or the same instant (VineJS `afterOrSameAs`). */
+	/** Must be after the sibling's date, or the same instant (upstream `afterOrSameAs`). */
 	afterOrSameAs(otherField: string, options?: DateCompareOptions): this {
 		return this.#compareDateField(
 			"afterOrSameAs",
@@ -2622,10 +2708,10 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Must fall on a Saturday or Sunday (VineJS `weekend`). */
+	/** Must fall on a Saturday or Sunday (upstream `weekend`). */
 	weekend(): this {
 		this.#pushRule({
-			name: "weekend",
+			name: "date.weekend",
 			validate: (v) =>
 				v instanceof Date && (v.getDay() === 0 || v.getDay() === 6),
 			message: "Must be a weekend date",
@@ -2633,10 +2719,10 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Must fall on a Monday-to-Friday day (VineJS `weekday`). */
+	/** Must fall on a Monday-to-Friday day (upstream `weekday`). */
 	weekday(): this {
 		this.#pushRule({
-			name: "weekday",
+			name: "date.weekday",
 			validate: (v) => v instanceof Date && v.getDay() > 0 && v.getDay() < 6,
 			message: "Must be a weekday date",
 		});
@@ -2650,17 +2736,22 @@ export class RuleChain<Output = unknown> {
 		cmp: (a: number, b: number) => boolean,
 		options?: DateCompareOptions,
 	): this {
-		// VineJS: `options.compare || "day"`. A bare `after('today')` is about the
+		// upstream: `options.compare || "day"`. A bare `after('today')` is about the
 		// calendar date, not the clock — comparing exact timestamps made every
 		// same-day value fail a rule the caller read as "today or later".
 		const unit: CompareUnit = options?.compare ?? "day";
 		const formats = options?.format ? [options.format] : null;
 		this.#pushRule({
-			name,
+			name: `date.${name}`,
 			// A callable operand is resolved per validation, not once at build
 			// time — otherwise `after(() => Date.now())` would freeze the boundary
-			// at the moment the schema was declared (VineJS allows the callback).
-			args: typeof operand === "function" ? undefined : { operand },
+			// at the moment the schema was declared (upstream allows the callback).
+			// `expectedValue` is the token the default template reads; `operand`
+			// stays for anything already written against it.
+			args:
+				typeof operand === "function"
+					? undefined
+					: { operand, expectedValue: operand },
 			validate: (v) => {
 				const raw =
 					typeof operand === "function"
@@ -2694,13 +2785,20 @@ export class RuleChain<Output = unknown> {
 			run: (value, field) => {
 				const other = parseDateValue(readSibling(field, otherField), formats);
 				if (!(value instanceof Date) || other === null) {
-					field.report(`Cannot compare with ${otherField}`, name);
+					field.report(
+						`Cannot compare with ${otherField}`,
+						`date.${name}`,
+						undefined,
+						{ otherField },
+					);
 					return;
 				}
 				if (!cmp(truncateTo(value, unit), truncateTo(other, unit))) {
 					field.report(
 						`Must be ${name.replace("Field", "")} ${otherField}`,
-						name,
+						`date.${name}`,
+						undefined,
+						{ otherField },
 					);
 				}
 			},
@@ -2709,7 +2807,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Keep keys the object shape does not declare (VineJS
+	 * Keep keys the object shape does not declare (upstream
 	 * `allowUnknownProperties`). Off by default: dropping undeclared keys is what
 	 * makes a validated payload safe to hand to a mass assignment.
 	 */
@@ -2736,7 +2834,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Convert the object's KEYS to camelCase in the output (VineJS
+	 * Convert the object's KEYS to camelCase in the output (upstream
 	 * `object.toCamelCase()`), so a snake_case payload hydrates camelCase
 	 * properties. Distinct from the string `toCamelCase()`, which rewrites a
 	 * VALUE — that one was never a substitute for this.
@@ -2746,9 +2844,9 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Merge extra properties into this object's shape (VineJS `merge`). Accepts a
+	 * Merge extra properties into this object's shape (upstream `merge`). Accepts a
 	 * plain shape or a {@link ConditionalGroup} whose branch is chosen per
-	 * payload — `vine.group` in VineJS.
+	 * payload — `group` in upstream.
 	 */
 	merge(extra: Record<string, RuleChain> | ConditionalGroup): this {
 		if (!this.#nestedSchema) {
@@ -2766,7 +2864,7 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** The nested shape declared by `object()`, if any (VineJS `getProperties`). */
+	/** The nested shape declared by `object()`, if any (upstream `getProperties`). */
 	getProperties(): Record<string, RuleChain> | null {
 		// CLONE each chain, not just the map. A shallow copy shares the chain
 		// instances, so mutating one through the copy relaxes the source schema —
@@ -2780,15 +2878,15 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Independent copy of this chain (VineJS `clone`). */
+	/** Independent copy of this chain (upstream `clone`). */
 	clone(): RuleChain<Output> {
 		return this.#retype<Output>();
 	}
 
 	/**
-	 * A CLONED subset of the object's properties (VineJS `pick`).
+	 * A CLONED subset of the object's properties (upstream `pick`).
 	 *
-	 * Returns a properties record, not a schema — VineJS types it
+	 * Returns a properties record, not a schema — upstream types it
 	 * `Pick<Properties, Keys>` precisely so it composes by spread:
 	 * `rules.any().object({ ...userShape.pick(["id"]) })`. Returning a chain here
 	 * broke that idiom.
@@ -2797,7 +2895,7 @@ export class RuleChain<Output = unknown> {
 		return this.#subsetOfProperties((key) => keys.includes(key as K));
 	}
 
-	/** A cloned copy of the properties EXCLUDING `keys` (VineJS `omit`). */
+	/** A cloned copy of the properties EXCLUDING `keys` (upstream `omit`). */
 	omit<K extends string>(keys: readonly K[]): Record<string, RuleChain> {
 		return this.#subsetOfProperties((key) => !keys.includes(key as K));
 	}
@@ -2820,9 +2918,9 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Make every property of an object shape optional (VineJS `partial`).
+	 * Make every property of an object shape optional (upstream `partial`).
 	 *
-	 * Refuses a shape carrying groups or `allowUnknownProperties()`, as VineJS
+	 * Refuses a shape carrying groups or `allowUnknownProperties()`, as upstream
 	 * does: a group is a conditional set of properties that cannot stand alone
 	 * as optional, and relaxing one silently would produce a schema that accepts
 	 * a half-filled group.
@@ -2839,7 +2937,7 @@ export class RuleChain<Output = unknown> {
 		}
 		// `optional()` mutates and returns the SAME chain, so calling it on the
 		// stored properties made the source shape optional too — `base.partial()`
-		// silently relaxed `base`. Clone each property first, like VineJS does.
+		// silently relaxed `base`. Clone each property first, like upstream does.
 		return this.#reshape((shape) =>
 			Object.fromEntries(
 				Object.entries(shape).map(([key, chain]) => [
@@ -2872,7 +2970,7 @@ export class RuleChain<Output = unknown> {
 
 	/**
 	 * Must be an "accepted" value — `true`, `1`, `"1"`, `"on"`, `"yes"`,
-	 * `"true"` (VineJS `accepted`, for checkbox-style consent fields).
+	 * `"true"` (upstream `accepted`, for checkbox-style consent fields).
 	 */
 	accepted(): RuleChain<true> {
 		this.#pushRule({
@@ -2895,7 +2993,7 @@ export class RuleChain<Output = unknown> {
 
 	/**
 	 * Object with arbitrary keys, every value validated by `valueChain`
-	 * (VineJS `record`).
+	 * (upstream `record`).
 	 */
 	record<Item extends RuleChain>(
 		valueChain: Item,
@@ -2910,7 +3008,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Check the record's KEYS, not its values (VineJS `record().validateKeys()`).
+	 * Check the record's KEYS, not its values (upstream `record().validateKeys()`).
 	 *
 	 * The callback receives every key at once and reports through the field
 	 * context — the set is what matters when keys must be exclusive, exhaustive,
@@ -2922,7 +3020,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Fixed-length array with a schema per position (VineJS `tuple`). Extra
+	 * Fixed-length array with a schema per position (upstream `tuple`). Extra
 	 * items are rejected — a tuple that silently ignores a trailing element is
 	 * how unvalidated data slips through.
 	 */
@@ -2944,7 +3042,7 @@ export class RuleChain<Output = unknown> {
 	 *
 	 * Two forms, both supported:
 	 *
-	 * - guarded (VineJS parity): `union([rules.union.if(pred, chain), …,
+	 * - guarded (upstream parity): `union([rules.union.if(pred, chain), …,
 	 *   rules.union.else(fallback)])` — the predicate SELECTS the branch and
 	 *   that branch's own errors are reported, so a failure says which shape was
 	 *   meant and why it did not fit.
@@ -2952,7 +3050,7 @@ export class RuleChain<Output = unknown> {
 	 *   single `union` error rather than every losing branch's noise.
 	 */
 	/**
-	 * What to do when NO union branch matched (VineJS `union().otherwise()`).
+	 * What to do when NO union branch matched (upstream `union().otherwise()`).
 	 *
 	 * The callback receives the value and the field, and reports the error it
 	 * wants — the point being that "matches nothing" is a useless message when
@@ -2979,7 +3077,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Must be an uploaded file (VineJS/Adonis `vine.file()`).
+	 * Must be an uploaded file (upstream `file()`).
 	 *
 	 * Named deviation: Adonis validates a bodyparser `MultipartFile`, which rune
 	 * cannot import and stay agnostic. It checks the STRUCTURE instead — any
@@ -3031,7 +3129,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Uploaded file with VineJS `nativeFile` options — `minSize`, `maxSize`,
+	 * Uploaded file with upstream `nativeFile` options — `minSize`, `maxSize`,
 	 * `mimeTypes`. Same structural contract as {@link file}, and the same
 	 * guarantee: declaring `mimeTypes` is a SECURITY statement, so the leading
 	 * bytes are read and confronted with the declaration. The reported type is
@@ -3079,11 +3177,11 @@ export class RuleChain<Output = unknown> {
 		return this.#retype<FileLike>();
 	}
 
-	/** Minimum upload size (VineJS `nativeFile().minSize()`). */
+	/** Minimum upload size (upstream `nativeFile().minSize()`). */
 	minSize(size: number | string): this {
 		const min = parseByteSize(size);
 		this.#pushRule({
-			name: "minSize",
+			name: this.#namespaced("minSize", FILE_OWNERS),
 			args: { size },
 			validate: (v) => isFileLike(v) && v.size >= min,
 			message: `Must be at least ${size} in size`,
@@ -3091,11 +3189,11 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Maximum upload size (VineJS `nativeFile().maxSize()`). */
+	/** Maximum upload size (upstream `nativeFile().maxSize()`). */
 	maxSize(size: number | string): this {
 		const max = parseByteSize(size);
 		this.#pushRule({
-			name: "maxSize",
+			name: this.#namespaced("maxSize", FILE_OWNERS),
 			args: { size },
 			validate: (v) => isFileLike(v) && v.size <= max,
 			message: `Must be at most ${size} in size`,
@@ -3104,7 +3202,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Allowed MIME types (VineJS `nativeFile().mimeTypes()`).
+	 * Allowed MIME types (upstream `nativeFile().mimeTypes()`).
 	 *
 	 * This rule checks the type the upload REPORTS. Declaring the list also arms
 	 * the magic-number check, so the bytes have to agree — see
@@ -3115,7 +3213,7 @@ export class RuleChain<Output = unknown> {
 		this.#declaredMimeTypes = allowed;
 		this.#ensureContentVerification();
 		this.#pushRule({
-			name: "mimeTypes",
+			name: this.#namespaced("mimeTypes", FILE_OWNERS),
 			args: { types: allowed },
 			validate: (v) =>
 				isFileLike(v) &&
@@ -3243,7 +3341,7 @@ export class RuleChain<Output = unknown> {
 			| ((field: FieldContext) => readonly (string | number | boolean)[])
 			| Record<string, string | number>,
 	): RuleChain {
-		// A TypeScript `enum` compiles to a plain object, so `vine.enum(MyEnum)`
+		// A TypeScript `enum` compiles to a plain object, so `enum(MyEnum)`
 		// hands one over instead of a list. Iterating it as an array produced a
 		// TypeError; taking its VALUES is what upstream does.
 		//
@@ -3279,7 +3377,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * The choices this enum was declared with (VineJS `getChoices()`) — the list
+	 * The choices this enum was declared with (upstream `getChoices()`) — the list
 	 * itself, or the callback when it is computed per request.
 	 *
 	 * Reading them back is what lets a form render the same options the
@@ -3337,10 +3435,10 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Minimum length for a string or array (VineJS `minLength`). */
+	/** Minimum length for a string or array (upstream `minLength`). */
 	minLength(n: number): this {
 		this.#pushRule({
-			name: "minLength",
+			name: this.#namespaced("minLength", SIZED_OWNERS),
 			param: n,
 			args: { min: n },
 			validate: (v) => sizedLength(v) >= n,
@@ -3349,10 +3447,10 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Maximum length for a string or array (VineJS `maxLength`). */
+	/** Maximum length for a string or array (upstream `maxLength`). */
 	maxLength(n: number): this {
 		this.#pushRule({
-			name: "maxLength",
+			name: this.#namespaced("maxLength", SIZED_OWNERS),
 			param: n,
 			args: { max: n },
 			validate: (v) => {
@@ -3364,10 +3462,10 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Exact length for a string or array (VineJS `fixedLength`). */
+	/** Exact length for a string or array (upstream `fixedLength`). */
 	fixedLength(n: number): this {
 		this.#pushRule({
-			name: "fixedLength",
+			name: this.#namespaced("fixedLength", SIZED_OWNERS),
 			param: n,
 			args: { size: n },
 			validate: (v) => sizedLength(v) === n,
@@ -3430,7 +3528,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * The host must actually resolve (VineJS `activeUrl`).
+	 * The host must actually resolve (upstream `activeUrl`).
 	 *
 	 * The only rule needing the network, which rune cannot do and stay agnostic
 	 * and zero-dependency — so it runs through a resolver bound once at boot,
@@ -3466,7 +3564,7 @@ export class RuleChain<Output = unknown> {
 
 	/**
 	 * Must be a valid UUID, optionally restricted to given versions
-	 * (VineJS `uuid({ version: [4] })`, versions 1 through 8).
+	 * (upstream `uuid({ version: [4] })`, versions 1 through 8).
 	 */
 	uuid(options?: { version?: number | number[] }): this {
 		const versions =
@@ -3492,7 +3590,7 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Must be a ULID (VineJS `ulid`). */
+	/** Must be a ULID (upstream `ulid`). */
 	ulid(): this {
 		return this.#stringRule("ulid", isUlid, "Must be a valid ULID");
 	}
@@ -3502,7 +3600,7 @@ export class RuleChain<Output = unknown> {
 		return this.#stringRule("jwt", isJwt, "Must be a valid JWT");
 	}
 
-	/** Must contain only ASCII characters (VineJS `ascii`). */
+	/** Must contain only ASCII characters (upstream `ascii`). */
 	ascii(): this {
 		return this.#stringRule(
 			"ascii",
@@ -3518,7 +3616,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Must be an IP address. Pass `version` to require v4 or v6 specifically. */
 	ipAddress(options?: 4 | 6 | { version?: 4 | 6 }): this {
-		// VineJS spells this `ipAddress(6)`. The object form is rune's own and is
+		// upstream spells this `ipAddress(6)`. The object form is rune's own and is
 		// kept, because a schema written against it must keep working.
 		const version = typeof options === "number" ? options : options?.version;
 		return this.#stringRule(
@@ -3529,7 +3627,7 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Must pass the Luhn checksum (VineJS `creditCard`). */
+	/** Must pass the Luhn checksum (upstream `creditCard`). */
 	creditCard(): this {
 		return this.#stringRule(
 			"creditCard",
@@ -3553,10 +3651,10 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Must be a mobile number (VineJS/Adonis `mobile()`).
+	 * Must be a mobile number (upstream `mobile()`).
 	 *
 	 * With no `locale`, the number must be in E.164 form. With one or more,
-	 * it must match one of their numbering plans, as in VineJS. rune carries
+	 * it must match one of their numbering plans, as in upstream. rune carries
 	 * its own plans rather than validator.js', so it knows fewer locales — an
 	 * unknown one raises `UNSUPPORTED_LOCALE` at schema build, naming the ones
 	 * it does know, rather than silently accepting anything at request time.
@@ -3602,7 +3700,7 @@ export class RuleChain<Output = unknown> {
 					countryCode: string | string[];
 			  }),
 	): this {
-		// The callback form resolves per validation (VineJS lets the country come
+		// The callback form resolves per validation (upstream lets the country come
 		// from a sibling field), so its countries cannot be checked up front.
 		if (typeof options === "function") {
 			this.#pushUse({
@@ -3641,7 +3739,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Must be a valid VAT number (VineJS 4.2 `vat`). Accepts a country list or a
+	 * Must be a valid VAT number (upstream 4.2 `vat`). Accepts a country list or a
 	 * callback resolving it per payload.
 	 *
 	 * Checksums are run where the country defines a short, well-defined one
@@ -3686,9 +3784,10 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Must differ from a sibling field (VineJS `notSameAs`). */
+	/** Must differ from a sibling field (upstream `notSameAs`). */
 	notSameAs(otherField: string): this {
 		const formats = this.#dateFormats;
+		const ruleName = this.#namespaced("notSameAs", DATE_OWNER);
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
@@ -3696,29 +3795,42 @@ export class RuleChain<Output = unknown> {
 				if (formats !== null && value instanceof Date) {
 					const parsed = parseDateValue(other, formats);
 					if (parsed !== null && parsed.getTime() === value.getTime()) {
-						field.report(`Must be different from ${otherField}`, "notSameAs");
+						field.report(
+							`Must be different from ${otherField}`,
+							ruleName,
+							undefined,
+							{ otherField },
+						);
 					}
 					return;
 				}
 				if (value === other) {
-					field.report(`Must be different from ${otherField}`, "notSameAs");
+					field.report(
+						`Must be different from ${otherField}`,
+						ruleName,
+						undefined,
+						{ otherField },
+					);
 				}
 			},
 		});
 		return this;
 	}
 
-	/** Array items must be unique — optionally compared on `field` (VineJS `distinct`). */
+	/** Array items must be unique — optionally compared on `fields` (upstream `distinct`). */
 	distinct(field?: string | string[]): this {
 		this.#pushRule({
 			name: "distinct",
-			args: { field },
+			// Keyed `fields`, not `field`: a message template interpolates
+			// `{{ field }}` as the FAILING FIELD's label, so an arg by that name
+			// would overwrite it with the property this rule compares on.
+			args: { fields: field },
 			validate: (v) => {
 				if (!Array.isArray(v)) return false;
 				const fieldList = field === undefined ? null : [field].flat();
 				const keys: string[] = [];
 				for (const item of v) {
-					// VineJS ignores null/undefined items entirely: `[1, null, 2, null]`
+					// upstream ignores null/undefined items entirely: `[1, null, 2, null]`
 					// is distinct. Serialising them would make the second one a
 					// duplicate of the first.
 					if (item === null || item === undefined) continue;
@@ -3727,7 +3839,7 @@ export class RuleChain<Output = unknown> {
 						continue;
 					}
 					if (!isPlainObject(item)) continue;
-					// VineJS skips an item missing the key(s): two absent values are
+					// upstream skips an item missing the key(s): two absent values are
 					// not a duplicate of each other.
 					if (
 						fieldList.some((k) => item[k] === undefined || item[k] === null)
@@ -3745,7 +3857,7 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Must be less than or equal to zero (VineJS `nonPositive`). */
+	/** Must be less than or equal to zero (upstream `nonPositive`). */
 	nonPositive(): this {
 		this.#pushRule({
 			name: "nonPositive",
@@ -3755,7 +3867,7 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Array must hold at least one item (VineJS `notEmpty`). */
+	/** Array must hold at least one item (upstream `notEmpty`). */
 	notEmpty(): this {
 		this.#pushRule({
 			name: "notEmpty",
@@ -3779,7 +3891,7 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Number must have no fractional part (VineJS `withoutDecimals`). */
+	/** Number must have no fractional part (upstream `withoutDecimals`). */
 	withoutDecimals(): this {
 		this.#pushRule({
 			name: "withoutDecimals",
@@ -3827,25 +3939,24 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Lowercase the value (VineJS `toLowerCase`). */
+	/** Lowercase the value (upstream `toLowerCase`). */
 	toLowerCase(): this {
 		return this.#stringMutation("toLowerCase", (v) => v.toLowerCase());
 	}
 
-	/** Uppercase the value (VineJS `toUpperCase`). */
+	/** Uppercase the value (upstream `toUpperCase`). */
 	toUpperCase(): this {
 		return this.#stringMutation("toUpperCase", (v) => v.toUpperCase());
 	}
 
 	/**
-	 * VineJS `toCamelCase()`, on both shapes it exists for:
+	 * `toCamelCase()`, on both shapes it exists for:
 	 *
-	 * - on an `object()` chain it camelCases the object's KEYS
-	 *   (`VineObject.toCamelCase`);
-	 * - on any other chain it camelCases the string VALUE (`VineString`).
+	 * - on an `object()` chain it camelCases the object's KEYS;
+	 * - on any other chain it camelCases the string VALUE.
 	 *
-	 * One name, because Vine has one name. Dispatching on whether a nested shape
-	 * was declared is what keeps a transcribed validator behaving the same.
+	 * One name, because upstream has one name. Dispatching on whether a nested
+	 * shape was declared is what keeps a transcribed validator behaving the same.
 	 */
 	toCamelCase(): this {
 		if (this.#nestedSchema) {
@@ -3855,19 +3966,19 @@ export class RuleChain<Output = unknown> {
 		return this.#stringMutation("toCamelCase", toCamelCase);
 	}
 
-	/** HTML-escape the eight characters VineJS `escape` does. */
+	/** HTML-escape the eight characters upstream `escape` does. */
 	escape(): this {
 		return this.#stringMutation("escape", escapeHtml);
 	}
 
-	/** Normalise an email address (VineJS `normalizeEmail`). */
+	/** Normalise an email address (upstream `normalizeEmail`). */
 	normalizeEmail(options?: NormalizeEmailOptions): this {
 		return this.#stringMutation("normalizeEmail", (v) =>
 			normalizeEmail(v, options),
 		);
 	}
 
-	/** Normalise a URL (VineJS `normalizeUrl`). */
+	/** Normalise a URL (upstream `normalizeUrl`). */
 	normalizeUrl(options?: NormalizeUrlOptions): this {
 		return this.#stringMutation("normalizeUrl", (v) =>
 			normalizeUrl(v, options),
@@ -3932,7 +4043,7 @@ export class RuleChain<Output = unknown> {
 	/**
 	 * Value must be one of `values`.
 	 *
-	 * VineJS also accepts a callback so the list can be computed at validation
+	 * upstream also accepts a callback so the list can be computed at validation
 	 * time (tenant-scoped roles, values read from config…). A static array is
 	 * snapshotted; a callback is invoked on every check.
 	 */
@@ -3995,7 +4106,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Number must fall within `[min, max]` (inclusive). */
 	range(bounds: [min: number, max: number]): this {
-		// VineJS signature is a TUPLE (`range([18, 60])`); the two-argument form
+		// upstream signature is a TUPLE (`range([18, 60])`); the two-argument form
 		// silently dropped `max` when an Adonis validator was transcribed as-is.
 		const [min, max] = bounds;
 		this.#pushRule({
@@ -4009,7 +4120,7 @@ export class RuleChain<Output = unknown> {
 
 	/** Number must have at most `digits` decimal places (TS-only). */
 	decimal(digits: number | [number, number]): this {
-		// VineJS accepts a `[min, max]` range as well as a single maximum.
+		// upstream accepts a `[min, max]` range as well as a single maximum.
 		const [min, max] = Array.isArray(digits) ? digits : [0, digits];
 		this.#pushRule({
 			name: "decimal",
@@ -4026,9 +4137,10 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Must equal a sibling field (VineJS `sameAs`). Cross-field → TS-only. */
+	/** Must equal a sibling field (upstream `sameAs`). Cross-field → TS-only. */
 	sameAs(otherField: string): this {
 		const formats = this.#dateFormats;
+		const ruleName = this.#namespaced("sameAs", DATE_OWNER);
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
@@ -4039,36 +4151,41 @@ export class RuleChain<Output = unknown> {
 				if (formats !== null && value instanceof Date) {
 					const parsed = parseDateValue(other, formats);
 					if (parsed === null || parsed.getTime() !== value.getTime()) {
-						field.report(`Must match ${otherField}`, "sameAs");
+						field.report(`Must match ${otherField}`, ruleName, undefined, {
+							otherField,
+						});
 					}
 					return;
 				}
 				if (value !== other) {
-					field.report(`Must match ${otherField}`, "sameAs");
+					field.report(`Must match ${otherField}`, ruleName, undefined, {
+						otherField,
+					});
 				}
 			},
 		});
 		return this;
 	}
 
-	/** Must equal its `<field>_confirmation` sibling (VineJS `confirmed`). */
+	/** Must equal its `<field>_confirmation` sibling (upstream `confirmed`). */
 	confirmed(options?: { as?: string; confirmationField?: string }): this {
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
 				const leaf = field.field.split(".").pop() ?? field.field;
-				// `as` is the current VineJS spelling; `confirmationField` is its
+				// `as` is the current upstream spelling; `confirmationField` is its
 				// deprecated alias, kept so existing callers keep working.
 				const other =
 					options?.as ?? options?.confirmationField ?? `${leaf}_confirmation`;
 				if (value !== readSibling(field, other)) {
-					// VineJS reports on the CONFIRMATION field: that is the input the
+					// upstream reports on the CONFIRMATION field: that is the input the
 					// user has to fix, and where a form renders the message.
 					const prefix = field.field.slice(0, -leaf.length);
 					field.report(
 						"Confirmation does not match",
 						"confirmed",
 						`${prefix}${other}`,
+						{ originalField: leaf, otherField: other },
 					);
 				}
 			},
@@ -4113,7 +4230,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Post-validation transform changing the output type (VineJS `transform`).
+	 * Post-validation transform changing the output type (upstream `transform`).
 	 * `value` is `unknown` — narrow it in the callback (the no-cast rule forbids
 	 * lying about a dynamically-produced value's static type).
 	 */
@@ -4123,7 +4240,7 @@ export class RuleChain<Output = unknown> {
 		return next;
 	}
 
-	/** Pre-validation transform of the raw input (VineJS `parse`). */
+	/** Pre-validation transform of the raw input (upstream `parse`). */
 	parse(fn: (value: unknown, ctx: ParseContext) => unknown): this {
 		this.#preTransforms.push(fn);
 		return this;
@@ -4149,7 +4266,7 @@ export class RuleChain<Output = unknown> {
 	 * validate across fields. Runs after this field's type/value rules.
 	 */
 	use(rule: CompiledRule | AsyncCompiledRule): this {
-		// A rule built with `{ isAsync: true }` arrives here (VineJS has one
+		// A rule built with `{ isAsync: true }` arrives here (upstream has one
 		// `use`); routing it to the sync register would drop the await.
 		if (rule.__rune === "asyncRule") {
 			return this.useAsync(rule);
@@ -4250,7 +4367,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Attach free-form JSON Schema metadata (VineJS `meta()`) — `title`,
+	 * Attach free-form JSON Schema metadata (upstream `meta()`) — `title`,
 	 * `description`, `examples`, `deprecated`… Merged verbatim into the field's
 	 * node by `toJSONSchema()`.
 	 */
@@ -4315,13 +4432,10 @@ export class RuleChain<Output = unknown> {
 				reportedField?: string | FieldContext,
 				args?: Record<string, unknown>,
 			): void {
-				// VineJS plugins pass the FIELD CONTEXT here, not a path. Accepting
+				// upstream plugins pass the FIELD CONTEXT here, not a path. Accepting
 				// only a string let the object through and produced a
 				// `ValidationError.field` that was not a string at runtime.
-				const target =
-					typeof reportedField === "string"
-						? reportedField
-						: (reportedField?.getFieldPath() ?? field);
+				const target = reportedFieldPath(reportedField, field);
 				errors.push({
 					field: target,
 					rule,
@@ -4380,6 +4494,16 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Add a value rule and remember it as the `message()` target. */
+	/**
+	 * Prefix `name` with the type that owns this chain, when that type is one
+	 * that namespaces the rule. The type rule is always pushed first, so it is
+	 * already there to be read.
+	 */
+	#namespaced(name: string, owners: ReadonlySet<string>): string {
+		const owner = this.#rules.find((rule) => owners.has(rule.name));
+		return owner === undefined ? name : `${owner.name}.${name}`;
+	}
+
 	#pushRule(rule: RuleDef): void {
 		this.#rules.push(rule);
 		this.#lastRule = { kind: "value", ref: rule };
@@ -4419,7 +4543,7 @@ export class RuleChain<Output = unknown> {
 		ctx: RunContext = EMPTY_RUN_CONTEXT,
 		pending?: PendingAsync[],
 	): { errors: ValidationError[]; transformed: unknown } {
-		// 0. Pre-validation parse() transforms run on the raw value first. VineJS
+		// 0. Pre-validation parse() transforms run on the raw value first. upstream
 		//    hands them `(value, { data, parent, meta })` — without the context a
 		//    parser cannot look at a sibling, which is half its purpose.
 		let value = rawValue;
@@ -4443,10 +4567,10 @@ export class RuleChain<Output = unknown> {
 			return { errors: [this.#requiredError(field, ctx)], transformed: value };
 		}
 		if (value === null) {
-			// VineJS split, now matched exactly: `nullable()` accepts null AND keeps
+			// upstream split, now matched exactly: `nullable()` accepts null AND keeps
 			// it in the output; `optional()` accepts null but DROPS the key. rune
 			// used to keep null in both cases, so an optional field silently added
-			// `key: null` to a payload VineJS would have left without the key.
+			// `key: null` to a payload upstream would have left without the key.
 			if (this.#isNullable) {
 				return {
 					errors: this.#runImplicitRules(field, value, ctx, pending),
@@ -4475,14 +4599,14 @@ export class RuleChain<Output = unknown> {
 		let transformed = this.#applyTransformsTo(value, field, ctx);
 		const errors = this.#runValueRules(field, transformed, ctx);
 
-		// 3. Vine-style .use() rules — run with a FieldContext exposing the root
+		// 3. upstream-style .use() rules — run with a FieldContext exposing the root
 		//    `data` and `parent`, so a rule can validate across fields.
 		if (this.#useRules.length > 0 && !(this.#bail && errors.length > 0)) {
 			// `.use()` rules may call `field.mutate()`, so the value can change here.
 			transformed = this.#runUseRules(field, transformed, ctx, errors);
 		}
 
-		// 3b. Date output mapping (VineJS `VineDate.transform`). Deliberately AFTER
+		// 3b. Date output mapping (upstream's date transform). Deliberately AFTER
 		//     the comparison rules so `after`/`before`/`afterField` always see a
 		//     real `Date`, whatever type the consumer maps it to.
 		if (
@@ -4499,7 +4623,7 @@ export class RuleChain<Output = unknown> {
 			// undeclared key, so the mass-assignment guarantee that holds at the
 			// top level silently stopped holding one level down:
 			// `object({ name })` let an `isAdmin` through. `allowUnknownProperties()`
-			// is the opt-in, as in VineJS.
+			// is the opt-in, as in upstream.
 			const source: Record<string, unknown> = transformed;
 			const obj: Record<string, unknown> = this.#allowUnknown
 				? copyWithoutProtoKey(source)
@@ -4601,7 +4725,7 @@ export class RuleChain<Output = unknown> {
 		if (this.#unionChains) {
 			let matched = false;
 			// A guarded branch (union.if) is SELECTED by its predicate, and its own
-			// errors are reported — that is the diagnosable half of VineJS's union.
+			// errors are reported — that is the diagnosable half of upstream's union.
 			const guarded = this.#unionChains.filter((b) => b.predicate !== null);
 			if (guarded.length > 0) {
 				const probe = this.#makeFieldContext(
@@ -4732,10 +4856,24 @@ export class RuleChain<Output = unknown> {
 			},
 		);
 		const report = fieldCtx.report.bind(fieldCtx);
+		// An explicit `.message()` override still wins; everything else is
+		// resolved here so a provider and a translator reach `.use()` rules.
 		fieldCtx.report = (message, rule, reportedField, args) =>
-			report(override ?? message, rule, reportedField, args);
+			report(
+				override ??
+					resolveReportedMessage(
+						reportedFieldPath(reportedField, field),
+						message,
+						rule,
+						args,
+						ctx,
+					),
+				rule,
+				reportedField,
+				args,
+			);
 		for (const rule of this.#useRules) {
-			// A non-implicit rule is skipped on an absent value (VineJS semantics);
+			// A non-implicit rule is skipped on an absent value (upstream semantics);
 			// `implicit: true` is what lets a custom rule police undefined/null.
 			if (!rule.implicit && (current === undefined || current === null))
 				continue;
@@ -4771,8 +4909,22 @@ export class RuleChain<Output = unknown> {
 			},
 		);
 		const report = fieldCtx.report.bind(fieldCtx);
+		// An explicit `.message()` override still wins; everything else is
+		// resolved here so a provider and a translator reach `.use()` rules.
 		fieldCtx.report = (message, rule, reportedField, args) =>
-			report(override ?? message, rule, reportedField, args);
+			report(
+				override ??
+					resolveReportedMessage(
+						reportedFieldPath(reportedField, field),
+						message,
+						rule,
+						args,
+						ctx,
+					),
+				rule,
+				reportedField,
+				args,
+			);
 		for (const rule of this.#asyncRules) {
 			if (!rule.implicit && (current === undefined || current === null))
 				continue;
@@ -4978,13 +5130,13 @@ function evalRequiredCondition(
 	}
 }
 
-/** No-op alias of {@link schema} — VineJS `vine.compile()` API parity. */
+/** No-op alias of {@link schema} — upstream `compile()` API parity. */
 export function compile<T extends ValidationSchema>(s: T): T;
 export function compile(chain: RuleChain): ValidationSchema;
 export function compile(input: ValidationSchema | RuleChain): ValidationSchema {
 	// A rune schema is already compiled, so this is identity for that form; the
-	// `RuleChain` form exists because `vine.compile(vine.object({…}))` is the
-	// shape Adonis documents.
+	// `RuleChain` form exists because `compile(rune.object({…}))` is the
+	// documented shape.
 	return input instanceof RuleChain ? schema(toFieldMap(input), input) : input;
 }
 
@@ -5020,25 +5172,25 @@ export const rules = {
 	union: Object.assign(
 		(chains: readonly UnionBranch[]): RuleChain =>
 			new RuleChain().union(chains),
-		// `otherwise` is VineJS's spelling of the fallback branch; `else` stays
+		// `otherwise` is upstream's spelling of the fallback branch; `else` stays
 		// because it reads better in some call styles.
 		{ if: unionIf, else: unionElse, otherwise: unionElse },
 	),
 	/**
-	 * Union discriminated by the value's TYPE (VineJS `unionOfTypes`): the first
+	 * Union discriminated by the value's TYPE (upstream `unionOfTypes`): the first
 	 * branch whose own type rule accepts the value wins.
 	 */
 	/**
-	 * Make every property of a shape optional (VineJS `vine.helpers.optional`).
+	 * Make every property of a shape optional (upstream `helpers.optional`).
 	 * A properties TRANSFORMER, like `pick`/`omit` — it returns a record to
 	 * spread, not a schema.
 	 */
 	/**
-	 * A field that must be ABSENT (VineJS `vine.optional()` → `VineOptional`,
+	 * A field that must be ABSENT (upstream `optional()`,
 	 * `builder.d.ts:135`). Mostly a `unionOfTypes` branch. Distinct from
 	 * `.optional()` on a chain, which relaxes an existing type — this one IS the
 	 * type. The properties transformer that used to squat this name moved to
-	 * `helpers.optional`, where VineJS keeps it.
+	 * `helpers.optional`, where upstream keeps it.
 	 */
 	optional: (): RuleChain<undefined> => {
 		const chain = new RuleChain();
@@ -5049,7 +5201,7 @@ export const rules = {
 		});
 		return chain.optional().retypeTo<undefined>();
 	},
-	/** A field that must be `null` (VineJS `vine.null()` → `VineNull`). */
+	/** A field that must be `null` (upstream `null()`). */
 	null: (): RuleChain<null> => {
 		const chain = new RuleChain();
 		chain.pushTypeRule({
@@ -5060,7 +5212,7 @@ export const rules = {
 		return chain.nullable().retypeTo<null>();
 	},
 	unionOfTypes: (chains: readonly RuleChain[]): RuleChain => {
-		// VineJS requires DISTINCT types: two branches claiming the same type make
+		// upstream requires DISTINCT types: two branches claiming the same type make
 		// the discrimination meaningless, and the second would be dead code.
 		const seen = new Set<string>();
 		for (const chain of chains) {

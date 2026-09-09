@@ -267,7 +267,7 @@ describe("rune > escaping and normalisation", () => {
 		).toBe("Ada@acme.test");
 	});
 
-	it("strips gmail dots and subaddresses BY DEFAULT, as VineJS does", () => {
+	it("strips gmail dots and subaddresses BY DEFAULT, as upstream does", () => {
 		// Normalising is what the caller asked for: the provider rules are on,
 		// and an option is how you turn one off. rune had them opt-IN, which
 		// meant `normalizeEmail()` returned an address Gmail does not use.
@@ -312,9 +312,9 @@ describe("rune > escaping and normalisation", () => {
 		expect(normalizeEmail("not-an-address")).toBe("not-an-address");
 	});
 
-	it("normalises with VineJS's defaults, not with everything switched off", () => {
+	it("normalises with upstream's defaults, not with everything switched off", () => {
 		// rune shipped every option defaulting to OFF, so `normalizeUrl()` gave
-		// back very nearly its input. normalize-url — which is what VineJS calls —
+		// back very nearly its input. normalize-url — which is what upstream calls —
 		// strips `www.`, drops utm_ parameters, sorts the query and removes the
 		// trailing slash unless told otherwise.
 		expect(normalizeUrl("https://www.acme.test/")).toBe("https://acme.test");
