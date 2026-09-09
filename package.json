@@ -51,6 +51,10 @@
     "./errors": {
       "types": "./src/errors.ts",
       "import": "./src/errors.ts"
+    },
+    "./testing": {
+      "types": "./src/testing.ts",
+      "import": "./src/testing.ts"
     }
   },
   "publishConfig": {
@@ -68,6 +72,10 @@
       "./errors": {
         "types": "./dist/errors.d.ts",
         "import": "./dist/errors.js"
+      },
+      "./testing": {
+        "types": "./dist/testing.d.ts",
+        "import": "./dist/testing.js"
       }
     },
     "access": "public"

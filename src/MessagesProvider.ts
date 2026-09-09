@@ -16,6 +16,22 @@ export type ValidationFields = Record<string, string>;
 /** Interpolation values handed to a message template. */
 export type MessageArgs = Record<string, unknown>;
 
+/**
+ * What a provider reads off the field it is asked about.
+ *
+ * Structural on purpose: a provider only ever needs the path, the wildcard
+ * path and the last segment, so it does not have to import the whole
+ * `FieldContext` — and rune's own `FieldContext` satisfies this shape.
+ */
+export interface MessageFieldContext {
+	/** Last path segment. A NUMBER for an array item (`tags.0` → `0`). */
+	name: string | number;
+	/** Dotted path with numeric segments replaced by `*` (`tags.*.name`). */
+	wildCardPath: string;
+	/** The full dotted path — `user.email`, `tags.0.label`. */
+	getFieldPath(): string;
+}
+
 /** Narrow to a plain record so dotted-path interpolation can index it. */
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
@@ -30,7 +46,7 @@ export interface MessagesProviderContract {
 	getMessage(
 		rawMessage: string,
 		rule: string,
-		field: string,
+		field: MessageFieldContext,
 		args?: MessageArgs,
 	): string;
 }
@@ -83,20 +99,23 @@ export class SimpleMessagesProvider implements MessagesProviderContract {
 	getMessage(
 		rawMessage: string,
 		rule: string,
-		field: string,
+		field: MessageFieldContext,
 		args?: MessageArgs,
 	): string {
-		const fieldName = this.#fields[field] ?? field;
+		const path = field.getFieldPath();
+		// Three steps, not one: a label keyed by the bare NAME covers every path
+		// that ends in it, so `{ link: 'some link' }` labels `auth.profile.link`
+		// without the caller having to write the whole path out.
+		const fieldName =
+			this.#fields[path] || this.#fields[String(field.name)] || field.name;
 		const data: MessageArgs = { field: fieldName, ...args };
 
-		const fieldMessage = this.#messages[`${field}.${rule}`];
+		const fieldMessage = this.#messages[`${path}.${rule}`];
 		if (fieldMessage !== undefined) {
 			return this.#interpolate(fieldMessage, data);
 		}
 
-		const wildcard = toWildcardPath(field);
-		const wildcardMessage =
-			wildcard !== field ? this.#messages[`${wildcard}.${rule}`] : undefined;
+		const wildcardMessage = this.#messages[`${field.wildCardPath}.${rule}`];
 		if (wildcardMessage !== undefined) {
 			return this.#interpolate(wildcardMessage, data);
 		}

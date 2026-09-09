@@ -126,7 +126,10 @@ describe("rune > createRule implicit + FieldContext", () => {
 		const v = schema({ tags: rules.array(rules.string().use(spy())) });
 		const out = v.validateOrThrow({ tags: ["ab"] });
 		expect(out.tags).toEqual(["AB"]);
-		expect(captured.name).toBe("0");
+		// An array item's name is its INDEX, a number — that is how a rule tells
+		// an item from a property (`typeof field.name === "number"`), and a
+		// string made the branch unreachable.
+		expect(captured.name).toBe(0);
 		expect(captured.path).toBe("tags.0");
 		expect(captured.wildCardPath).toBe("tags.*");
 		expect(captured.isArrayMember).toBe(true);

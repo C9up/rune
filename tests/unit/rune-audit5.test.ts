@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { NormalizeUrlOptions } from "../../src/index.js";
+import type { NormalizeUrlOptions, RuleValidator } from "../../src/index.js";
 import rune, {
 	create,
 	createRule,
 	RuneError,
 	RuneValidationError,
 	rules,
+	SimpleMessagesProvider,
 	schema,
 	setValidationTranslator,
 } from "../../src/index.js";
@@ -1050,5 +1051,132 @@ describe("rune > audit 12 — tryValidate and the reporter agree", () => {
 		v.errorReporter = reporter;
 		expect(v.tryValidateSync({ a: "ok" })).toEqual([null, { a: "ok" }]);
 		v.errorReporter = null;
+	});
+});
+
+describe("rune > audit 13 — async rules and the messages provider", () => {
+	it("an `async` validator is awaited without being declared async", async () => {
+		// rune only looked at `{ isAsync: true }`, so an async validator was run
+		// as a sync one: its Promise was dropped, the run answered `valid: true`,
+		// and the rule reported its refusal afterwards into nothing.
+		const ran: string[] = [];
+		const slowRefuse = createRule(async (_v, _o, field) => {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			ran.push("ran");
+			field.report("always refused", "slow", field);
+		});
+		const v = schema({ a: rules.string().use(slowRefuse()) });
+		const result = await v.validateResultAsync({ a: "x" });
+		expect(result.valid).toBe(false);
+		expect(result.errors[0]?.rule).toBe("slow");
+		expect(ran).toEqual(["ran"]);
+	});
+
+	it("and the schema refuses to run that rule synchronously", () => {
+		const slowRefuse = createRule(async (_v, _o, field) => {
+			field.report("always refused", "slow", field);
+		});
+		const v = schema({ a: rules.string().use(slowRefuse()) });
+		expect(() => v.validateResult({ a: "x" })).toThrow(/async/i);
+	});
+
+	it("a validator that merely RETURNS a promise is refused, not ignored", () => {
+		// Not declared `async`, so nothing can detect it before it runs — and its
+		// verdict would land after validation ended.
+		// A `void`-returning callback is allowed to return a value in TypeScript,
+		// which is exactly how the hole is reachable without a cast.
+		const returnsThenable: RuleValidator = () => Promise.resolve();
+		const sneaky = createRule(returnsThenable);
+		const v = schema({ a: rules.string().use(sneaky()) });
+		expect(() => v.validateResult({ a: "x" })).toThrow(RuneError);
+	});
+
+	it("{ isAsync: true } still works, and stays the spelling", () => {
+		const explicit = createRule(
+			async (_v, _o, field) => {
+				field.report("refused", "explicit", field);
+			},
+			{ isAsync: true },
+		);
+		const v = schema({ a: rules.string().use(explicit()) });
+		expect(() => v.validateResult({ a: "x" })).toThrow(/async/i);
+	});
+
+	it("the messages provider receives a FIELD CONTEXT, not a path string", () => {
+		// A provider transcribed from the VineJS convention reads getFieldPath(),
+		// name and wildCardPath off the field. rune handed it a string, so all
+		// three came back undefined.
+		const seen: Array<Record<string, unknown>> = [];
+		const provider = {
+			getMessage(
+				raw: string,
+				rule: string,
+				field: {
+					name: string | number;
+					wildCardPath: string;
+					getFieldPath(): string;
+				},
+			): string {
+				seen.push({
+					rule,
+					path: field.getFieldPath(),
+					name: field.name,
+					wildCardPath: field.wildCardPath,
+				});
+				return raw;
+			},
+		};
+		schema({
+			tags: rules.array(rules.string().minLength(3)),
+		}).validateResult({ tags: ["ab"] }, { messagesProvider: provider });
+		expect(seen[0]?.path).toBe("tags.0");
+		expect(seen[0]?.wildCardPath).toBe("tags.*");
+		// And an array item's name is its index, as a number.
+		expect(seen[0]?.name).toBe(0);
+	});
+
+	it("a label keyed by the bare NAME covers every path ending in it", () => {
+		// The lookup is three steps: full path, then bare name, then the name
+		// itself. rune only tried the full path, so `{ link: 'some link' }` left
+		// the message saying `auth.profile.link`.
+		const provider = new SimpleMessagesProvider(
+			{ required: "{{ field }} missing" },
+			{ link: "some link" },
+		);
+		const result = schema({
+			auth: rules.any().object({
+				profile: rules.any().object({ link: rules.string() }),
+			}),
+		}).validateResult(
+			{ auth: { profile: {} } },
+			{ messagesProvider: provider },
+		);
+		expect(result.errors[0]?.message).toBe("some link missing");
+	});
+
+	it("the full path still wins over the bare name", () => {
+		const provider = new SimpleMessagesProvider(
+			{ required: "{{ field }} missing" },
+			{ link: "some link", "auth.profile.link": "the profile link" },
+		);
+		const result = schema({
+			auth: rules.any().object({
+				profile: rules.any().object({ link: rules.string() }),
+			}),
+		}).validateResult(
+			{ auth: { profile: {} } },
+			{ messagesProvider: provider },
+		);
+		expect(result.errors[0]?.message).toBe("the profile link missing");
+	});
+
+	it("a wildcard message key matches an array item", () => {
+		const provider = new SimpleMessagesProvider({
+			"tags.*.minLength": "{{ field }} is too short",
+		});
+		const result = schema({
+			tags: rules.array(rules.string().minLength(3)),
+		}).validateResult({ tags: ["ab"] }, { messagesProvider: provider });
+		expect(result.errors[0]?.message).toBe("0 is too short");
 	});
 });

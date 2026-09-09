@@ -45,7 +45,10 @@ import {
 	type UrlOptions,
 	type VatOptions,
 } from "./formats.js";
-import type { MessagesProviderContract } from "./MessagesProvider.js";
+import type {
+	MessageFieldContext,
+	MessagesProviderContract,
+} from "./MessagesProvider.js";
 import { toWildcardPath } from "./MessagesProvider.js";
 import {
 	detectFileType,
@@ -94,8 +97,14 @@ export interface FieldContext {
 	meta: Record<string, unknown>;
 	/** `true` while no error has been reported for this field yet. */
 	isValid: boolean;
-	/** Last path segment — `city` for `address.city` (VineJS `name`). */
-	name: string;
+	/**
+	 * Last path segment — `city` for `address.city` (VineJS `name`).
+	 *
+	 * A NUMBER for an array item: `tags.0` has `name === 0`, not `"0"`. A rule
+	 * that branches on `typeof field.name === "number"` to tell an item from a
+	 * property needs that, and a string made the branch unreachable.
+	 */
+	name: string | number;
 	/** Dotted path with numeric segments replaced by `*` (`tags.*.name`). */
 	wildCardPath: string;
 	/** `true` when this value sits inside an array. */
@@ -191,6 +200,21 @@ export interface CreateRuleOptions {
 // `isAsync: true` genuinely produces an AsyncCompiledRule — a different
 // discriminant (`__rune: "asyncRule"`) that `.use()` routes to the awaited
 // register. Saying otherwise, as a cast did, told the compiler the opposite of
+/** Was the validator declared `async`? Same test VineJS applies. */
+function isAsyncFunction(fn: unknown): boolean {
+	return typeof fn === "function" && fn.constructor.name === "AsyncFunction";
+}
+
+/** Did a supposedly synchronous validator hand back something awaitable? */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"then" in value &&
+		typeof Reflect.get(value, "then") === "function"
+	);
+}
+
 // what runs.
 export function createRule(
 	validator: AsyncRuleValidator<undefined>,
@@ -199,6 +223,14 @@ export function createRule(
 export function createRule<Options>(
 	validator: AsyncRuleValidator<Options>,
 	options: CreateRuleOptions & { isAsync: true },
+): (options: Options) => AsyncCompiledRule;
+export function createRule(
+	validator: PromiseRuleValidator<undefined>,
+	options?: CreateRuleOptions,
+): () => AsyncCompiledRule;
+export function createRule<Options>(
+	validator: PromiseRuleValidator<Options>,
+	options?: CreateRuleOptions,
 ): (options: Options) => AsyncCompiledRule;
 export function createRule(
 	validator: RuleValidator<undefined>,
@@ -212,10 +244,16 @@ export function createRule<Options>(
 	validator: RuleValidator<Options> | AsyncRuleValidator<Options>,
 	ruleOptions?: CreateRuleOptions,
 ): (options: Options) => CompiledRule | AsyncCompiledRule {
-	if (ruleOptions?.isAsync) {
+	if (ruleOptions?.isAsync || isAsyncFunction(validator)) {
 		// VineJS expresses "async" as an option on createRule, so honour it by
 		// BUILDING the async rule rather than refusing: `.use()` routes an
 		// async-marked rule to the awaited register.
+		//
+		// An `async` validator is routed there whether or not the option was
+		// passed — VineJS does the same (`metaData?.isAsync ||
+		// validator.constructor.name === "AsyncFunction"`). Without it the
+		// Promise was never awaited: the run reported `{ valid: true }` and the
+		// rule refused the value afterwards, into nothing.
 		const asyncBuilder = createAsyncRule(validator, {
 			...ruleOptions,
 			isAsync: undefined,
@@ -229,7 +267,20 @@ export function createRule<Options>(
 		toJSONSchema: ruleOptions?.toJSONSchema,
 		ruleOptions: options,
 		run(value: unknown, field: FieldContext): void {
-			validator(value, options, field);
+			const returned: unknown = validator(value, options, field);
+			// A validator that is not declared `async` but returns a thenable
+			// cannot be detected before it runs — and its verdict would land after
+			// the run is over. Refuse loudly rather than report a pass nobody
+			// checked.
+			if (isThenable(returned)) {
+				throw new RuneError(
+					"ASYNC_RULE_NOT_AWAITED",
+					`rule '${ruleOptions?.name ?? (validator.name || "anonymous")}' returned a promise but is not declared async, so its verdict would arrive after validation ended.`,
+					{
+						hint: "Declare the validator `async`, or pass { isAsync: true } to createRule().",
+					},
+				);
+			}
 		},
 	});
 }
@@ -243,6 +294,20 @@ export type AsyncRuleValidator<Options = undefined> = (
 	options: Options,
 	field: FieldContext,
 ) => void | Promise<void>;
+
+/**
+ * A validator declared `async`, so it can only be a Promise.
+ *
+ * Distinct from {@link AsyncRuleValidator} — which also admits a sync function
+ * — because {@link createRule} discriminates on this: a validator that can
+ * ONLY return a Promise routes to the awaited builder without the caller
+ * having to say `{ isAsync: true }`.
+ */
+export type PromiseRuleValidator<Options = undefined> = (
+	value: unknown,
+	options: Options,
+	field: FieldContext,
+) => Promise<void>;
 
 /** A compiled async rule produced by {@link createAsyncRule}. */
 export interface AsyncCompiledRule {
@@ -388,6 +453,17 @@ function toReporter(
 }
 
 /**
+ * The last segment of a dotted path, as the value VineJS puts on
+ * `FieldContext.name` — a NUMBER for an array index, a string otherwise.
+ */
+function fieldNameOf(path: string): string | number {
+	const segments = path.split(".");
+	const last = segments[segments.length - 1];
+	if (last === undefined) return path;
+	return /^\d+$/.test(last) ? Number(last) : last;
+}
+
+/**
  * Rebuild the {@link FieldContext} a reporter expects from a collected error.
  *
  * The traversal reports post-hoc (it collects, then hands the batch over), so
@@ -399,7 +475,6 @@ function reportedFieldContext(
 	data: unknown,
 	meta: Record<string, unknown>,
 ): FieldContext {
-	const segments = error.field.split(".");
 	const root = isPlainObject(data) ? data : {};
 	return {
 		value: undefined,
@@ -408,7 +483,7 @@ function reportedFieldContext(
 		field: error.field,
 		meta,
 		isValid: false,
-		name: segments[segments.length - 1] ?? error.field,
+		name: fieldNameOf(error.field),
 		wildCardPath: toWildcardPath(error.field),
 		isArrayMember: /\.\d+$/.test(error.field),
 		isDefined: false,
@@ -725,7 +800,9 @@ function toDatabaseCheck(
 		}
 		const found = await databaseResolver.exists({
 			table: options.table,
-			column: options.column ?? field.name,
+			// `name` is a NUMBER for an array item, and a column is never one:
+			// the path's own last segment is what a DB rule means by "column".
+			column: options.column ?? String(field.name),
 			value,
 			where: options.where,
 			whereNot: options.whereNot,
@@ -1363,6 +1440,21 @@ function ruleArgs(rule: RuleDef): Record<string, unknown> | undefined {
 }
 
 /**
+ * The field context a messages provider is handed.
+ *
+ * VineJS passes the whole `FieldContext`, and a provider transcribed from there
+ * reads `getFieldPath()`, `name` or `wildCardPath` off it. rune used to pass
+ * the path string, so every one of those reads came back `undefined`.
+ */
+function messageFieldContext(field: string): MessageFieldContext {
+	return {
+		name: fieldNameOf(field),
+		wildCardPath: toWildcardPath(field),
+		getFieldPath: () => field,
+	};
+}
+
+/**
  * Resolve the final message for a failing rule. Precedence:
  *   1. explicit `.message()` override (always wins),
  *   2. a per-call {@link MessagesProviderContract} (VineJS parity),
@@ -1383,7 +1475,7 @@ function resolveRuleMessage(
 		return ctx.messagesProvider.getMessage(
 			rule.message,
 			rule.name,
-			field,
+			messageFieldContext(field),
 			args,
 		);
 	}
@@ -1415,7 +1507,7 @@ function resolveRequiredMessage(field: string, ctx: RunContext): string {
 		return ctx.messagesProvider.getMessage(
 			`${field} is required`,
 			"required",
-			field,
+			messageFieldContext(field),
 		);
 	}
 	return resolveValidationMessage(
@@ -4042,7 +4134,6 @@ export class RuleChain<Output = unknown> {
 		errors: ValidationError[],
 		onMutate: (next: unknown) => void,
 	): FieldContext {
-		const segments = field.split(".");
 		return {
 			value,
 			data: ctx.data,
@@ -4050,7 +4141,7 @@ export class RuleChain<Output = unknown> {
 			field,
 			meta: ctx.meta,
 			isValid: errors.length === 0,
-			name: segments[segments.length - 1] ?? field,
+			name: fieldNameOf(field),
 			wildCardPath: toWildcardPath(field),
 			isArrayMember: Array.isArray(ctx.parent),
 			isDefined: value !== undefined && value !== null,

@@ -19,7 +19,10 @@ export type {
 	NormalizeUrlOptions,
 	UrlOptions,
 } from "./formats.js";
-export type { MessagesProviderContract } from "./MessagesProvider.js";
+export type {
+	MessageFieldContext,
+	MessagesProviderContract,
+} from "./MessagesProvider.js";
 export { SimpleMessagesProvider } from "./MessagesProvider.js";
 export {
 	assertNativeAvailable,
