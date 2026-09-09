@@ -45,6 +45,7 @@ import {
 	type UrlOptions,
 	type VatOptions,
 } from "./formats.js";
+import { asBoolean } from "./helpers.js";
 import type {
 	MessageFieldContext,
 	MessagesProviderContract,
@@ -871,7 +872,16 @@ function toDatabaseCheck(
 	};
 }
 
-/** VineJS number coercion: a numeric string becomes a number, the rest is untouched. */
+/**
+ * VineJS number coercion: a numeric string becomes a number, the rest is
+ * untouched.
+ *
+ * NAMED DEVIATION — an empty (or blank) string is left as-is, so `number()`
+ * refuses it. Upstream runs it through `Number("")`, which is `0`: an
+ * untouched text input silently becomes a quantity of zero, and no rule after
+ * it can tell that apart from someone typing "0". Use `.optional()` to accept
+ * an absent value.
+ */
 function coerceNumber(value: unknown): unknown {
 	if (typeof value !== "string") return value;
 	const trimmed = value.trim();
@@ -880,14 +890,17 @@ function coerceNumber(value: unknown): unknown {
 	return Number.isFinite(n) ? n : value;
 }
 
-/** VineJS boolean coercion over the usual form-encoded spellings. */
+/**
+ * VineJS boolean coercion. It reads the SAME lists as `helpers.asBoolean`, so
+ * a custom rule and `boolean()` can never disagree about what `"1"` means.
+ *
+ * Deliberately not trimmed and not lowercased: doing either accepted `"TRUE"`,
+ * `" true "` and `"off"`, none of which upstream takes. A spelling that is not
+ * on the list is left untouched for the type rule to refuse, rather than
+ * guessed at.
+ */
 function coerceBoolean(value: unknown): unknown {
-	if (value === 1 || value === 0) return value === 1;
-	if (typeof value !== "string") return value;
-	const v = value.trim().toLowerCase();
-	if (["true", "on", "1"].includes(v)) return true;
-	if (["false", "off", "0"].includes(v)) return false;
-	return value;
+	return asBoolean(value) ?? value;
 }
 
 /** Options accepted by every date comparison (VineJS `{ compare, format }`). */
@@ -1347,13 +1360,15 @@ export function unionElse(chain: RuleChain): ConditionalBranch {
 }
 
 /** The checkbox-style truthies VineJS `accepted` recognises. */
+const ACCEPTED_VALUES: readonly unknown[] = ["on", "1", "yes", "true", true, 1];
+
+/**
+ * VineJS `accepted`. The list is CASE-SENSITIVE upstream, so `"YES"` is not an
+ * accepted value — lowercasing first silently widened what a consent checkbox
+ * would take.
+ */
 function isAcceptedValue(value: unknown): boolean {
-	return (
-		value === true ||
-		value === 1 ||
-		(typeof value === "string" &&
-			["1", "on", "yes", "true"].includes(value.toLowerCase()))
-	);
+	return ACCEPTED_VALUES.includes(value);
 }
 
 /** Default context for internal callers that don't supply one (no root available). */
@@ -1656,6 +1671,19 @@ export function schema(
 	// Sits between the per-call provider and the global one, exactly as the
 	// reporter does: the narrower scope wins.
 	let validatorMessagesProvider: MessagesProviderContract | null = null;
+	// Whatever the process had installed WHEN this validator was built. VineJS
+	// captures at compile() so a later `vine.messagesProvider = …` cannot reach
+	// back into a validator that already exists, and rune captures the same way.
+	//
+	// NAMED DEVIATION — the capture is only honoured when something WAS
+	// installed. A validator built before the process had a provider keeps
+	// deferring to whatever arrives later, because that is the normal order in
+	// this framework: schemas are module-level constants evaluated at import,
+	// while the i18n provider is installed in a service provider's boot(). A
+	// strict capture would freeze `null` into every one of them and silently
+	// drop translated messages.
+	const createdWithMessagesProvider = globalMessagesProvider;
+	const createdWithErrorReporter = globalErrorReporter;
 	// Set by the last run; the throwing entry points prefer the reporter's own
 	// error, because VineJS lets the reporter decide the failure shape.
 	let reporterError: (() => Error) | undefined;
@@ -1687,6 +1715,7 @@ export function schema(
 		const reporter = toReporter(
 			options?.errorReporter ??
 				validatorErrorReporter ??
+				createdWithErrorReporter ??
 				globalErrorReporter ??
 				undefined,
 			data,
@@ -1720,6 +1749,7 @@ export function schema(
 		const provider =
 			options?.messagesProvider ??
 			validatorMessagesProvider ??
+			createdWithMessagesProvider ??
 			globalMessagesProvider ??
 			undefined;
 		if (!hasCustomRules && !validationTranslator && !provider) {
@@ -1731,6 +1761,7 @@ export function schema(
 				const nativeReporter = toReporter(
 					options?.errorReporter ??
 						validatorErrorReporter ??
+						createdWithErrorReporter ??
 						globalErrorReporter ??
 						undefined,
 					data,
@@ -1773,6 +1804,7 @@ export function schema(
 		const reporter = toReporter(
 			options?.errorReporter ??
 				validatorErrorReporter ??
+				createdWithErrorReporter ??
 				globalErrorReporter ??
 				undefined,
 			data,
@@ -1845,6 +1877,7 @@ export function schema(
 			messagesProvider:
 				options?.messagesProvider ??
 				validatorMessagesProvider ??
+				createdWithMessagesProvider ??
 				globalMessagesProvider ??
 				undefined,
 		};
@@ -1880,6 +1913,7 @@ export function schema(
 		const reporter = toReporter(
 			options?.errorReporter ??
 				validatorErrorReporter ??
+				createdWithErrorReporter ??
 				globalErrorReporter ??
 				undefined,
 			data,
@@ -2009,6 +2043,12 @@ export function schema(
 				result.valid
 					? { value: result.data }
 					: {
+							// `path` is an ARRAY of segments. The Standard Schema spec
+							// types it `ReadonlyArray<PropertyKey | PathSegment>`, and
+							// the array is what a spec-compliant consumer indexes into.
+							// Upstream emits the dotted STRING instead, contradicting
+							// the spec package it ships with — matching that would
+							// break every consumer that follows the contract.
 							issues: result.errors.map((error) => ({
 								message: error.message,
 								path: error.field.split("."),
@@ -2842,6 +2882,10 @@ export class RuleChain<Output = unknown> {
 		});
 		// Normalise ONLY an accepted value: a blanket `() => true` would rewrite a
 		// refused value into an accepted one before the rule ever saw it.
+		//
+		// NAMED DEVIATION — upstream declares this field's OUTPUT type as `true`
+		// and then hands back the raw `"on"` / `"yes"` at runtime, so its own
+		// annotation is wrong. rune returns what the type promises.
 		this.#transforms.push({
 			name: "accepted",
 			fn: (value) => (isAcceptedValue(value) ? true : value),
@@ -3182,7 +3226,43 @@ export class RuleChain<Output = unknown> {
 	 */
 	enum<const V extends readonly (string | number | boolean)[]>(
 		values: V | ((field: FieldContext) => V),
-	): RuleChain<V[number]> {
+	): RuleChain<V[number]>;
+	enum<E extends Record<string, string | number>>(
+		nativeEnum: E,
+	): RuleChain<E[keyof E]>;
+	/** Either shape, for a caller that only knows which one at runtime. */
+	enum(
+		values:
+			| readonly (string | number | boolean)[]
+			| ((field: FieldContext) => readonly (string | number | boolean)[])
+			| Record<string, string | number>,
+	): RuleChain;
+	enum(
+		values:
+			| readonly (string | number | boolean)[]
+			| ((field: FieldContext) => readonly (string | number | boolean)[])
+			| Record<string, string | number>,
+	): RuleChain {
+		// A TypeScript `enum` compiles to a plain object, so `vine.enum(MyEnum)`
+		// hands one over instead of a list. Iterating it as an array produced a
+		// TypeError; taking its VALUES is what upstream does.
+		//
+		// For a NUMERIC enum those values include TypeScript's reverse mapping
+		// (`{ 0: "A", A: 0 }` yields `["A", 0]`), so the member NAMES are
+		// accepted too. That is upstream's behaviour, kept deliberately.
+		const resolved =
+			Array.isArray(values) || typeof values === "function"
+				? values
+				: Object.values(values);
+		return this.#enumOfValues(resolved);
+	}
+
+	/** Shared body of the {@link enum} overloads. */
+	#enumOfValues(
+		values:
+			| readonly (string | number | boolean)[]
+			| ((field: FieldContext) => readonly (string | number | boolean)[]),
+	): RuleChain {
 		const lazy = typeof values === "function";
 		const resolve = allowedValuesResolver(values);
 		this.#enumChoices = lazy ? values : [...values];
@@ -3195,7 +3275,7 @@ export class RuleChain<Output = unknown> {
 			validate: (v, field) => resolve(field).includes(asPrimitive(v)),
 			message: "Invalid value",
 		});
-		return this.#retype<V[number]>();
+		return this.#retype();
 	}
 
 	/**
@@ -5021,12 +5101,26 @@ export const rules = {
 	): RuleChain<Infer<Sh>> => new RuleChain().object(shape),
 	array: <Item extends RuleChain>(item?: Item): RuleChain<OutputOf<Item>[]> =>
 		new RuleChain().array(item),
-	enum: <const V extends readonly (string | number | boolean)[]>(
-		values: V | ((field: FieldContext) => V),
-	): RuleChain<V[number]> => new RuleChain().enum(values),
+	enum: enumChain,
 	literal: <V extends string | number | boolean>(value: V): RuleChain<V> =>
 		new RuleChain().literal(value),
 };
+
+/** `rules.enum()` — the chain method's overloads, as a standalone factory. */
+function enumChain<const V extends readonly (string | number | boolean)[]>(
+	values: V | ((field: FieldContext) => V),
+): RuleChain<V[number]>;
+function enumChain<E extends Record<string, string | number>>(
+	nativeEnum: E,
+): RuleChain<E[keyof E]>;
+function enumChain(
+	values:
+		| readonly (string | number | boolean)[]
+		| ((field: FieldContext) => readonly (string | number | boolean)[])
+		| Record<string, string | number>,
+): RuleChain {
+	return new RuleChain().enum(values);
+}
 
 /** Serialize schema + data and validate via Rust NAPI. */
 function validateWithRust(

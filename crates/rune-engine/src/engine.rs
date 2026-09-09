@@ -220,13 +220,16 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
                 }
                 "boolean" => {
                     let coerced = match &val {
-                        serde_json::Value::String(text) => {
-                            match text.trim().to_ascii_lowercase().as_str() {
-                                "true" | "on" | "1" => Some(true),
-                                "false" | "off" | "0" => Some(false),
-                                _ => None,
-                            }
-                        }
+                        // The list is exact: no trim, no case folding. Doing
+                        // either accepted "TRUE", " true " and "off", none of
+                        // which the TypeScript path takes — and the two paths
+                        // must agree, or the same schema decides differently
+                        // depending on whether the native binary loaded.
+                        serde_json::Value::String(text) => match text.as_str() {
+                            "true" | "on" | "1" => Some(true),
+                            "false" | "0" => Some(false),
+                            _ => None,
+                        },
                         serde_json::Value::Number(n) => match n.as_i64() {
                             Some(1) => Some(true),
                             Some(0) => Some(false),

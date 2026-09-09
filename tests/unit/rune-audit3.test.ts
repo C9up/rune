@@ -101,14 +101,18 @@ describe("rune > number/boolean coercion (VineJS)", () => {
 			["on", true],
 			["1", true],
 			["false", false],
-			["off", false],
 			["0", false],
 			[1, true],
 			[0, false],
 		] as const) {
 			expect(s.validateOrThrow({ ok: input }).ok).toBe(expected);
 		}
-		expect(s.validateResult({ ok: "maybe" }).valid).toBe(false);
+		// The list is upstream's, exactly: case-sensitive, untrimmed, and "off"
+		// is NOT on it even though "on" is. Lowercasing or trimming first
+		// widened what a boolean field would swallow.
+		for (const refused of ["maybe", "TRUE", "off", "False", " true ", "yes"]) {
+			expect(s.validateResult({ ok: refused }).valid, refused).toBe(false);
+		}
 	});
 
 	it("strict mode refuses coercion", () => {

@@ -102,17 +102,21 @@ describe("rune > boolean coercion", () => {
 			["true", true],
 			["false", false],
 			["on", true],
-			["off", false],
 			["1", true],
 			["0", false],
 			[1, true],
 			[0, false],
-			["TRUE", true],
-			["  on  ", true],
 		] as Array<[unknown, boolean]>) {
 			const result = s.validateResult({ accepted: posted });
 			expect(result.valid, `for ${JSON.stringify(posted)}`).toBe(true);
 			expect(result.data?.accepted).toBe(expected);
+		}
+		// Not on upstream's lists, so not coerced — the type rule then refuses.
+		for (const posted of ["TRUE", "  on  ", "off"]) {
+			expect(
+				s.validateResult({ accepted: posted }).valid,
+				`for ${JSON.stringify(posted)}`,
+			).toBe(false);
 		}
 	});
 
@@ -291,14 +295,21 @@ describe("rune > the helpers a custom rule is meant to reuse", () => {
 	const h = rune.helpers;
 
 	it("reads truthy and falsy the way a form posts them", () => {
-		for (const v of [true, 1, "1", "true", "on", "yes", "YES"]) {
+		for (const v of [true, 1, "1", "true", "on"]) {
 			expect(h.isTrue(v), String(v)).toBe(true);
 		}
-		for (const v of [false, 0, "0", "false", "off", "no", "NO"]) {
+		for (const v of [false, 0, "0", "false"]) {
 			expect(h.isFalse(v), String(v)).toBe(true);
 		}
-		expect(h.isTrue("maybe")).toBe(false);
-		expect(h.isFalse("maybe")).toBe(false);
+		// The lists are short and case-sensitive on purpose: "yes"/"off"/"no"
+		// and any capitalisation are NOT recognised, so a payload carrying one
+		// is refused rather than guessed at.
+		for (const v of ["yes", "YES", "TRUE", "maybe"]) {
+			expect(h.isTrue(v), String(v)).toBe(false);
+		}
+		for (const v of ["off", "no", "NO", "FALSE", "maybe"]) {
+			expect(h.isFalse(v), String(v)).toBe(false);
+		}
 	});
 
 	it("tells present from absent, counting an empty string as present", () => {

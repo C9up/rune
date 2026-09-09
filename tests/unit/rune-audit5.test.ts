@@ -264,7 +264,11 @@ describe("rune > audit 6", () => {
 
 	it("exposes vine.helpers", () => {
 		expect(rune.helpers.isTrue("on")).toBe(true);
-		expect(rune.helpers.isFalse("off")).toBe(true);
+		expect(rune.helpers.isFalse("0")).toBe(true);
+		// "off" and "no" are not on upstream's negative list, "yes" is not on
+		// its positive one, and neither list is case-folded.
+		expect(rune.helpers.isFalse("off")).toBe(false);
+		expect(rune.helpers.isTrue("yes")).toBe(false);
 		expect(rune.helpers.exists("")).toBe(true);
 		expect(rune.helpers.isMissing(null)).toBe(true);
 	});
@@ -1283,5 +1287,105 @@ describe("rune > audit 14", () => {
 			if (error instanceof RuneError) code = error.code;
 		}
 		expect(code).toBe("E_RUNE_UNSUPPORTED_JSON_SCHEMA_TARGET");
+	});
+});
+
+describe("rune > audit 15", () => {
+	it("enum() accepts a native TypeScript enum", () => {
+		// A TS enum compiles to a plain object, not an array. Iterating it as an
+		// array threw a TypeError, so `rules.enum(MyEnum)` was unusable.
+		enum Role {
+			Admin = "admin",
+			User = "user",
+		}
+		const s = schema({ role: rules.enum(Role) });
+		expect(s.validateResult({ role: "admin" }).valid).toBe(true);
+		expect(s.validateResult({ role: "Admin" }).valid).toBe(false);
+		expect(s.validateResult({ role: "ghost" }).valid).toBe(false);
+	});
+
+	it("a numeric enum keeps TypeScript's reverse mapping, as upstream does", () => {
+		enum Level {
+			Low = 0,
+			High = 1,
+		}
+		const s = schema({ level: rules.enum(Level) });
+		expect(s.validateResult({ level: 0 }).valid).toBe(true);
+		// `Object.values` on a numeric enum yields the member NAMES too. That is
+		// upstream's behaviour, matched deliberately.
+		expect(s.validateResult({ level: "Low" }).valid).toBe(true);
+		expect(s.validateResult({ level: 2 }).valid).toBe(false);
+	});
+
+	it("a plain array of choices still works", () => {
+		const s = schema({ c: rules.enum(["a", "b"] as const) });
+		expect(s.validateResult({ c: "a" }).valid).toBe(true);
+		expect(s.validateResult({ c: "z" }).valid).toBe(false);
+	});
+
+	it("accepted() takes upstream's exact list, case included", () => {
+		const s = schema({ terms: rules.accepted() });
+		for (const ok of ["on", "1", "yes", "true", true, 1]) {
+			expect(s.validateResult({ terms: ok }).valid, String(ok)).toBe(true);
+			// rune normalises to `true`; upstream declares that output type and
+			// then hands back the raw value, which its own type says it will not.
+			expect(s.validateResult({ terms: ok }).data?.terms).toBe(true);
+		}
+		// Lowercasing first silently widened a consent checkbox.
+		for (const refused of ["YES", "On", "TRUE", "off", ""]) {
+			expect(s.validateResult({ terms: refused }).valid, refused).toBe(false);
+		}
+	});
+
+	it("withMetaData() exposes compile() beside create()", () => {
+		const factory = rune.withMetaData<{ tenantId: number }>();
+		expect(typeof factory.compile).toBe("function");
+		const validator = factory.compile({ name: rules.string() });
+		expect(
+			validator.validateResult({ name: "Ada" }, { meta: { tenantId: 1 } })
+				.valid,
+		).toBe(true);
+	});
+
+	it("a withMetaData validator keeps its accessors live", () => {
+		// The wrapper used to spread the validator, which flattens `errorReporter`
+		// and `messagesProvider` into dead plain properties — assigning to them
+		// silently did nothing.
+		const validator = rune
+			.withMetaData<{ tenantId: number }>((meta) => {
+				if (typeof meta.tenantId !== "number") throw new Error("bad meta");
+			})
+			.compile({ name: rules.string() });
+		const before = validator.validateResult({}, { meta: { tenantId: 1 } });
+		expect(before.errors[0]?.message).not.toBe("PROVIDER REACHED");
+		validator.messagesProvider = new SimpleMessagesProvider({
+			required: "PROVIDER REACHED",
+		});
+		expect(validator.messagesProvider).not.toBe(null);
+		const result = validator.validateResult({}, { meta: { tenantId: 1 } });
+		expect(result.errors[0]?.message).toBe("PROVIDER REACHED");
+	});
+
+	it("a validator keeps the provider that existed when it was built", () => {
+		// Upstream captures at compile(), so a later global swap cannot reach
+		// back into a validator that already exists.
+		rune.messagesProvider = new SimpleMessagesProvider({ required: "BEFORE" });
+		const validator = schema({ a: rules.string() });
+		expect(validator.validateResult({}).errors[0]?.message).toBe("BEFORE");
+		rune.messagesProvider = new SimpleMessagesProvider({ required: "AFTER" });
+		expect(validator.validateResult({}).errors[0]?.message).toBe("BEFORE");
+		rune.messagesProvider = null;
+	});
+
+	it("a validator built before any provider still picks up a later one", () => {
+		// NAMED DEVIATION from upstream's strict capture: schemas are
+		// module-level constants evaluated at import, while the i18n provider is
+		// installed in a service provider's boot(). Freezing `null` into every
+		// one of them would silently drop translated messages.
+		rune.messagesProvider = null;
+		const validator = schema({ a: rules.string() });
+		rune.messagesProvider = new SimpleMessagesProvider({ required: "LATE" });
+		expect(validator.validateResult({}).errors[0]?.message).toBe("LATE");
+		rune.messagesProvider = null;
 	});
 });

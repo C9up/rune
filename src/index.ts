@@ -66,6 +66,7 @@ export {
 	setValidationTranslator,
 } from "./Schema.js";
 
+import * as runeHelpers from "./helpers.js";
 import type { MessagesProviderContract } from "./MessagesProvider.js";
 import type { RuleChain, ValidateOptions } from "./Schema.js";
 import {
@@ -144,75 +145,11 @@ const rune = {
 	},
 	/**
 	 * Predicate helpers VineJS exposes as `vine.helpers`, for writing custom
-	 * rules without reimplementing the same three checks each time.
+	 * rules without reimplementing the same checks. The implementations, and the
+	 * three deviations rune keeps, live in `./helpers.js`.
 	 */
 	helpers: {
-		/** `true` for `true`, `1`, `"1"`, `"true"`, `"on"`, `"yes"`. */
-		isTrue: (value: unknown): boolean =>
-			value === true ||
-			value === 1 ||
-			(typeof value === "string" &&
-				["1", "true", "on", "yes"].includes(value.toLowerCase())),
-		/** `true` for `false`, `0`, `"0"`, `"false"`, `"off"`, `"no"`. */
-		isFalse: (value: unknown): boolean =>
-			value === false ||
-			value === 0 ||
-			(typeof value === "string" &&
-				["0", "false", "off", "no"].includes(value.toLowerCase())),
-		/** Neither `undefined` nor `null` (an empty string IS defined). */
-		exists: (value: unknown): boolean => value !== undefined && value !== null,
-		/** `undefined` or `null`. */
-		isMissing: (value: unknown): boolean =>
-			value === undefined || value === null,
-		/** A plain object, not an array and not `null`. */
-		isObject: (value: unknown): value is Record<string, unknown> =>
-			typeof value === "object" && value !== null && !Array.isArray(value),
-		/** An array. */
-		isArray: Array.isArray,
-		/** Every listed key is present on the object (VineJS `helpers.hasKeys`). */
-		hasKeys: (value: unknown, keys: readonly string[]): boolean =>
-			typeof value === "object" &&
-			value !== null &&
-			keys.every((key) => key in value),
-		/**
-		 * No duplicate in the data set, optionally compared on one or more fields
-		 * (VineJS `helpers.isDistinct`). `null` / `undefined` items are ignored,
-		 * and items missing a compared key are SKIPPED, so two absent values are
-		 * not a duplicate of each other.
-		 */
-		isDistinct: (
-			dataSet: readonly unknown[],
-			fields?: string | string[],
-		): boolean => {
-			const list = fields === undefined ? null : [fields].flat();
-			const keys: string[] = [];
-			for (const item of dataSet) {
-				if (item === null || item === undefined) continue;
-				if (list === null) {
-					keys.push(JSON.stringify(item));
-					continue;
-				}
-				if (typeof item !== "object" || item === null) continue;
-				const record: Record<string, unknown> = { ...item };
-				if (list.some((k) => record[k] === undefined || record[k] === null)) {
-					continue;
-				}
-				keys.push(JSON.stringify(list.map((k) => record[k])));
-			}
-			return new Set(keys).size === keys.length;
-		},
-		/** Read a dotted path off the validated data (VineJS `helpers.getNestedValue`). */
-		getNestedValue: (
-			key: string,
-			field: { data: Record<string, unknown> },
-		): unknown => {
-			let cursor: unknown = field.data;
-			for (const segment of key.split(".")) {
-				if (typeof cursor !== "object" || cursor === null) return undefined;
-				cursor = (cursor as Record<string, unknown>)[segment];
-			}
-			return cursor;
-		},
+		...runeHelpers,
 		/** Make every property of a shape optional (VineJS `helpers.optional`). */
 		optional: (props: Record<string, RuleChain>): Record<string, RuleChain> =>
 			Object.fromEntries(
@@ -250,37 +187,49 @@ const rune = {
 		create<T extends Record<string, RuleChain>>(
 			fields: T,
 		): WithRequiredMeta<ReturnType<typeof create<T>>, M>;
+		compile<T extends Record<string, RuleChain>>(
+			fields: T,
+		): WithRequiredMeta<ReturnType<typeof create<T>>, M>;
 	} {
-		return {
-			create<T extends Record<string, RuleChain>>(fields: T) {
-				const validator = create(fields);
-				if (!validateMeta) {
-					return validator as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
-				}
-				// The callback runs BEFORE the payload: meta that is wrong makes
-				// every rule reading it meaningless, so failing early is the only
-				// honest outcome.
-				const guard = <A extends unknown[], R>(
-					run: (...args: A) => R,
-				): ((...args: A) => R) => {
-					return (...args: A): R => {
-						const options = args[1] as { meta?: M } | undefined;
-						validateMeta((options?.meta ?? {}) as M);
-						return run(...args);
-					};
+		function build<T extends Record<string, RuleChain>>(fields: T) {
+			const validator = create(fields);
+			if (!validateMeta) {
+				return validator as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
+			}
+			// The callback runs BEFORE the payload: meta that is wrong makes
+			// every rule reading it meaningless, so failing early is the only
+			// honest outcome.
+			const guard = <A extends unknown[], R>(
+				run: (...args: A) => R,
+			): ((...args: A) => R) => {
+				return (...args: A): R => {
+					const options = args[1] as { meta?: M } | undefined;
+					validateMeta((options?.meta ?? {}) as M);
+					return run(...args);
 				};
-				return {
-					...validator,
-					validate: guard(validator.validate),
-					validateResult: guard(validator.validateResult),
-					validateResultAsync: guard(validator.validateResultAsync),
-					validateOrThrow: guard(validator.validateOrThrow),
-					validateOrThrowAsync: guard(validator.validateOrThrowAsync),
-					tryValidate: guard(validator.tryValidate),
-					tryValidateSync: guard(validator.tryValidateSync),
-				} as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
-			},
-		};
+			};
+			// Copy DESCRIPTORS, not values: `errorReporter` and
+			// `messagesProvider` are accessor pairs, and a spread would
+			// flatten them into dead plain properties — assigning to the copy
+			// would then silently do nothing.
+			const wrapped: typeof validator = Object.create(
+				Object.getPrototypeOf(validator),
+				Object.getOwnPropertyDescriptors(validator),
+			);
+			Object.assign(wrapped, {
+				validate: guard(validator.validate),
+				validateResult: guard(validator.validateResult),
+				validateResultAsync: guard(validator.validateResultAsync),
+				validateOrThrow: guard(validator.validateOrThrow),
+				validateOrThrowAsync: guard(validator.validateOrThrowAsync),
+				tryValidate: guard(validator.tryValidate),
+				tryValidateSync: guard(validator.tryValidateSync),
+			});
+			return wrapped as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
+		}
+		// VineJS exposes BOTH spellings behind withMetaData; `compile` is the
+		// one its own documentation uses, and it was missing here.
+		return { create: build, compile: build };
 	},
 	/** Process-wide error reporter (VineJS `vine.errorReporter`). */
 	set errorReporter(reporter: Parameters<typeof setGlobalErrorReporter>[0],) {
