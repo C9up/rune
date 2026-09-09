@@ -13,8 +13,12 @@ const CreateOrder = schema({
   name: rules.string().min(3).max(100).trim(),
 })
 
-const result = CreateOrder.validate({ total: 42, email: 'a@b.com', name: '  Alice  ' })
+// `validateResult` reports the failure; `validate` throws it.
+const result = CreateOrder.validateResult({ total: 42, email: 'a@b.com', name: '  Alice  ' })
 // result.valid === true, result.data.name === 'Alice'
+
+const order = await CreateOrder.validate({ total: 42, email: 'a@b.com', name: '  Alice  ' })
+// order.name === 'Alice' — throws RuneValidationError instead of reporting
 ```
 
 ## Features

@@ -468,7 +468,15 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	 * {@link validateResult}.
 	 */
 	validate(data: unknown, options?: ValidateOptions): Promise<T>;
-	/** Result-based validation (rune superset) — synchronous, never throws. */
+	/**
+	 * Result-based validation (rune superset) — synchronous, and it reports a
+	 * failure rather than throwing one.
+	 *
+	 * It DOES throw for one reason, and only one: a schema carrying `unique`,
+	 * `exists` or `useAsync` cannot be decided synchronously, and answering
+	 * "valid" without having run those rules would be the silent pass this
+	 * package exists to prevent. Use {@link validateResultAsync} there.
+	 */
 	validateResult(data: unknown, options?: ValidateOptions): ValidationResult<T>;
 	/** Result-based validation awaiting async rules — never throws. */
 	validateResultAsync(

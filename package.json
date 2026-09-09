@@ -26,7 +26,8 @@
     "lint": "biome check src/ tests/",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build",
+    "prepack": "pnpm build"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",
