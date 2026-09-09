@@ -267,14 +267,39 @@ describe("rune > escaping and normalisation", () => {
 		).toBe("Ada@acme.test");
 	});
 
-	it("strips gmail dots and subaddresses only when asked", () => {
+	it("strips gmail dots and subaddresses BY DEFAULT, as VineJS does", () => {
+		// Normalising is what the caller asked for: the provider rules are on,
+		// and an option is how you turn one off. rune had them opt-IN, which
+		// meant `normalizeEmail()` returned an address Gmail does not use.
+		expect(normalizeEmail("a.d.a+news@gmail.com")).toBe("ada@gmail.com");
 		expect(
 			normalizeEmail("a.d.a+news@gmail.com", {
-				gmailRemoveDots: true,
-				gmailRemoveSubaddress: true,
+				gmail_remove_dots: false,
+				gmail_remove_subaddress: false,
 			}),
-		).toBe("ada@gmail.com");
-		expect(normalizeEmail("a.d.a+news@gmail.com")).toBe("a.d.a+news@gmail.com");
+		).toBe("a.d.a+news@gmail.com");
+		// The camelCase aliases rune added still turn a rule off.
+		expect(
+			normalizeEmail("a.d.a+news@gmail.com", { gmailRemoveDots: false }),
+		).toBe("a.d.a@gmail.com");
+	});
+
+	it("normalises the other providers validator.js knows", () => {
+		// googlemail.com IS gmail.com.
+		expect(normalizeEmail("A.B@googlemail.com")).toBe("ab@gmail.com");
+		// Yahoo's subaddress separator is `-`, and only the LAST one counts.
+		expect(normalizeEmail("Ada-Lovelace-news@yahoo.com")).toBe(
+			"ada-lovelace@yahoo.com",
+		);
+		// Outlook and iCloud drop a `+tag` but keep their dots.
+		expect(normalizeEmail("A.D.A+news@outlook.com")).toBe("a.d.a@outlook.com");
+		expect(normalizeEmail("A.D.A+news@me.com")).toBe("a.d.a@me.com");
+		// Every Yandex domain is yandex.ru.
+		expect(normalizeEmail("Ada@ya.ru")).toBe("ada@yandex.ru");
+	});
+
+	it("keeps a doubled dot, which Gmail treats as a different mailbox", () => {
+		expect(normalizeEmail("a..b@gmail.com")).toBe("a..b@gmail.com");
 	});
 
 	it("leaves the dots of a non-gmail address alone", () => {
@@ -287,21 +312,45 @@ describe("rune > escaping and normalisation", () => {
 		expect(normalizeEmail("not-an-address")).toBe("not-an-address");
 	});
 
+	it("normalises with VineJS's defaults, not with everything switched off", () => {
+		// rune shipped every option defaulting to OFF, so `normalizeUrl()` gave
+		// back very nearly its input. normalize-url — which is what VineJS calls —
+		// strips `www.`, drops utm_ parameters, sorts the query and removes the
+		// trailing slash unless told otherwise.
+		expect(normalizeUrl("https://www.acme.test/")).toBe("https://acme.test");
+		expect(normalizeUrl("https://acme.test/?b=2&a=1")).toBe(
+			"https://acme.test/?a=1&b=2",
+		);
+		expect(normalizeUrl("https://acme.test/?utm_source=x&id=1")).toBe(
+			"https://acme.test/?id=1",
+		);
+		expect(normalizeUrl("https://user:pw@acme.test/")).toBe(
+			"https://acme.test",
+		);
+		expect(normalizeUrl("https://acme.test/p#:~:text=hi")).toBe(
+			"https://acme.test/p",
+		);
+		expect(normalizeUrl("https://acme.test/a///b")).toBe(
+			"https://acme.test/a/b",
+		);
+		// A URL with no protocol gets the default one.
+		expect(normalizeUrl("acme.test/path")).toBe("http://acme.test/path");
+		// And a data URL is normalised on its media type.
+		expect(normalizeUrl("data:text/plain;charset=US-ASCII,Hello")).toBe(
+			"data:,Hello",
+		);
+	});
+
 	it("normalises a URL through each option it offers", () => {
 		expect(normalizeUrl("http://acme.test", { forceHttps: true })).toBe(
-			"https://acme.test/",
+			"https://acme.test",
 		);
-		expect(normalizeUrl("https://www.acme.test/", { stripWWW: true })).toBe(
-			"https://acme.test/",
+		expect(normalizeUrl("https://www.acme.test/", { stripWWW: false })).toBe(
+			"https://www.acme.test",
 		);
 		expect(normalizeUrl("https://acme.test/p#top", { stripHash: true })).toBe(
 			"https://acme.test/p",
 		);
-		expect(
-			normalizeUrl("https://user:pw@acme.test/", {
-				stripAuthentication: true,
-			}),
-		).toBe("https://acme.test/");
 		expect(
 			normalizeUrl("https://acme.test:443/p", { removeExplicitPort: true }),
 		).toBe("https://acme.test/p");
@@ -309,15 +358,18 @@ describe("rune > escaping and normalisation", () => {
 			normalizeUrl("https://acme.test/docs/index.html", {
 				removeDirectoryIndex: true,
 			}),
-		).toBe("https://acme.test/docs/");
+		).toBe("https://acme.test/docs");
 		expect(
 			normalizeUrl("https://acme.test/?b=2&a=1", {
-				sortQueryParameters: true,
+				sortQueryParameters: false,
 			}),
-		).toBe("https://acme.test/?a=1&b=2");
+		).toBe("https://acme.test/?b=2&a=1");
 		expect(normalizeUrl("https://acme.test/", { stripProtocol: true })).toBe(
-			"acme.test/",
+			"acme.test",
 		);
+		expect(
+			normalizeUrl("https://acme.test/p/", { removeTrailingSlash: false }),
+		).toBe("https://acme.test/p/");
 	});
 
 	it("removes query parameters by name and by pattern", () => {
@@ -325,7 +377,19 @@ describe("rune > escaping and normalisation", () => {
 			normalizeUrl("https://acme.test/?utm_source=x&id=1&utm_medium=y", {
 				removeQueryParameters: ["id", /^utm_/],
 			}),
-		).toBe("https://acme.test/");
+		).toBe("https://acme.test");
+	});
+
+	it("keepQueryParameters wins over removeQueryParameters", () => {
+		expect(
+			normalizeUrl("https://acme.test/?a=1&b=2&utm_source=x", {
+				keepQueryParameters: ["a"],
+			}),
+		).toBe("https://acme.test/?a=1");
+		// An empty keep list drops the query entirely.
+		expect(
+			normalizeUrl("https://acme.test/?a=1", { keepQueryParameters: [] }),
+		).toBe("https://acme.test");
 	});
 
 	it("hands back an unparseable URL untouched, for url() to report", () => {

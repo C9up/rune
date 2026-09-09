@@ -915,6 +915,39 @@ const JSON_SCHEMA_TYPES: Record<string, string> = {
 	tuple: "array",
 };
 
+/** The values non-strict `boolean()` accepts, as an `enum` node. */
+const BOOLEAN_JSON_SCHEMA_VALUES: readonly (string | number | boolean)[] = [
+	"1",
+	1,
+	"true",
+	true,
+	"on",
+	"0",
+	0,
+	"false",
+	false,
+	"off",
+];
+
+/** Which container a chain describes, so a length constraint gets its spelling. */
+function containerKindOf(chain: RuleChain): "array" | "object" | "scalar" {
+	for (const rule of chain.rules) {
+		const type = JSON_SCHEMA_TYPES[rule.name];
+		if (type === "array") return "array";
+		if (type === "object") return "object";
+	}
+	return "scalar";
+}
+
+/** The extra characters `alpha()` / `alphaNumeric()` options let through. */
+function alphaExtraCharacters(args: Record<string, unknown>): string {
+	let extra = "";
+	if (args.allowSpaces === true) extra += "\\s";
+	if (args.allowDashes === true) extra += "-";
+	if (args.allowUnderscores === true) extra += "_";
+	return extra;
+}
+
 /**
  * Translate a field map to JSON Schema.
  *
@@ -924,20 +957,36 @@ const JSON_SCHEMA_TYPES: Record<string, string> = {
  */
 function chainToJSONSchema(
 	fields: Record<string, RuleChain>,
+	allowUnknown = false,
 ): Record<string, unknown> {
 	const properties: Record<string, unknown> = {};
 	const required: string[] = [];
 	for (const [field, chain] of Object.entries(fields)) {
 		const node: Record<string, unknown> = {};
+		// A length constraint is spelled differently per container, and JSON
+		// Schema IGNORES the wrong spelling: `minLength` on an array node reads
+		// as no constraint at all. Resolve the container BEFORE walking the
+		// rules, because the type rule is not always the one that comes first.
+		const container = containerKindOf(chain);
+		const lengthKeys =
+			container === "array"
+				? { min: "minItems", max: "maxItems" }
+				: container === "object"
+					? { min: "minProperties", max: "maxProperties" }
+					: { min: "minLength", max: "maxLength" };
 		for (const rule of chain.rules) {
 			const type = JSON_SCHEMA_TYPES[rule.name];
 			if (type !== undefined) node.type = type;
 			const args = rule.args ?? {};
-			if (rule.name === "minLength") node.minLength = args.min ?? rule.param;
-			if (rule.name === "maxLength") node.maxLength = args.max ?? rule.param;
+			if (rule.name === "minLength") {
+				node[lengthKeys.min] = args.min ?? rule.param;
+			}
+			if (rule.name === "maxLength") {
+				node[lengthKeys.max] = args.max ?? rule.param;
+			}
 			if (rule.name === "fixedLength") {
-				node.minLength = args.length ?? rule.param;
-				node.maxLength = args.length ?? rule.param;
+				node[lengthKeys.min] = args.length ?? rule.param;
+				node[lengthKeys.max] = args.length ?? rule.param;
 			}
 			if (rule.name === "min") node.minimum = args.min ?? rule.param;
 			if (rule.name === "max") node.maximum = args.max ?? rule.param;
@@ -956,7 +1005,23 @@ function chainToJSONSchema(
 				node.enum = args.values;
 			}
 			if (rule.name === "literal" && "value" in args) {
-				node.const = args.value;
+				// `enum` with a single member, as VineJS emits it: `const` says the
+				// same thing but only from draft 6 on, and a consumer reading an
+				// older dialect would drop the constraint silently.
+				node.enum = [args.value];
+				const literalType = JSON_SCHEMA_TYPES[typeof args.value];
+				if (literalType !== undefined) node.type = literalType;
+			}
+			// A list of allowed values is an `enum`, whatever the value type.
+			if (rule.name === "in" && Array.isArray(args.values)) {
+				node.enum = args.values;
+			}
+			if (rule.name === "boolean" && args.strict !== true) {
+				// Non-strict `boolean()` accepts the string and numeric spellings
+				// too, so claiming `type: "boolean"` describes a validator that does
+				// not exist. rune's list carries `"off"`, which VineJS's does not.
+				node.enum = BOOLEAN_JSON_SCHEMA_VALUES;
+				delete node.type;
 			}
 			if (rule.name === "notEmpty") node.minItems = 1;
 			if (rule.name === "distinct") node.uniqueItems = true;
@@ -967,9 +1032,17 @@ function chainToJSONSchema(
 			if (rule.name === "nonPositive") node.maximum = 0;
 			if (rule.name === "nullType") node.type = "null";
 			if (rule.name === "ulid") node.pattern = "^[0-7][0-9A-HJKMNP-TV-Z]{25}$";
-			if (rule.name === "alpha") node.pattern = "^[a-zA-Z]+$";
-			if (rule.name === "alphaNumeric") node.pattern = "^[a-zA-Z0-9]+$";
-			if (rule.name === "hexCode") node.format = "color";
+			if (rule.name === "alpha" || rule.name === "alphaNumeric") {
+				// The options widen the character class, so a pattern that ignores
+				// them refuses values the validator accepts.
+				const base = rule.name === "alpha" ? "a-zA-Z" : "a-zA-Z0-9";
+				node.pattern = `^[${base}${alphaExtraCharacters(args)}]+$`;
+			}
+			if (rule.name === "hexCode") {
+				// `format: "color"` is not a JSON Schema format — no validator
+				// enforces it, so the constraint was being dropped.
+				node.pattern = "^#?([0-9a-f]{6}|[0-9a-f]{3}|[0-9a-f]{8})$";
+			}
 			if (rule.name === "ipAddress")
 				node.format = args.version === 6 ? "ipv6" : "ipv4";
 			if (rule.name === "file" || rule.name === "nativeFile") {
@@ -994,11 +1067,10 @@ function chainToJSONSchema(
 		}
 		const nested = chain.getProperties();
 		if (nested) {
-			Object.assign(modified, chainToJSONSchema(nested));
-			// A rune object DROPS undeclared keys unless allowUnknownProperties(),
-			// so the emitted schema must say so — otherwise a consumer generating a
-			// form from it would offer fields the validator silently discards.
-			modified.additionalProperties = chain.allowsUnknown;
+			Object.assign(
+				modified,
+				chainToJSONSchema(nested, chain.allowsUnknown === true),
+			);
 		}
 		if (chain.metadata) Object.assign(modified, chain.metadata);
 
@@ -1034,7 +1106,13 @@ function chainToJSONSchema(
 	return {
 		type: "object",
 		properties,
-		...(required.length > 0 ? { required } : {}),
+		// Always emitted, even empty: a consumer diffing two schemas reads a
+		// missing `required` as "unknown", not as "nothing is required".
+		required,
+		// rune DROPS undeclared keys unless the object allows them, so the schema
+		// has to say so — otherwise a consumer generating a form from it offers
+		// fields the validator silently discards.
+		additionalProperties: allowUnknown,
 	};
 }
 
@@ -1693,7 +1771,7 @@ export function schema(
 	 * otherwise omitted rather than guessed at.
 	 */
 	function toJSONSchema(): Record<string, unknown> {
-		return chainToJSONSchema(fields);
+		return chainToJSONSchema(fields, objectChain?.allowsUnknown === true);
 	}
 
 	/**
@@ -1710,7 +1788,19 @@ export function schema(
 		 */
 		jsonSchema: {
 			input: (): Record<string, unknown> => toJSONSchema(),
-			output: (): Record<string, unknown> => toJSONSchema(),
+			// The OUTPUT type is not derivable: `transform()` and `parse()` take
+			// arbitrary callbacks, so a schema claiming to describe the result
+			// would be a guess. VineJS refuses here too, and returning the input
+			// schema instead was the lie this replaces.
+			output: (): never => {
+				throw new RuneError(
+					"NO_OUTPUT_SCHEMA",
+					"rune cannot describe a validator's OUTPUT as JSON Schema: a transform may produce anything.",
+					{
+						hint: "Use `~standard.jsonSchema.input()` for the shape rune accepts.",
+					},
+				);
+			},
 		},
 		validate: (
 			value: unknown,
@@ -2485,8 +2575,24 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Make every property of an object shape optional (VineJS `partial`). */
+	/**
+	 * Make every property of an object shape optional (VineJS `partial`).
+	 *
+	 * Refuses a shape carrying groups or `allowUnknownProperties()`, as VineJS
+	 * does: a group is a conditional set of properties that cannot stand alone
+	 * as optional, and relaxing one silently would produce a schema that accepts
+	 * a half-filled group.
+	 */
 	partial(keys?: readonly string[]): RuleChain<Output> {
+		if (this.#groups.length > 0 || this.#allowUnknown) {
+			throw new RuneError(
+				"PARTIAL_NOT_APPLICABLE",
+				"partial() cannot relax a shape that has groups or allowUnknownProperties().",
+				{
+					hint: "Relax the properties before grouping them, or list the keys partial() should touch.",
+				},
+			);
+		}
 		// `optional()` mutates and returns the SAME chain, so calling it on the
 		// stored properties made the source shape optional too — `base.partial()`
 		// silently relaxed `base`. Clone each property first, like VineJS does.
@@ -3122,8 +3228,10 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Must be an IP address. Pass `version` to require v4 or v6 specifically. */
-	ipAddress(options?: { version?: 4 | 6 }): this {
-		const version = options?.version;
+	ipAddress(options?: 4 | 6 | { version?: 4 | 6 }): this {
+		// VineJS spells this `ipAddress(6)`. The object form is rune's own and is
+		// kept, because a schema written against it must keep working.
+		const version = typeof options === "number" ? options : options?.version;
 		return this.#stringRule(
 			"ipAddress",
 			(v) => isIpAddress(v, version),

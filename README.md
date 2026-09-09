@@ -25,7 +25,15 @@ const result = CreateOrder.validate({ total: 42, email: 'a@b.com', name: '  Alic
 - `.message()` to override error messages
 - Transforms applied before validation
 - Structured error output with field, rule, message
+- Country and locale tables: postal codes (71), mobile numbering plans (169),
+  passport numbers (61), VAT numbers (69) — an unknown one is refused, never
+  waved through
+- `normalizeEmail()` and `normalizeUrl()`, and a JSON Schema for the shape a
+  validator accepts
+
+No runtime dependencies.
 
 ## License
 
-MIT
+MIT. Two modules are transcribed from MIT-licensed libraries rather than
+depending on them — see [LICENSE-THIRD-PARTY.md](./LICENSE-THIRD-PARTY.md).

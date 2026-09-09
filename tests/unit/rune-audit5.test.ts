@@ -624,7 +624,7 @@ describe("rune > audit 8 — les trois derniers manques", () => {
 			norm({ removeDirectoryIndex: true }).validateOrThrow({
 				u: "https://a.io/dir/index.html",
 			}).u,
-		).toBe("https://a.io/dir/");
+		).toBe("https://a.io/dir");
 	});
 });
 
@@ -810,7 +810,7 @@ describe("rune > audit 9 — contrat du reporter, types optional/null, JSON Sche
 					type: "object",
 					additionalProperties: { type: "number", minimum: 0 },
 				},
-				kind: { const: "card" },
+				kind: { type: "string", enum: ["card"] },
 				n: { type: "integer" },
 			},
 		});
@@ -842,9 +842,11 @@ describe("rune > audit 10 — confirmed(as), ~standard.jsonSchema, vat, meta", (
 		expect(v["~standard"].jsonSchema.input()).toMatchObject({
 			properties: { a: { type: "string", minLength: 2 } },
 		});
-		expect(v["~standard"].jsonSchema.output()).toMatchObject({
-			type: "object",
-		});
+		// output() REFUSES, as VineJS's does: a transform can produce anything,
+		// so a schema claiming to describe the result would be a guess. rune used
+		// to hand back the INPUT schema, which was that guess dressed as an
+		// answer.
+		expect(() => v["~standard"].jsonSchema.output()).toThrow(RuneError);
 	});
 
 	it("vat() valide format ET checksum, et lève sur un pays inconnu", () => {

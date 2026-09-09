@@ -374,8 +374,10 @@ describe("rune > the JSON Schema a validator emits", () => {
 		expect(emitted(rules.string().email())).toMatchObject({ format: "email" });
 		expect(emitted(rules.string().uuid())).toMatchObject({ format: "uuid" });
 		expect(emitted(rules.string().url())).toMatchObject({ format: "uri" });
+		// `format: "color"` is not a JSON Schema format — nothing enforces it, so
+		// the constraint was dropped. VineJS emits the pattern.
 		expect(emitted(rules.string().hexCode())).toMatchObject({
-			format: "color",
+			pattern: "^#?([0-9a-f]{6}|[0-9a-f]{3}|[0-9a-f]{8})$",
 		});
 		expect(emitted(rules.date())).toMatchObject({ format: "date-time" });
 	});
@@ -387,8 +389,11 @@ describe("rune > the JSON Schema a validator emits", () => {
 		expect(emitted(rules.enum(["a", "b"]))).toMatchObject({
 			enum: ["a", "b"],
 		});
+		// A single-member `enum`, as VineJS emits it: `const` only exists from
+		// draft 6 on, and an older dialect drops it silently.
 		expect(emitted(rules.any().literal("invoice"))).toMatchObject({
-			const: "invoice",
+			type: "string",
+			enum: ["invoice"],
 		});
 		expect(emitted(rules.string().alpha())).toMatchObject({
 			pattern: "^[a-zA-Z]+$",

@@ -2,12 +2,19 @@
  * Format validators backing the VineJS string/number/array rules.
  *
  * VineJS delegates these to `validator.js`. rune has zero runtime dependencies,
- * so each check is implemented here. Where VineJS ships a per-locale table we
- * cannot reasonably reproduce in full (mobile numbers, postal codes, passports),
- * rune supports a named subset and **fails closed** on an unknown locale rather
- * than waving the value through — an unchecked value that reports "valid" is the
- * failure mode this package exists to prevent.
+ * so each check is implemented here. The per-locale tables (mobile numbers,
+ * postal codes, passports, VAT) are transcribed in `tables.ts`, and an unknown
+ * locale **fails closed** rather than waving the value through — an unchecked
+ * value that reports "valid" is the failure mode this package exists to
+ * prevent.
  */
+
+import {
+	MOBILE_LOCALES,
+	PASSPORTS,
+	POSTAL_CODES,
+	VAT_RULES,
+} from "./tables.js";
 
 const HEX_RE = /^#?(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 const ULID_RE = /^[0-7][0-9ABCDEFGHJKMNPQRSTVWXYZ]{25}$/i;
@@ -96,74 +103,30 @@ export function isCoordinates(v: string): boolean {
 	return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
 }
 
-/**
- * Postal-code patterns. A named subset of VineJS's table — extend it here rather
- * than at the call site, and see the module note on unknown locales.
- */
-const POSTAL_CODES: Record<string, RegExp> = {
-	AD: /^AD\d{3}$/i,
-	AT: /^\d{4}$/,
-	AU: /^\d{4}$/,
-	BE: /^\d{4}$/,
-	BG: /^\d{4}$/,
-	BR: /^\d{5}-?\d{3}$/,
-	CA: /^[ABCEGHJ-NPRSTVXY]\d[ABCEGHJ-NPRSTV-Z] ?\d[ABCEGHJ-NPRSTV-Z]\d$/i,
-	CH: /^\d{4}$/,
-	CN: /^\d{6}$/,
-	CZ: /^\d{3} ?\d{2}$/,
-	DE: /^\d{5}$/,
-	DK: /^\d{4}$/,
-	EE: /^\d{5}$/,
-	ES: /^\d{5}$/,
-	FI: /^\d{5}$/,
-	FR: /^\d{5}$/,
-	GB: /^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$/i,
-	GR: /^\d{3} ?\d{2}$/,
-	HR: /^\d{5}$/,
-	HU: /^\d{4}$/,
-	IE: /^[A-Z]\d[\dW] ?[A-Z\d]{4}$/i,
-	IL: /^\d{5}(?:\d{2})?$/,
-	IN: /^\d{6}$/,
-	IS: /^\d{3}$/,
-	IT: /^\d{5}$/,
-	JP: /^\d{3}-?\d{4}$/,
-	KR: /^\d{5}$/,
-	LI: /^\d{4}$/,
-	LT: /^(?:LT-)?\d{5}$/i,
-	LU: /^\d{4}$/,
-	LV: /^(?:LV-)?\d{4}$/i,
-	MC: /^980\d{2}$/,
-	MT: /^[A-Z]{3} ?\d{4}$/i,
-	MX: /^\d{5}$/,
-	NL: /^\d{4} ?[A-Z]{2}$/i,
-	NO: /^\d{4}$/,
-	NZ: /^\d{4}$/,
-	PL: /^\d{2}-?\d{3}$/,
-	PT: /^\d{4}-?\d{3}$/,
-	RO: /^\d{6}$/,
-	RU: /^\d{6}$/,
-	SE: /^\d{3} ?\d{2}$/,
-	SI: /^(?:SI-)?\d{4}$/i,
-	SK: /^\d{3} ?\d{2}$/,
-	TR: /^\d{5}$/,
-	UA: /^\d{5}$/,
-	US: /^\d{5}(?:-\d{4})?$/,
-	ZA: /^\d{4}$/,
-};
-
 /** Country codes rune can check postal codes for. */
 export const SUPPORTED_POSTAL_CODES = Object.keys(POSTAL_CODES);
 
+/**
+ * Validate a postal code for one country. `null` for a country rune has no
+ * pattern for, so the caller can fail LOUDLY instead of accepting the value.
+ *
+ * The code is matched AS WRITTEN, like validator.js — every pattern already
+ * states the separators and spacing its country allows.
+ */
 export function isPostalCode(v: string, countryCode: string): boolean | null {
 	const re = POSTAL_CODES[countryCode.toUpperCase()];
-	return re === undefined ? null : re.test(v.trim());
+	return re === undefined ? null : re.test(v);
 }
 
 /**
- * Mobile numbers in E.164 form — the locale-less check. Per-locale plans live
- * in `MOBILE_LOCALES`; see {@link isMobileForLocale}.
+ * The locale-less check behind `mobile()` with no `locale` — VineJS's `"any"`:
+ * the number matches SOME numbering plan.
+ *
+ * Named addition: a well-formed E.164 number is also accepted, so a number for
+ * a country no table covers is not refused for want of a plan.
  */
 export const isMobile = (v: string): boolean =>
+	Object.values(MOBILE_LOCALES).some((re) => re.test(v)) ||
 	E164_RE.test(v.replace(/[ .-]/g, ""));
 
 /** HTML-escape the five characters that break out of markup (VineJS `escape`). */
@@ -179,126 +142,233 @@ export function escapeHtml(v: string): string {
 		.replace(/`/g, "&#96;");
 }
 
-/** Options accepted by `normalizeEmail` (subset of VineJS's). */
+/**
+ * Options accepted by `normalizeEmail`, in validator.js's spelling — the names
+ * VineJS forwards. Every one defaults to `true`, as it does there: normalising
+ * is what the caller asked for, so the provider-specific rules are ON and an
+ * option is how you turn one OFF.
+ */
 export interface NormalizeEmailOptions {
-	/** validator.js spelling — takes precedence over the camelCase alias. */
+	/** Lowercase the local part of every address. */
 	all_lowercase?: boolean;
-	/** validator.js spelling. */
-	gmail_remove_dots?: boolean;
-	/** validator.js spelling. */
-	gmail_remove_subaddress?: boolean;
-	/** Lowercase the whole address. Defaults to `true`, like VineJS. */
-	allLowercase?: boolean;
+	/** Lowercase the local part of a Gmail address. */
+	gmail_lowercase?: boolean;
 	/** Strip dots from a Gmail local part (`a.b@gmail.com` → `ab@gmail.com`). */
+	gmail_remove_dots?: boolean;
+	/** Drop a `+tag` suffix from a Gmail local part. */
+	gmail_remove_subaddress?: boolean;
+	/** Rewrite the `googlemail.com` domain to `gmail.com`. */
+	gmail_convert_googlemaildotcom?: boolean;
+	/** Lowercase the local part of an Outlook.com address. */
+	outlookdotcom_lowercase?: boolean;
+	/** Drop a `+tag` suffix from an Outlook.com local part. */
+	outlookdotcom_remove_subaddress?: boolean;
+	/** Lowercase the local part of a Yahoo address. */
+	yahoo_lowercase?: boolean;
+	/** Drop a `-tag` suffix from a Yahoo local part. */
+	yahoo_remove_subaddress?: boolean;
+	/** Lowercase the local part of a Yandex address. */
+	yandex_lowercase?: boolean;
+	/** Rewrite every Yandex domain to `yandex.ru`. */
+	yandex_convert_yandexru?: boolean;
+	/** Lowercase the local part of an iCloud address. */
+	icloud_lowercase?: boolean;
+	/** Drop a `+tag` suffix from an iCloud local part. */
+	icloud_remove_subaddress?: boolean;
+	/** camelCase alias for {@link NormalizeEmailOptions.all_lowercase}. */
+	allLowercase?: boolean;
+	/** camelCase alias for {@link NormalizeEmailOptions.gmail_remove_dots}. */
 	gmailRemoveDots?: boolean;
-	/** Drop a `+tag` suffix from the local part. */
+	/** camelCase alias for {@link NormalizeEmailOptions.gmail_remove_subaddress}. */
 	gmailRemoveSubaddress?: boolean;
 }
 
-const GMAIL_DOMAINS = new Set(["gmail.com", "googlemail.com"]);
+const GMAIL_DOMAINS = ["gmail.com", "googlemail.com"];
+const ICLOUD_DOMAINS = ["icloud.com", "me.com"];
+const YAHOO_DOMAINS = [
+	"rocketmail.com",
+	"yahoo.ca",
+	"yahoo.co.uk",
+	"yahoo.com",
+	"yahoo.de",
+	"yahoo.fr",
+	"yahoo.in",
+	"yahoo.it",
+	"ymail.com",
+];
+const YANDEX_DOMAINS = [
+	"yandex.ru",
+	"yandex.ua",
+	"yandex.kz",
+	"yandex.com",
+	"yandex.by",
+	"ya.ru",
+];
+/** Outlook.com and its predecessors. Incomplete upstream, and kept verbatim. */
+const OUTLOOK_DOMAINS = [
+	"hotmail.at",
+	"hotmail.be",
+	"hotmail.ca",
+	"hotmail.cl",
+	"hotmail.co.il",
+	"hotmail.co.nz",
+	"hotmail.co.th",
+	"hotmail.co.uk",
+	"hotmail.com",
+	"hotmail.com.ar",
+	"hotmail.com.au",
+	"hotmail.com.br",
+	"hotmail.com.gr",
+	"hotmail.com.mx",
+	"hotmail.com.pe",
+	"hotmail.com.tr",
+	"hotmail.com.vn",
+	"hotmail.cz",
+	"hotmail.de",
+	"hotmail.dk",
+	"hotmail.es",
+	"hotmail.fr",
+	"hotmail.hu",
+	"hotmail.id",
+	"hotmail.ie",
+	"hotmail.in",
+	"hotmail.it",
+	"hotmail.jp",
+	"hotmail.kr",
+	"hotmail.lv",
+	"hotmail.my",
+	"hotmail.ph",
+	"hotmail.pt",
+	"hotmail.sa",
+	"hotmail.sg",
+	"hotmail.sk",
+	"live.be",
+	"live.co.uk",
+	"live.com",
+	"live.com.ar",
+	"live.com.mx",
+	"live.de",
+	"live.es",
+	"live.eu",
+	"live.fr",
+	"live.it",
+	"live.nl",
+	"msn.com",
+	"outlook.at",
+	"outlook.be",
+	"outlook.cl",
+	"outlook.co.il",
+	"outlook.co.nz",
+	"outlook.co.th",
+	"outlook.com",
+	"outlook.com.ar",
+	"outlook.com.au",
+	"outlook.com.br",
+	"outlook.com.gr",
+	"outlook.com.pe",
+	"outlook.com.tr",
+	"outlook.com.vn",
+	"outlook.cz",
+	"outlook.de",
+	"outlook.dk",
+	"outlook.es",
+	"outlook.fr",
+	"outlook.hu",
+	"outlook.id",
+	"outlook.ie",
+	"outlook.in",
+	"outlook.it",
+	"outlook.jp",
+	"outlook.kr",
+	"outlook.lv",
+	"outlook.my",
+	"outlook.ph",
+	"outlook.pt",
+	"outlook.sa",
+	"outlook.sg",
+	"outlook.sk",
+	"passport.com",
+];
 
+/**
+ * Normalise an address to the form its provider actually delivers to
+ * (VineJS `normalizeEmail`, which delegates to validator.js).
+ *
+ * Named deviation: validator.js returns `false` when the rules empty the local
+ * part. That can only happen for an address `email()` would already have
+ * refused, and putting a boolean where a string was is worse than doing
+ * nothing, so rune hands the value back untouched instead.
+ */
 export function normalizeEmail(
 	value: string,
 	options: NormalizeEmailOptions = {},
 ): string {
-	const at = value.lastIndexOf("@");
-	if (at < 1) return value;
-	let local = value.slice(0, at);
-	let domain = value.slice(at + 1);
+	const on = (
+		key: keyof NormalizeEmailOptions,
+		alias?: keyof NormalizeEmailOptions,
+	): boolean =>
+		(options[key] ?? (alias ? options[alias] : undefined)) !== false;
+	const allLowercase = on("all_lowercase", "allLowercase");
+
+	const parts = value.split("@");
+	const rawDomain = parts.pop();
+	if (rawDomain === undefined || parts.length === 0) return value;
+	let local = parts.join("@");
 	// The domain is case-insensitive per RFC 1035, so it is always lowercased.
-	domain = domain.toLowerCase();
-	const allLowercase = options.all_lowercase ?? options.allLowercase;
-	const removeSubaddress =
-		options.gmail_remove_subaddress ?? options.gmailRemoveSubaddress;
-	const removeDots = options.gmail_remove_dots ?? options.gmailRemoveDots;
-	if (allLowercase !== false) local = local.toLowerCase();
-	if (GMAIL_DOMAINS.has(domain)) {
-		if (removeSubaddress) local = local.split("+")[0] ?? local;
-		if (removeDots) local = local.replace(/\./g, "");
-	} else if (removeSubaddress) {
-		local = local.split("+")[0] ?? local;
+	let domain = rawDomain.toLowerCase();
+
+	/** Strip a subaddress introduced by `separator`, keeping what precedes it. */
+	const withoutSubaddress = (separator: string): string => {
+		const components = local.split(separator);
+		return components.length > 1
+			? components.slice(0, -1).join(separator)
+			: (components[0] ?? local);
+	};
+
+	if (GMAIL_DOMAINS.includes(domain)) {
+		if (on("gmail_remove_subaddress", "gmailRemoveSubaddress")) {
+			local = local.split("+")[0] ?? local;
+		}
+		if (on("gmail_remove_dots", "gmailRemoveDots")) {
+			// Consecutive dots are NOT collapsed: Gmail treats `a..b` as its own
+			// address, so removing them would normalise to a different mailbox.
+			local = local.replace(/\.+/g, (run) => (run.length > 1 ? run : ""));
+		}
+		if (local.length === 0) return value;
+		if (allLowercase || on("gmail_lowercase")) local = local.toLowerCase();
+		if (on("gmail_convert_googlemaildotcom")) domain = "gmail.com";
+	} else if (ICLOUD_DOMAINS.includes(domain)) {
+		if (on("icloud_remove_subaddress")) local = local.split("+")[0] ?? local;
+		if (local.length === 0) return value;
+		if (allLowercase || on("icloud_lowercase")) local = local.toLowerCase();
+	} else if (OUTLOOK_DOMAINS.includes(domain)) {
+		if (on("outlookdotcom_remove_subaddress")) {
+			local = local.split("+")[0] ?? local;
+		}
+		if (local.length === 0) return value;
+		if (allLowercase || on("outlookdotcom_lowercase")) {
+			local = local.toLowerCase();
+		}
+	} else if (YAHOO_DOMAINS.includes(domain)) {
+		// Yahoo's subaddress separator is `-`, and it is the LAST one that counts.
+		if (on("yahoo_remove_subaddress")) local = withoutSubaddress("-");
+		if (local.length === 0) return value;
+		if (allLowercase || on("yahoo_lowercase")) local = local.toLowerCase();
+	} else if (YANDEX_DOMAINS.includes(domain)) {
+		if (allLowercase || on("yandex_lowercase")) local = local.toLowerCase();
+		if (on("yandex_convert_yandexru")) domain = "yandex.ru";
+	} else if (allLowercase) {
+		local = local.toLowerCase();
 	}
 	return `${local}@${domain}`;
 }
 
-/** Options accepted by `normalizeUrl` (subset of VineJS's). */
-export interface NormalizeUrlOptions {
-	/** Remove a leading `www.` from the host. */
-	stripWWW?: boolean;
-	/** Force this protocol (e.g. `"https"`). */
-	forceProtocol?: string;
-	/** Rewrite `http:` to `https:` (normalize-url `forceHttps`). */
-	forceHttps?: boolean;
-	/** Drop the trailing slash of an empty path. */
-	stripTrailingSlash?: boolean;
-	/** Drop the trailing slash of ANY path (normalize-url `removeTrailingSlash`). */
-	removeTrailingSlash?: boolean;
-	/** Drop the `#fragment`. */
-	stripHash?: boolean;
-	/** Drop the scheme entirely, leaving `example.com/path`. */
-	stripProtocol?: boolean;
-	/** Drop `user:pass@`. */
-	stripAuthentication?: boolean;
-	/** Drop `:80` / `:443` when they match the scheme's default. */
-	removeExplicitPort?: boolean;
-	/** Sort the query parameters by name, for a stable comparison key. */
-	sortQueryParameters?: boolean;
-	/** Query parameters to remove — names, or patterns matched against names. */
-	removeQueryParameters?: ReadonlyArray<string | RegExp>;
-	/** Drop `index.html` / `index.php`-style directory indexes. */
-	removeDirectoryIndex?: boolean;
-}
-
-export function normalizeUrl(
-	value: string,
-	options: NormalizeUrlOptions = {},
-): string {
-	let url: URL;
-	try {
-		url = new URL(value);
-	} catch {
-		// Not parseable: hand it back untouched and let `url()` report the failure.
-		return value;
-	}
-	if (options.forceProtocol) url.protocol = `${options.forceProtocol}:`;
-	if (options.forceHttps && url.protocol === "http:") url.protocol = "https:";
-	if (options.stripWWW) url.hostname = url.hostname.replace(/^www\./, "");
-	if (options.stripHash) url.hash = "";
-	if (options.stripAuthentication) {
-		url.username = "";
-		url.password = "";
-	}
-	if (
-		options.removeExplicitPort &&
-		((url.protocol === "http:" && url.port === "80") ||
-			(url.protocol === "https:" && url.port === "443"))
-	) {
-		url.port = "";
-	}
-	if (options.removeDirectoryIndex) {
-		url.pathname = url.pathname.replace(/\/index\.(?:html?|php|asp)$/i, "/");
-	}
-	for (const parameter of options.removeQueryParameters ?? []) {
-		for (const name of [...url.searchParams.keys()]) {
-			const matches =
-				typeof parameter === "string"
-					? name === parameter
-					: parameter.test(name);
-			if (matches) url.searchParams.delete(name);
-		}
-	}
-	if (options.sortQueryParameters) url.searchParams.sort();
-
-	let out = url.toString();
-	if (options.removeTrailingSlash) {
-		// Any path, not just the root one.
-		out = out.replace(/\/(?=(?:\?|#|$))/, "");
-	} else if (options.stripTrailingSlash && url.pathname === "/") {
-		out = out.replace(/\/(?=(?:\?|#|$))/, "");
-	}
-	if (options.stripProtocol) out = out.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
-	return out;
-}
+export {
+	type EmptyQueryValue,
+	type NormalizeUrlOptions,
+	normalizeUrl,
+	type ParameterFilter,
+} from "./normalize-url.js";
 
 /** `dash-case`, `snake_case` and spaced words to `camelCase`. */
 export function toCamelCase(v: string): string {
@@ -310,48 +380,17 @@ export function toCamelCase(v: string): string {
 		.replace(/^(.)/, (c) => c.toLowerCase());
 }
 
-/**
- * Passport numbers. Named subset, same fail-closed contract as
- * {@link isPostalCode}: an unknown country returns `null`.
- */
-const PASSPORTS: Record<string, RegExp> = {
-	AT: /^[A-Z]\d{7}$/i,
-	AU: /^[A-Z]\d{7}$/i,
-	BE: /^[A-Z]{2}\d{6}$/i,
-	CA: /^[A-Z]{2}\d{6}$/i,
-	CH: /^[A-Z]\d{7}$/i,
-	CZ: /^\d{8}$/,
-	DE: /^[CFGHJKLMNPRTVWXYZ0-9]{9}$/i,
-	DK: /^\d{9}$/,
-	ES: /^[A-Z]{3}\d{6}$/i,
-	FI: /^[A-Z]{2}\d{7}$/i,
-	FR: /^\d{2}[A-Z]{2}\d{5}$/i,
-	GB: /^\d{9}$/,
-	GR: /^[A-Z]{2}\d{7}$/i,
-	HU: /^[A-Z]{2}\d{6}$/i,
-	IE: /^[A-Z0-9]{2}\d{7}$/i,
-	IN: /^[A-Z]\d{7}$/i,
-	IT: /^[A-Z0-9]{2}\d{7}$/i,
-	JP: /^[A-Z]{2}\d{7}$/i,
-	KR: /^[MS]\d{8}$/i,
-	NL: /^[A-Z]{2}\d{6}[A-Z0-9]$/i,
-	NO: /^\d{8}$/,
-	PL: /^[A-Z]{2}\d{7}$/i,
-	PT: /^[A-Z]\d{6}$/i,
-	RO: /^\d{8,9}$/,
-	RU: /^\d{9}$/,
-	SE: /^\d{8}$/,
-	TR: /^[A-Z]\d{8}$/i,
-	UA: /^[A-Z]{2}\d{6}$/i,
-	US: /^\d{9}$/,
-	ZA: /^[TAMD]\d{8}$/i,
-};
-
+/** Countries `passport()` can check. */
 export const SUPPORTED_PASSPORTS = Object.keys(PASSPORTS);
 
+/**
+ * Validate a passport number for one country. Whitespace is removed and the
+ * value uppercased first, as validator.js does.
+ */
 export function isPassport(v: string, countryCode: string): boolean | null {
 	const re = PASSPORTS[countryCode.toUpperCase()];
-	return re === undefined ? null : re.test(v.trim());
+	if (re === undefined) return null;
+	return re.test(v.replace(/\s/g, "").toUpperCase());
 }
 
 /** Options accepted by `alpha()` / `alphaNumeric()` (VineJS spelling). */
@@ -419,60 +458,20 @@ export function isUrlWithOptions(
 	return true;
 }
 
-/**
- * Mobile numbering plans. Named subset of VineJS's `locale` table, same
- * fail-closed contract as the postal codes: an unknown locale returns `null`.
- */
-const MOBILE_LOCALES: Record<string, RegExp> = {
-	"fr-CH": /^(?:\+41|0)7[5-9]\d{7}$/,
-	"de-CH": /^(?:\+41|0)7[5-9]\d{7}$/,
-	"it-CH": /^(?:\+41|0)7[5-9]\d{7}$/,
-	"fr-FR": /^(?:\+33|0)[67]\d{8}$/,
-	"fr-BE": /^(?:\+32|0)4[5-9]\d{7}$/,
-	"nl-BE": /^(?:\+32|0)4[5-9]\d{7}$/,
-	"en-US": /^(?:\+1)?[2-9]\d{9}$/,
-	"en-CA": /^(?:\+1)?[2-9]\d{9}$/,
-	"en-GB": /^(?:\+44|0)7\d{9}$/,
-	"en-IE": /^(?:\+353|0)8[35-9]\d{7}$/,
-	"en-AU": /^(?:\+61|0)4\d{8}$/,
-	"en-NZ": /^(?:\+64|0)2\d{7,9}$/,
-	"en-IN": /^(?:\+91|0)?[6-9]\d{9}$/,
-	"de-DE": /^(?:\+49|0)1[5-7]\d{8,9}$/,
-	"de-AT": /^(?:\+43|0)6[4-9]\d{7,10}$/,
-	"it-IT": /^(?:\+39)?3\d{8,9}$/,
-	"es-ES": /^(?:\+34)?[679]\d{8}$/,
-	"pt-PT": /^(?:\+351)?9[1236]\d{7}$/,
-	"pt-BR": /^(?:\+55)?(?:\d{2})?9?\d{8}$/,
-	"nl-NL": /^(?:\+31|0)6\d{8}$/,
-	"da-DK": /^(?:\+45)?\d{8}$/,
-	"sv-SE": /^(?:\+46|0)7[02369]\d{7}$/,
-	"nb-NO": /^(?:\+47)?[49]\d{7}$/,
-	"fi-FI": /^(?:\+358|0)4\d{5,10}$/,
-	"pl-PL": /^(?:\+48)?\d{9}$/,
-	"cs-CZ": /^(?:\+420)?[6-7]\d{8}$/,
-	"sk-SK": /^(?:\+421)?9\d{8}$/,
-	"hu-HU": /^(?:\+36|06)(?:20|30|31|50|70)\d{7}$/,
-	"ro-RO": /^(?:\+40|0)7\d{8}$/,
-	"el-GR": /^(?:\+30|0)6[89]\d{8}$/,
-	"tr-TR": /^(?:\+90|0)5\d{9}$/,
-	"ru-RU": /^(?:\+7|8)9\d{9}$/,
-	"uk-UA": /^(?:\+380|0)\d{9}$/,
-	"ja-JP": /^(?:\+81|0)[7-9]0\d{8}$/,
-	"ko-KR": /^(?:\+82|0)1[0-9]\d{7,8}$/,
-	"zh-CN": /^(?:\+86|0)?1[3-9]\d{9}$/,
-	"zh-TW": /^(?:\+886|0)9\d{8}$/,
-	"ar-AE": /^(?:\+971|0)5[0245678]\d{7}$/,
-	"ar-SA": /^(?:\+966|0)5\d{8}$/,
-	"he-IL": /^(?:\+972|0)5[0-9]\d{7}$/,
-	"en-ZA": /^(?:\+27|0)[6-8]\d{8}$/,
-};
-
+/** Locales `mobile()` can check a numbering plan for. */
 export const SUPPORTED_MOBILE_LOCALES = Object.keys(MOBILE_LOCALES);
 
+/**
+ * Match one locale's numbering plan. `null` for a locale rune has no plan for,
+ * so the caller can fail LOUDLY instead of accepting the value.
+ *
+ * The number is matched AS WRITTEN, like validator.js: every plan already
+ * states the separators it allows.
+ */
 export function isMobileForLocale(v: string, locale: string): boolean | null {
 	const re = MOBILE_LOCALES[locale];
 	if (re === undefined) return null;
-	return re.test(v.replace(/[ .-]/g, ""));
+	return re.test(v);
 }
 
 /**
@@ -625,7 +624,7 @@ export function isEmail(value: string, options: EmailOptions = {}): boolean {
 
 	if (
 		options.domain_specific_validation &&
-		GMAIL_DOMAINS.has(domain.toLowerCase())
+		GMAIL_DOMAINS.includes(domain.toLowerCase())
 	) {
 		// Gmail: 6..30 chars, letters/digits/dots only, no leading/trailing dot,
 		// no doubled dot — and dots are ignored for the length check.
@@ -645,138 +644,34 @@ export interface VatOptions {
 	countryCode: string | string[];
 }
 
-/**
- * VAT number patterns, per country. `check` runs the country's own checksum
- * when there is a short, well-defined one; countries without a `check` are
- * validated on FORMAT only, and that is stated rather than implied.
- */
-const VAT_RULES: Record<
-	string,
-	{ pattern: RegExp; check?: (digits: string) => boolean }
-> = {
-	// mod-97 on the 9 leading digits (the two check digits are the last two).
-	BE: {
-		pattern: /^BE0?\d{9}$/i,
-		check: (d) => mod97(d.slice(0, 8)) === Number(d.slice(8, 10)),
-	},
-	FR: { pattern: /^FR[0-9A-Z]{2}\d{9}$/i },
-	DE: { pattern: /^DE\d{9}$/i, check: (d) => germanChecksum(d) },
-	NL: { pattern: /^NL\d{9}B\d{2}$/i, check: (d) => dutchChecksum(d) },
-	IT: { pattern: /^IT\d{11}$/i, check: (d) => luhnLike(d) },
-	ES: { pattern: /^ES[0-9A-Z]\d{7}[0-9A-Z]$/i },
-	PT: { pattern: /^PT\d{9}$/i, check: (d) => mod11(d) },
-	LU: {
-		pattern: /^LU\d{8}$/i,
-		check: (d) => Number(d.slice(0, 6)) % 89 === Number(d.slice(6, 8)),
-	},
-	AT: { pattern: /^ATU\d{8}$/i },
-	DK: { pattern: /^DK\d{8}$/i },
-	FI: { pattern: /^FI\d{8}$/i },
-	SE: { pattern: /^SE\d{12}$/i },
-	IE: { pattern: /^IE(?:\d{7}[A-W]{1,2}|\d[A-Z+*]\d{5}[A-W])$/i },
-	PL: { pattern: /^PL\d{10}$/i },
-	CZ: { pattern: /^CZ\d{8,10}$/i },
-	SK: { pattern: /^SK\d{10}$/i },
-	GR: { pattern: /^(?:EL|GR)\d{9}$/i },
-	HU: { pattern: /^HU\d{8}$/i },
-	RO: { pattern: /^RO\d{2,10}$/i },
-	BG: { pattern: /^BG\d{9,10}$/i },
-	HR: { pattern: /^HR\d{11}$/i },
-	SI: { pattern: /^SI\d{8}$/i },
-	EE: { pattern: /^EE\d{9}$/i },
-	LV: { pattern: /^LV\d{11}$/i },
-	LT: { pattern: /^LT(?:\d{9}|\d{12})$/i },
-	MT: { pattern: /^MT\d{8}$/i },
-	CY: { pattern: /^CY\d{8}[A-Z]$/i },
-	GB: { pattern: /^GB(?:\d{9}|\d{12}|GD\d{3}|HA\d{3})$/i },
-	CH: {
-		pattern: /^CHE\d{9}(?:TVA|MWST|IVA)?$/i,
-		check: (d) => swissUidChecksum(d),
-	},
-};
-
 /** Countries `vat()` can check. */
 export const SUPPORTED_VAT_COUNTRIES = Object.keys(VAT_RULES);
-
-/** Plain mod-97 over a digit string. */
-function mod97(digits: string): number {
-	let remainder = 0;
-	for (const digit of digits) {
-		remainder = (remainder * 10 + (digit.charCodeAt(0) - 48)) % 97;
-	}
-	return 97 - remainder;
-}
-
-/** ISO 7064 mod-11 used by the Portuguese NIF. */
-function mod11(digits: string): boolean {
-	let sum = 0;
-	for (let i = 0; i < 8; i++) {
-		sum += (digits.charCodeAt(i) - 48) * (9 - i);
-	}
-	const check = 11 - (sum % 11);
-	const expected = check >= 10 ? 0 : check;
-	return expected === digits.charCodeAt(8) - 48;
-}
-
-/** German USt-IdNr. checksum (the "11-test" defined by the Bundeszentralamt). */
-function germanChecksum(digits: string): boolean {
-	let product = 10;
-	for (let i = 0; i < 8; i++) {
-		const digit = digits.charCodeAt(i) - 48;
-		let sum = (digit + product) % 10;
-		if (sum === 0) sum = 10;
-		product = (2 * sum) % 11;
-	}
-	const check = 11 - product;
-	return (check === 10 ? 0 : check) === digits.charCodeAt(8) - 48;
-}
-
-/** Dutch BTW checksum: weighted 9..2 mod 11 over the first 8 digits. */
-function dutchChecksum(digits: string): boolean {
-	let sum = 0;
-	for (let i = 0; i < 8; i++) {
-		sum += (digits.charCodeAt(i) - 48) * (9 - i);
-	}
-	return sum % 11 === digits.charCodeAt(8) - 48;
-}
-
-/** Italian partita IVA: Luhn over 11 digits. */
-function luhnLike(digits: string): boolean {
-	let sum = 0;
-	for (let i = 0; i < 11; i++) {
-		let digit = digits.charCodeAt(i) - 48;
-		if (i % 2 === 1) {
-			digit *= 2;
-			if (digit > 9) digit -= 9;
-		}
-		sum += digit;
-	}
-	return sum % 10 === 0;
-}
-
-/** Swiss UID (CHE): weights 5,4,3,2,7,6,5,4 mod 11. */
-function swissUidChecksum(digits: string): boolean {
-	const weights = [5, 4, 3, 2, 7, 6, 5, 4];
-	let sum = 0;
-	for (const [i, weight] of weights.entries()) {
-		sum += (digits.charCodeAt(i) - 48) * weight;
-	}
-	const remainder = sum % 11;
-	if (remainder === 10) return false;
-	const check = remainder === 0 ? 0 : 11 - remainder;
-	return check === digits.charCodeAt(8) - 48;
-}
 
 /**
  * Validate a VAT number for one country. Returns `null` when the country has no
  * rule, so the caller can fail LOUDLY instead of accepting the value.
+ *
+ * Four attempts, and the value is accepted if any lands: each pattern is tried
+ * against the value AS WRITTEN and against a form stripped of separators and
+ * uppercased.
+ *
+ * `pattern` is the country's shape as VineJS validates it. `legacy` is the
+ * shape rune validated before those were transcribed — kept because the two
+ * disagree in both directions (VineJS's `GB` demands the spaces, rune's `IE`
+ * knows the old-style number) and dropping either would refuse numbers one of
+ * them accepts today. Matching as written is what VineJS does; the stripped
+ * retry is rune's own tolerance, and it is why `BY` still works — its prefix
+ * carries a space no register writes twice.
  */
 export function isVat(value: string, countryCode: string): boolean | null {
 	const rule = VAT_RULES[countryCode.toUpperCase()];
 	if (rule === undefined) return null;
-	const normalized = value.replace(/[\s.-]/g, "").toUpperCase();
-	if (!rule.pattern.test(normalized)) return false;
+	const stripped = value.replace(/[\s.-]/g, "").toUpperCase();
+	const matches = [value, stripped].some(
+		(candidate) =>
+			rule.pattern.test(candidate) || (rule.legacy?.test(candidate) ?? false),
+	);
+	if (!matches) return false;
 	if (!rule.check) return true;
-	const digits = normalized.replace(/[^0-9]/g, "");
-	return rule.check(digits);
+	return rule.check(value.replace(/\D/g, ""));
 }

@@ -1,6 +1,6 @@
 {
   "name": "@c9up/rune",
-  "version": "0.1.16",
+  "version": "0.2.0",
   "description": "Rune — Validation engine for the Ream framework",
   "license": "MIT",
   "type": "module",
@@ -8,6 +8,7 @@
   "types": "./src/index.ts",
   "files": [
     "LICENSE",
+    "LICENSE-THIRD-PARTY.md",
     "README.md",
     "dist",
     "index.*.node",
