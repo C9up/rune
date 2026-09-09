@@ -95,3 +95,34 @@ describe("rune > testing helpers", () => {
 		expect(field.name).toBe("b");
 	});
 });
+
+describe("@c9up/rune/testing > reporting against another field", () => {
+	it("field.report(msg, rule, otherPath) blames the field it names", () => {
+		// The runtime honours the third argument — `sameAs` blames the
+		// confirmation, not the password. A helper that ignored it disagreed with
+		// the very runtime it stands in for.
+		const blamesSibling = createRule((_value, _options: undefined, field) => {
+			field.report("does not match", "sameAs", "passwordConfirmation");
+		});
+		const result = runRule(blamesSibling(), "secret", { path: "password" });
+		expect(result.errors[0]?.field).toBe("passwordConfirmation");
+	});
+
+	it("a reported FieldContext is resolved through getFieldPath()", () => {
+		const other = fieldContext("other", { path: "profile.email" });
+		const blamesContext = createRule((_value, _options: undefined, field) => {
+			field.report("bad", "custom", other);
+		});
+		const result = runRule(blamesContext(), "x", { path: "main" });
+		expect(result.errors[0]?.field).toBe("profile.email");
+	});
+
+	it("omitting the third argument still blames the current field", () => {
+		const blamesSelf = createRule((_value, _options: undefined, field) => {
+			field.report("bad", "custom");
+		});
+		expect(runRule(blamesSelf(), "x", { path: "main" }).errors[0]?.field).toBe(
+			"main",
+		);
+	});
+});

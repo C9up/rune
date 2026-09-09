@@ -107,11 +107,19 @@ export function fieldContext(
 		report(
 			message: string,
 			rule: string,
-			_field?: string | FieldContext,
+			reportedField?: string | FieldContext,
 			args?: Record<string, unknown>,
 		): void {
+			// A rule may report against ANOTHER field — `sameAs` blames the
+			// confirmation, not the password. Dropping the third argument made the
+			// helper disagree with the runtime it exists to stand in for, which is
+			// the one thing a test helper must never do.
+			const target =
+				typeof reportedField === "string"
+					? reportedField
+					: (reportedField?.getFieldPath() ?? path);
 			options.onReport?.({
-				field: path,
+				field: target,
 				rule,
 				message,
 				...(args ? { meta: args } : {}),

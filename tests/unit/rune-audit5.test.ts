@@ -1180,3 +1180,108 @@ describe("rune > audit 13 — async rules and the messages provider", () => {
 		expect(result.errors[0]?.message).toBe("0 is too short");
 	});
 });
+
+describe("rune > audit 14", () => {
+	it("{ async: true } — the spelling VineJS documents — awaits the rule", async () => {
+		// VineJS's docs show `vine.createRule(fn, { async: true })`; its code reads
+		// only `isAsync`, so upstream builds this rule SYNCHRONOUS and drops the
+		// Promise: the payload validates while the rule is still refusing it.
+		// Verified against @vinejs/vine 4.4.0, which returns the value unchanged.
+		const rejects = createRule(
+			(_value: unknown, _options: undefined, field) =>
+				new Promise<void>((resolve) => {
+					setTimeout(() => {
+						field.report("already taken", "unique", field);
+						resolve();
+					}, 1);
+				}),
+			{ async: true },
+		);
+		const result = await schema({
+			email: rules.string().useAsync(rejects()),
+		}).validateResultAsync({ email: "taken@example.com" });
+		expect(result.valid).toBe(false);
+		expect(result.errors[0]?.rule).toBe("unique");
+	});
+
+	it("{ async: true } and { isAsync: true } build the same kind of rule", () => {
+		// Deliberately NOT declared `async`: an AsyncFunction would be detected
+		// on its own, so the test would pass without either option being read.
+		const body = (): Promise<void> => Promise.resolve();
+		expect(createRule(body, { async: true })().__rune).toBe("asyncRule");
+		expect(createRule(body, { isAsync: true })().__rune).toBe("asyncRule");
+	});
+
+	it("a per-validator messagesProvider is honoured", () => {
+		const validator = schema({ name: rules.string() });
+		validator.messagesProvider = new SimpleMessagesProvider({
+			required: "{{ field }} is mandatory",
+		});
+		const result = validator.validateResult({});
+		expect(result.errors[0]?.message).toBe("name is mandatory");
+	});
+
+	it("the async path honours the validator's provider too", async () => {
+		// validateResultAsync builds its own run context; the first fix touched
+		// only the sync gate, so this path needed its own wiring.
+		const validator = schema({ name: rules.string() });
+		validator.messagesProvider = new SimpleMessagesProvider({
+			required: "{{ field }} is mandatory",
+		});
+		const result = await validator.validateResultAsync({});
+		expect(result.errors[0]?.message).toBe("name is mandatory");
+	});
+
+	it("a per-call messagesProvider still wins over the validator's", () => {
+		const validator = schema({ name: rules.string() });
+		validator.messagesProvider = new SimpleMessagesProvider({
+			required: "from the validator",
+		});
+		const result = validator.validateResult(
+			{},
+			{
+				messagesProvider: new SimpleMessagesProvider({
+					required: "from the call",
+				}),
+			},
+		);
+		expect(result.errors[0]?.message).toBe("from the call");
+	});
+
+	it("the validator's provider is readable back and clearable", () => {
+		const validator = schema({ name: rules.string() });
+		expect(validator.messagesProvider).toBe(null);
+		const provider = new SimpleMessagesProvider({ required: "nope" });
+		validator.messagesProvider = provider;
+		expect(validator.messagesProvider).toBe(provider);
+		validator.messagesProvider = null;
+		expect(validator.validateResult({}).errors[0]?.message).not.toBe("nope");
+	});
+
+	it("jsonSchema.input() accepts the target it actually emits", () => {
+		const validator = schema({ name: rules.string() });
+		const standard = validator["~standard"];
+		expect(standard.jsonSchema.input({ target: "draft-2020-12" })).toEqual(
+			standard.jsonSchema.input(),
+		);
+	});
+
+	it("jsonSchema.input() refuses a dialect rune does not emit", () => {
+		const standard = schema({ name: rules.string() })["~standard"];
+		// The Standard JSON Schema spec says to throw rather than hand back a
+		// shape the caller will read under different rules — `openapi-3.0` spells
+		// nullability `nullable: true`, not a `type` array.
+		for (const target of ["openapi-3.0", "draft-07", "unknown"]) {
+			expect(() => standard.jsonSchema.input({ target })).toThrowError(
+				RuneError,
+			);
+		}
+		let code: string | undefined;
+		try {
+			standard.jsonSchema.input({ target: "openapi-3.0" });
+		} catch (error) {
+			if (error instanceof RuneError) code = error.code;
+		}
+		expect(code).toBe("E_RUNE_UNSUPPORTED_JSON_SCHEMA_TARGET");
+	});
+});

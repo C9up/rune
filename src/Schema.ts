@@ -195,7 +195,18 @@ export interface CreateRuleOptions {
 	 * whose Promise nobody awaits.
 	 */
 	isAsync?: boolean;
+	/**
+	 * The spelling VineJS DOCUMENTS for the same thing (`{ async: true }`).
+	 * Its implementation reads only `isAsync`, so a rule written from the
+	 * documentation is built synchronous there and its Promise is dropped —
+	 * the rule reports into nothing and the payload validates. rune honours
+	 * both spellings so the documented form does what it says.
+	 */
+	async?: boolean;
 }
+
+/** Either spelling of "this rule is asynchronous". */
+type AsyncRuleFlag = { isAsync: true } | { async: true };
 
 // `isAsync: true` genuinely produces an AsyncCompiledRule — a different
 // discriminant (`__rune: "asyncRule"`) that `.use()` routes to the awaited
@@ -218,11 +229,11 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 // what runs.
 export function createRule(
 	validator: AsyncRuleValidator<undefined>,
-	options: CreateRuleOptions & { isAsync: true },
+	options: CreateRuleOptions & AsyncRuleFlag,
 ): () => AsyncCompiledRule;
 export function createRule<Options>(
 	validator: AsyncRuleValidator<Options>,
-	options: CreateRuleOptions & { isAsync: true },
+	options: CreateRuleOptions & AsyncRuleFlag,
 ): (options: Options) => AsyncCompiledRule;
 export function createRule(
 	validator: PromiseRuleValidator<undefined>,
@@ -244,7 +255,11 @@ export function createRule<Options>(
 	validator: RuleValidator<Options> | AsyncRuleValidator<Options>,
 	ruleOptions?: CreateRuleOptions,
 ): (options: Options) => CompiledRule | AsyncCompiledRule {
-	if (ruleOptions?.isAsync || isAsyncFunction(validator)) {
+	if (
+		ruleOptions?.isAsync ||
+		ruleOptions?.async ||
+		isAsyncFunction(validator)
+	) {
 		// VineJS expresses "async" as an option on createRule, so honour it by
 		// BUILDING the async rule rather than refusing: `.use()` routes an
 		// async-marked rule to the awaited register.
@@ -257,6 +272,7 @@ export function createRule<Options>(
 		const asyncBuilder = createAsyncRule(validator, {
 			...ruleOptions,
 			isAsync: undefined,
+			async: undefined,
 		});
 		return asyncBuilder;
 	}
@@ -277,7 +293,7 @@ export function createRule<Options>(
 					"ASYNC_RULE_NOT_AWAITED",
 					`rule '${ruleOptions?.name ?? (validator.name || "anonymous")}' returned a promise but is not declared async, so its verdict would arrive after validation ended.`,
 					{
-						hint: "Declare the validator `async`, or pass { isAsync: true } to createRule().",
+						hint: "Declare the validator `async`, or pass { async: true } (alias { isAsync: true }) to createRule().",
 					},
 				);
 			}
@@ -494,6 +510,45 @@ function reportedFieldContext(
 	};
 }
 
+/**
+ * A JSON Schema dialect a caller may ask `~standard.jsonSchema` for. The three
+ * named ones come from the Standard JSON Schema spec; the open end keeps the
+ * literals in autocomplete while still admitting a future dialect.
+ */
+export type JsonSchemaTarget =
+	| "draft-2020-12"
+	| "draft-07"
+	| "openapi-3.0"
+	| (string & Record<never, never>);
+
+/** Options accepted by `~standard.jsonSchema.input()` / `.output()`. */
+export interface JsonSchemaOptions {
+	/** Dialect to emit. Defaults to `"draft-2020-12"`, the only one rune emits. */
+	target?: JsonSchemaTarget;
+}
+
+/**
+ * The dialect rune's emitter actually produces. `prefixItems` (tuples) is
+ * draft-2020-12 only, so claiming draft-07 would be a lie for any schema
+ * carrying a tuple; `openapi-3.0` spells nullability `nullable: true` rather
+ * than a `type` array. The spec's instruction for a dialect a library does not
+ * support is to throw, which beats handing back a shape the caller will feed to
+ * a validator that reads it differently.
+ */
+const SUPPORTED_JSON_SCHEMA_TARGET = "draft-2020-12";
+
+/** Refuse a dialect rune does not emit, rather than hand back the wrong one. */
+function assertJsonSchemaTarget(target?: JsonSchemaTarget): void {
+	if (target === undefined || target === SUPPORTED_JSON_SCHEMA_TARGET) return;
+	throw new RuneError(
+		"UNSUPPORTED_JSON_SCHEMA_TARGET",
+		`rune emits ${SUPPORTED_JSON_SCHEMA_TARGET} JSON Schema, not '${target}'.`,
+		{
+			hint: `Ask for '${SUPPORTED_JSON_SCHEMA_TARGET}', or omit the target to get it.`,
+		},
+	);
+}
+
 export interface ValidationSchema<T = Record<string, unknown>> {
 	fields: Record<string, RuleChain>;
 	/**
@@ -512,8 +567,8 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 		vendor: string;
 		/** Standard JSON Schema v1 props (VineJS 4.3+). */
 		jsonSchema: {
-			input(): Record<string, unknown>;
-			output(): Record<string, unknown>;
+			input(options?: JsonSchemaOptions): Record<string, unknown>;
+			output(options?: JsonSchemaOptions): Record<string, unknown>;
 		};
 		validate(
 			value: unknown,
@@ -530,6 +585,11 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 		| ErrorReporterFactory
 		| ((error: ValidationError) => void)
 		| null;
+	/**
+	 * Messages provider for this validator (VineJS `validator.messagesProvider`).
+	 * A per-call option still wins; this wins over the process-wide one.
+	 */
+	messagesProvider: MessagesProviderContract | null;
 	/** Introspection of the compiled schema — VineJS `{ schema, refs }` shape. */
 	toJSON(): { schema: SchemaIntrospection; refs: string[] };
 	/** JSON Schema for the compiled validator (VineJS `toJSONSchema`). */
@@ -1592,6 +1652,10 @@ export function schema(
 		| ErrorReporterFactory
 		| ((error: ValidationError) => void)
 		| null = null;
+	// Per-validator messages provider (VineJS `validator.messagesProvider = …`).
+	// Sits between the per-call provider and the global one, exactly as the
+	// reporter does: the narrower scope wins.
+	let validatorMessagesProvider: MessagesProviderContract | null = null;
 	// Set by the last run; the throwing entry points prefer the reporter's own
 	// error, because VineJS lets the reporter decide the failure shape.
 	let reporterError: (() => Error) | undefined;
@@ -1654,7 +1718,10 @@ export function schema(
 		// The global provider counts exactly like a per-call one: the Rust engine
 		// renders default messages, so routing there would silently ignore it.
 		const provider =
-			options?.messagesProvider ?? globalMessagesProvider ?? undefined;
+			options?.messagesProvider ??
+			validatorMessagesProvider ??
+			globalMessagesProvider ??
+			undefined;
 		if (!hasCustomRules && !validationTranslator && !provider) {
 			if (isNativeAvailable()) {
 				const native = validateWithRust(fields, data);
@@ -1776,7 +1843,10 @@ export function schema(
 			meta: options?.meta ?? {},
 			errorReporter: options?.errorReporter,
 			messagesProvider:
-				options?.messagesProvider ?? globalMessagesProvider ?? undefined,
+				options?.messagesProvider ??
+				validatorMessagesProvider ??
+				globalMessagesProvider ??
+				undefined,
 		};
 
 		for (const [field, chain] of Object.entries(fields)) {
@@ -1910,12 +1980,16 @@ export function schema(
 		 * `input` describes what may be sent, `output` what validation returns.
 		 */
 		jsonSchema: {
-			input: (): Record<string, unknown> => toJSONSchema(),
+			input: (options?: JsonSchemaOptions): Record<string, unknown> => {
+				assertJsonSchemaTarget(options?.target);
+				return toJSONSchema();
+			},
 			// The OUTPUT type is not derivable: `transform()` and `parse()` take
 			// arbitrary callbacks, so a schema claiming to describe the result
 			// would be a guess. VineJS refuses here too, and returning the input
 			// schema instead was the lie this replaces.
-			output: (): never => {
+			output: (options?: JsonSchemaOptions): never => {
+				assertJsonSchemaTarget(options?.target);
 				throw new RuneError(
 					"NO_OUTPUT_SCHEMA",
 					"rune cannot describe a validator's OUTPUT as JSON Schema: a transform may produce anything.",
@@ -1954,6 +2028,13 @@ export function schema(
 			| ((error: ValidationError) => void)
 			| null,) {
 			validatorErrorReporter = reporter;
+		},
+		/** Per-validator messages provider (VineJS `validator.messagesProvider`). */
+		get messagesProvider() {
+			return validatorMessagesProvider;
+		},
+		set messagesProvider(provider: MessagesProviderContract | null) {
+			validatorMessagesProvider = provider;
 		},
 		// ALWAYS a chain, even when the validator was built from a bare field map:
 		// VineJS documents `createUserValidator.schema.partial()`, and returning
