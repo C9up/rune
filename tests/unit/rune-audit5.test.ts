@@ -888,3 +888,106 @@ describe("rune > audit 10 — confirmed(as), ~standard.jsonSchema, vat, meta", (
 		});
 	});
 });
+
+describe("rune > audit 11 — root failures and file content", () => {
+	/** A real PNG header: the bytes the content check is meant to recognise. */
+	const PNG = new Uint8Array([
+		0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13,
+	]);
+	/** A reporter that decides its own failure shape, as VineJS lets it. */
+	const reporterFactory = () => ({
+		hasErrors: true,
+		createError: () => new Error("from the reporter"),
+		report: () => undefined,
+	});
+
+	it("the reporter decides the shape of a ROOT failure too", () => {
+		// The non-object guard returned the verdict directly, before the reporter
+		// was ever built: `validateOrThrow(null)` threw rune's own error while a
+		// reporter was bound, so a caller relying on the reporter's exception saw
+		// the wrong type exactly on the malformed-payload path.
+		const v = create({ a: rules.string() });
+		v.errorReporter = reporterFactory;
+		expect(() => v.validateOrThrow(null)).toThrowError("from the reporter");
+		v.errorReporter = null;
+	});
+
+	it("a root failure REPORTS, it does not just fail", () => {
+		const seen: string[] = [];
+		const res = create({ a: rules.string() }).validateResult("not an object", {
+			errorReporter: (e) => seen.push(`${e.field}:${e.rule}`),
+		});
+		expect(res.valid).toBe(false);
+		expect(seen).toEqual(["_root:type"]);
+	});
+
+	it("the same holds on the async path", async () => {
+		const v = create({ a: rules.string() });
+		v.errorReporter = reporterFactory;
+		await expect(v.validate(42)).rejects.toThrowError("from the reporter");
+		v.errorReporter = null;
+	});
+
+	it("a root failure does not throw the PREVIOUS run's reporter error", () => {
+		// `reporterError` survives between calls; the early return never reset it,
+		// so a root failure resurrected the error of whatever ran before it.
+		const v = create({ a: rules.string() });
+		v.errorReporter = reporterFactory;
+		v.validateResult({ a: 1 });
+		v.errorReporter = null;
+		expect(() => v.validateOrThrow(null)).not.toThrowError("from the reporter");
+	});
+
+	it("nativeFile({ mimeTypes }) confronts the list with the BYTES", async () => {
+		// The options form armed the content check but never recorded the list,
+		// so the check ran with nothing to compare against: a PNG announcing
+		// `application/pdf` passed a schema that only allows PDFs.
+		const v = schema({
+			f: rules.any().nativeFile({ mimeTypes: ["application/pdf"] }),
+		});
+		const res = await v.validateResultAsync({
+			f: { size: 12, type: "application/pdf", buffer: PNG },
+		});
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.rule).toBe("verifyContent");
+		// A file that IS what it claims still passes.
+		expect(
+			(
+				await schema({
+					f: rules.any().nativeFile({ mimeTypes: ["image/png"] }),
+				}).validateResultAsync({
+					f: { size: 12, type: "image/png", buffer: PNG },
+				})
+			).valid,
+		).toBe(true);
+	});
+
+	it("a MIME list declared AFTER the check is still confronted", async () => {
+		// `.verifyContent()` registers the check; `.mimeTypes()` then declares the
+		// list. Reading the declarations at registration time froze them at null.
+		const v = schema({
+			f: rules.any().file().verifyContent().mimeTypes(["application/pdf"]),
+		});
+		const res = await v.validateResultAsync({
+			f: { size: 12, type: "application/pdf", buffer: PNG },
+		});
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.rule).toBe("verifyContent");
+	});
+
+	it("a MIME list declared after a RE-TYPING call is confronted", async () => {
+		// `file()` re-types the chain, so `.mimeTypes()` lands on a copy while the
+		// check stayed behind on the original — the copy's list went unread.
+		const v = schema({
+			f: rules
+				.any()
+				.file({ extnames: ["png"] })
+				.mimeTypes(["application/pdf"]),
+		});
+		const res = await v.validateResultAsync({
+			f: { size: 12, type: "application/pdf", extname: "png", buffer: PNG },
+		});
+		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.rule).toBe("verifyContent");
+	});
+});

@@ -1426,6 +1426,37 @@ export function schema(
 		(chain) => chain.hasAsyncRulesDeep,
 	);
 
+	/**
+	 * The root value is not an object.
+	 *
+	 * VineJS routes EVERY failure through the reporter, root included, and lets
+	 * it decide the error shape. Returning the verdict directly left a bound
+	 * reporter unaware of the failure, so `validateOrThrow(null)` threw rune's
+	 * own error and — worse — the PREVIOUS run's reporter error, because
+	 * `reporterError` was never reset on this path.
+	 */
+	function rootTypeFailure(
+		data: unknown,
+		options?: ValidateOptions,
+	): ValidationResult<Record<string, unknown>> {
+		const errors: ValidationError[] = [
+			{ field: "_root", rule: "type", message: "Input must be an object" },
+		];
+		const reporter = toReporter(
+			options?.errorReporter ??
+				validatorErrorReporter ??
+				globalErrorReporter ??
+				undefined,
+			data,
+			options?.meta ?? {},
+		);
+		if (reporter) {
+			for (const error of errors) reporter.report(error);
+		}
+		reporterError = reporter?.createError;
+		return { valid: false, errors };
+	}
+
 	function validateResult(
 		rawData: unknown,
 		options?: ValidateOptions,
@@ -1439,12 +1470,7 @@ export function schema(
 			);
 		}
 		if (!isPlainObject(data)) {
-			return {
-				valid: false,
-				errors: [
-					{ field: "_root", rule: "type", message: "Input must be an object" },
-				],
-			};
+			return rootTypeFailure(data, options);
 		}
 
 		// The global provider counts exactly like a per-call one: the Rust engine
@@ -1539,12 +1565,7 @@ export function schema(
 			? convertEmptyStrings(rawData)
 			: rawData;
 		if (!isPlainObject(data)) {
-			return {
-				valid: false,
-				errors: [
-					{ field: "_root", rule: "type", message: "Input must be an object" },
-				],
-			};
+			return rootTypeFailure(data, options);
 		}
 		const errors: ValidationError[] = [];
 		const validated: Record<string, unknown> = {};
@@ -1894,6 +1915,8 @@ export class RuleChain<Output = unknown> {
 	/** Extensions / MIME types declared by `file()` / `mimeTypes()`. */
 	#declaredExtnames: readonly string[] | null = null;
 	#declaredMimeTypes: readonly string[] | null = null;
+	/** The registered content check, so a copy of this chain can own its own. */
+	#contentRule: AsyncCompiledRule | null = null;
 	/** `true` once the content-verification rule has been registered. */
 	#contentVerified = false;
 	/** Set by `{ verifyContent: false }` — an explicit, auditable opt-out. */
@@ -2056,6 +2079,19 @@ export class RuleChain<Output = unknown> {
 		next.#useRules = [...this.#useRules];
 		next.#asyncRules = [...this.#asyncRules];
 		next.#requiredConditions = [...this.#requiredConditions];
+		// The content check reads the declarations of the chain that registered
+		// it, so the copy re-registers its own: otherwise declaring a MIME list
+		// on the copy updated a list the inherited rule never looked at.
+		if (this.#contentRule) {
+			const lastRule = next.#lastRule;
+			const targetsContent =
+				lastRule?.kind === "reporting" && lastRule.ref === this.#contentRule;
+			next.#asyncRules = next.#asyncRules.filter(
+				(rule) => rule !== this.#contentRule,
+			);
+			next.#registerContentVerification();
+			if (!targetsContent) next.#lastRule = lastRule;
+		}
 		return next;
 	}
 
@@ -2677,8 +2713,13 @@ export class RuleChain<Output = unknown> {
 			message: "Must be a valid file",
 		});
 		// Declaring allowed MIME types is a SECURITY statement, so the bytes are
-		// checked by default.
-		if (options?.mimeTypes) this.#ensureContentVerification();
+		// checked by default — and the list has to be RECORDED, or the content
+		// check runs with nothing to confront the detected type against and a PNG
+		// announcing `application/pdf` sails through.
+		if (options?.mimeTypes) {
+			this.#declaredMimeTypes = options.mimeTypes.map((m) => m.toLowerCase());
+			this.#ensureContentVerification();
+		}
 		return this.#retype<FileLike>();
 	}
 
@@ -2751,13 +2792,20 @@ export class RuleChain<Output = unknown> {
 		return this.#registerContentVerification();
 	}
 
-	/** The async rule itself — reads the bytes and confronts the declaration. */
+	/**
+	 * The async rule itself — reads the bytes and confronts the declaration.
+	 *
+	 * The declarations are read WHEN THE RULE RUNS, not when it is registered:
+	 * `.verifyContent().mimeTypes([…])` and `.file({ extnames }).mimeTypes([…])`
+	 * both declare after the check is already in place, and a snapshot left
+	 * those lists unchecked.
+	 */
 	#registerContentVerification(): this {
-		const extnames = this.#declaredExtnames;
-		const mimeTypes = this.#declaredMimeTypes;
-		this.#pushAsync({
+		const rule: AsyncCompiledRule = {
 			__rune: "asyncRule",
-			async run(value: unknown, field: FieldContext): Promise<void> {
+			run: async (value: unknown, field: FieldContext): Promise<void> => {
+				const extnames = this.#declaredExtnames;
+				const mimeTypes = this.#declaredMimeTypes;
 				if (!isFileLike(value)) {
 					field.report("Must be a valid file", "verifyContent");
 					return;
@@ -2804,7 +2852,9 @@ export class RuleChain<Output = unknown> {
 					);
 				}
 			},
-		});
+		};
+		this.#contentRule = rule;
+		this.#pushAsync(rule);
 		return this;
 	}
 
