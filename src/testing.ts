@@ -14,6 +14,21 @@
  * expect(result.valid).toBe(false)
  * expect(result.errors[0]?.rule).toBe("isEven")
  * ```
+ *
+ * ## Named deviation: this subpath is `/testing`, not `/factories`
+ *
+ * VineJS ships the same capability as `@vinejs/vine/factories` — `fieldContext`
+ * plus a `ValidatorFactory` whose `execute` / `executeAsync` run one rule. rune
+ * keeps the capability and drops the name: every package in this repo puts its
+ * test surface on `/testing` (`@c9up/ream/testing`, `@c9up/atlas/testing`), and
+ * a lone `/factories` here would make rune the exception for no gain. The map is
+ * `fieldContext` → {@link fieldContext}, `execute` → {@link runRule},
+ * `executeAsync` → {@link runRuleAsync}.
+ *
+ * There is deliberately no `VineString` / `VineNumber` / `VineObject`
+ * equivalent to export: rune has no per-type class to hand out — a chain starts
+ * with `rules.string()` and stays one object. Those names are upstream's product
+ * identity, which this package mirrors in shape and never in naming.
  */
 
 import { RuneError } from "./errors.js";
