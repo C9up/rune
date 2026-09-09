@@ -1548,6 +1548,30 @@ function templateData(
 	return { field: fieldNameOf(field), ...args };
 }
 
+/**
+ * The rule's own args, narrowed to what a translator can interpolate.
+ *
+ * Passing only `min`/`max` for a handful of hard-coded rule names left every
+ * other rule's translation with unfilled placeholders — and a translator that
+ * validates its variables (rosetta's does) THROWS on one it was not given.
+ */
+function translatorParams(
+	field: string,
+	args?: Record<string, unknown>,
+): ValidationMessageParams {
+	const params: ValidationMessageParams = { field: fieldNameOf(field) };
+	for (const [key, value] of Object.entries(args ?? {})) {
+		if (
+			typeof value === "string" ||
+			typeof value === "number" ||
+			typeof value === "boolean"
+		) {
+			params[key] = value;
+		}
+	}
+	return params;
+}
+
 function resolveRuleMessage(
 	field: string,
 	rule: RuleDef,
@@ -1569,18 +1593,22 @@ function resolveRuleMessage(
 	}
 
 	const rendered = interpolate(template, templateData(field, args));
-	if (!STANDARD_RULES.has(rule.name)) {
+	// A rule this package ships gets a translation key. The catalogue is the
+	// definition of "ships": keying only off STANDARD_RULES left every
+	// namespaced rule (`array.minLength`, `date.after`) unable to reach a
+	// translator, because the set holds the bare names.
+	if (
+		!STANDARD_RULES.has(rule.name) &&
+		defaultMessages[rule.name] === undefined
+	) {
 		return rendered;
 	}
 
-	const params: ValidationMessageParams = { field };
-	if (typeof rule.param === "number") {
-		if (rule.name === "min" || rule.name === "minLength")
-			params.min = rule.param;
-		if (rule.name === "max" || rule.name === "maxLength")
-			params.max = rule.param;
-	}
-	return resolveValidationMessage(`validation.${rule.name}`, rendered, params);
+	return resolveValidationMessage(
+		`validation.${rule.name}`,
+		rendered,
+		translatorParams(field, args),
+	);
 }
 
 /** Resolve the "required" message through provider → translator → fallback. */
@@ -1596,7 +1624,7 @@ function resolveRequiredMessage(field: string, ctx: RunContext): string {
 	return resolveValidationMessage(
 		"validation.required",
 		interpolate(template, templateData(field)),
-		{ field },
+		translatorParams(field),
 	);
 }
 
@@ -1642,7 +1670,11 @@ function resolveReportedMessage(
 	if (defaultMessages[rule] === undefined) {
 		return rendered;
 	}
-	return resolveValidationMessage(`validation.${rule}`, rendered, { field });
+	return resolveValidationMessage(
+		`validation.${rule}`,
+		rendered,
+		translatorParams(field, args),
+	);
 }
 
 /**

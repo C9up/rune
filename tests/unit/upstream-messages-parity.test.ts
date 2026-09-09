@@ -12,9 +12,14 @@
  *    rule is translatable instead of permanently English.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { messages as defaultMessages } from "../../src/defaults.js";
-import { createRule, rules, schema } from "../../src/index.js";
+import {
+	createRule,
+	rules,
+	schema,
+	setValidationTranslator,
+} from "../../src/index.js";
 import { SimpleMessagesProvider } from "../../src/MessagesProvider.js";
 
 /** First error of a failing payload. */
@@ -237,6 +242,79 @@ describe("rune > url() and the helper answer alike", () => {
 		const s = schema({ u: rules.string().url({ protocols: ["https"] }) });
 		expect(s.validateResult({ u: "https://acme.test" }).valid).toBe(true);
 		expect(s.validateResult({ u: "ftp://acme.test" }).valid).toBe(false);
+	});
+});
+
+describe("rune > what a translator is handed", () => {
+	afterEach(() => {
+		setValidationTranslator(undefined);
+	});
+
+	it("keys a namespaced rule by its namespaced name", () => {
+		const seen: string[] = [];
+		setValidationTranslator((key) => {
+			seen.push(key);
+			return undefined;
+		});
+		firstError(
+			{ tags: rules.array(rules.string()).minLength(2) },
+			{
+				tags: ["a"],
+			},
+		);
+		// Not `validation.minLength`: an array's length rule and a string's are
+		// different messages, and a translator keyed on the bare name would give
+		// a list "characters".
+		expect(seen).toContain("validation.array.minLength");
+	});
+
+	it("hands over the rule's own arguments, not just the field", () => {
+		// A translator that validates its variables — rosetta's does — THROWS on
+		// a placeholder it was not given. Passing only `min`/`max` for a few
+		// hard-coded names meant every other rule's translation blew up.
+		let received: Record<string, unknown> | undefined;
+		setValidationTranslator((_key, params) => {
+			received = params;
+			return undefined;
+		});
+		firstError(
+			{ tags: rules.array(rules.string()).minLength(2) },
+			{
+				tags: ["a"],
+			},
+		);
+		expect(received).toMatchObject({ field: "tags", min: 2 });
+	});
+
+	it("names the field by its last segment, as the templates read it", () => {
+		let received: Record<string, unknown> | undefined;
+		setValidationTranslator((_key, params) => {
+			received = params;
+			return undefined;
+		});
+		firstError(
+			{ a: rules.object({ b: rules.string().minLength(4) }) },
+			{
+				a: { b: "x" },
+			},
+		);
+		expect(received?.field).toBe("b");
+	});
+
+	it("lets a translation win over the catalogue", () => {
+		setValidationTranslator((key, params) =>
+			key === "validation.array.minLength"
+				? `au moins ${String(params?.min)} elements`
+				: undefined,
+		);
+		expect(
+			firstError(
+				{ tags: rules.array(rules.string()).minLength(2) },
+				{
+					tags: ["a"],
+				},
+			)?.message,
+		).toBe("au moins 2 elements");
 	});
 });
 
