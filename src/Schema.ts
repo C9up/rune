@@ -3433,8 +3433,13 @@ export class RuleChain<Output = unknown> {
 		return this.#retype<V>();
 	}
 
-	/** Minimum length (string) or minimum value (number). Alias of min/minLength. */
+	/**
+	 * Minimum length (string) or minimum value (number). On an array or a
+	 * record it is {@link minLength}: the item count is the only size those
+	 * have, and a rule that refused every array was what `.min(1)` gave.
+	 */
 	min(n: number): this {
+		if (this.#sizedOwner() !== undefined) return this.minLength(n);
 		this.#pushRule({
 			name: "min",
 			param: n,
@@ -3450,8 +3455,9 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Maximum length (string) or maximum value (number). Alias of max/maxLength. */
+	/** Maximum length (string) or maximum value (number); {@link maxLength} on an array or a record. */
 	max(n: number): this {
+		if (this.#sizedOwner() !== undefined) return this.maxLength(n);
 		this.#pushRule({
 			name: "max",
 			param: n,
@@ -3473,7 +3479,7 @@ export class RuleChain<Output = unknown> {
 			name: this.#namespaced("minLength", SIZED_OWNERS),
 			param: n,
 			args: { min: n },
-			validate: (v) => sizedLength(v) >= n,
+			validate: (v) => this.#sizeOf(v) >= n,
 			message: `Must have at least ${n} characters`,
 		});
 		return this;
@@ -3486,7 +3492,7 @@ export class RuleChain<Output = unknown> {
 			param: n,
 			args: { max: n },
 			validate: (v) => {
-				const len = sizedLength(v);
+				const len = this.#sizeOf(v);
 				return len >= 0 && len <= n;
 			},
 			message: `Must not exceed ${n} characters`,
@@ -3500,7 +3506,7 @@ export class RuleChain<Output = unknown> {
 			name: this.#namespaced("fixedLength", SIZED_OWNERS),
 			param: n,
 			args: { size: n },
-			validate: (v) => sizedLength(v) === n,
+			validate: (v) => this.#sizeOf(v) === n,
 			message: `Must be exactly ${n} characters`,
 		});
 		return this;
@@ -4534,6 +4540,24 @@ export class RuleChain<Output = unknown> {
 	#namespaced(name: string, owners: ReadonlySet<string>): string {
 		const owner = this.#rules.find((rule) => owners.has(rule.name));
 		return owner === undefined ? name : `${owner.name}.${name}`;
+	}
+
+	/** The array or record type this chain sizes, if it is one. */
+	#sizedOwner(): string | undefined {
+		return this.#rules.find((rule) => SIZED_OWNERS.has(rule.name))?.name;
+	}
+
+	/**
+	 * The size a length rule measures: a record's key count (upstream counts
+	 * `Object.keys`), otherwise {@link sizedLength}. Counting keys only under a
+	 * record keeps the bare rule identical to the native engine, which a
+	 * record chain never reaches.
+	 */
+	#sizeOf(value: unknown): number {
+		if (this.#sizedOwner() === "record") {
+			return isPlainObject(value) ? Object.keys(value).length : -1;
+		}
+		return sizedLength(value);
 	}
 
 	#pushRule(rule: RuleDef): void {
