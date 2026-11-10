@@ -5,20 +5,31 @@
  */
 
 import {
+	hasFunctions,
 	loadNativeBinary,
 	unavailableReason as vendorUnavailableReason,
 } from "./vendor/nativeBinary.js";
 
 /**
- * The engine's surface, as the Rust declares it.
+ * What this package calls on the engine, typed as the Rust declares it.
  *
  * Derived from `./native/generated.js` — written by `pnpm build:napi-types`
  * from napi-derive's own `type-def` output — rather than restated here, where
  * nothing would notice a `pub fn` gaining a parameter or changing its return.
  */
-type NativeRune = typeof import("./native/generated.js");
+const NATIVE_CALLS = ["validate"] as const;
 
-const attempt = loadNativeBinary<NativeRune>();
+type NativeRune = Pick<
+	typeof import("./native/generated.js"),
+	(typeof NATIVE_CALLS)[number]
+>;
+
+/** What the package calls, checked at load: a stale binary loads just as well. */
+function isNativeRune(value: unknown): value is NativeRune {
+	return hasFunctions(value, NATIVE_CALLS);
+}
+
+const attempt = loadNativeBinary(isNativeRune);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 
