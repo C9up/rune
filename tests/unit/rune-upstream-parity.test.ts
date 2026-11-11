@@ -405,3 +405,34 @@ describe("upstream option parity — uuid / distinct / in / notIn", () => {
 		expect(v.validateResult({ role: "guest" }).valid).toBe(false);
 	});
 });
+
+describe("rune > a copy's message() never reaches the source chain", () => {
+	it("clone().message() leaves the source's message alone", () => {
+		const base = rules.string().minLength(3);
+		const copy = base.clone().message("CLONED");
+		expect(
+			schema({ v: base }).validateResult({ v: "a" }).errors[0]?.message,
+		).toBe("The v field must have at least 3 characters");
+		expect(
+			schema({ v: copy }).validateResult({ v: "a" }).errors[0]?.message,
+		).toBe("CLONED");
+	});
+
+	it("nor does a message set on a property taken through pick() or partial()", () => {
+		const user = rules.object({ name: rules.string().minLength(3) });
+		const picked = user.pick(["name"]);
+		picked.name?.message("PICKED");
+		user.partial().getProperties()?.name?.message("PARTIAL");
+		expect(
+			schema({ user }).validateResult({ user: { name: "a" } }).errors[0]
+				?.message,
+		).toBe("The name field must have at least 3 characters");
+	});
+
+	it("message() on a type change still targets the chain's own rule", () => {
+		const chain = rules.string().message("NOT A STRING");
+		expect(
+			schema({ v: chain }).validateResult({ v: 1 }).errors[0]?.message,
+		).toBe("NOT A STRING");
+	});
+});

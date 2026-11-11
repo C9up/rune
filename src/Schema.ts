@@ -2351,6 +2351,12 @@ function allowedValuesResolver(
 	return () => snapshot;
 }
 
+/** The rule a chain's `message()` targets, in whichever register it lives. */
+type LastRule =
+	| { kind: "value"; ref: RuleDef }
+	| { kind: "reporting"; ref: CompiledRule | AsyncCompiledRule }
+	| null;
+
 export class RuleChain<Output = unknown> {
 	/** Phantom output type — drives {@link Infer}; never read at runtime. */
 	declare readonly [OUTPUT]: Output;
@@ -2407,10 +2413,7 @@ export class RuleChain<Output = unknown> {
 	#useRules: CompiledRule[] = [];
 	#asyncRules: AsyncCompiledRule[] = [];
 	/** Last rule added, whichever register it landed in — the `message()` target. */
-	#lastRule:
-		| { kind: "value"; ref: RuleDef }
-		| { kind: "reporting"; ref: CompiledRule | AsyncCompiledRule }
-		| null = null;
+	#lastRule: LastRule = null;
 	/** `.message()` overrides for rules that report their own text from `run`. */
 	#ruleMessages = new Map<CompiledRule | AsyncCompiledRule, string>();
 	#requiredConditions: RequiredCondition[] = [];
@@ -2548,7 +2551,10 @@ export class RuleChain<Output = unknown> {
 	 */
 	#retype<U>(): RuleChain<U> {
 		const next = new RuleChain<U>();
-		next.#rules = [...this.#rules];
+		// Copy each rule, not just the list: `message()` writes onto the rule
+		// it targets, so a shared object let `.message()` on a clone rewrite
+		// the source chain's text — and flip it off the native path.
+		next.#rules = this.#rules.map((rule) => ({ ...rule }));
 		next.#isOptional = this.#isOptional;
 		next.#isNullable = this.#isNullable;
 		next.#bail = this.#bail;
@@ -2571,7 +2577,7 @@ export class RuleChain<Output = unknown> {
 		next.#unionChains = this.#unionChains;
 		next.#unionNoMatch = this.#unionNoMatch;
 		next.#ruleMessages = new Map(this.#ruleMessages);
-		next.#lastRule = this.#lastRule;
+		next.#lastRule = this.#lastRuleIn(next.#rules);
 		next.#preTransforms = [...this.#preTransforms];
 		next.#nestedSchema = this.#nestedSchema;
 		next.#arrayItemChain = this.#arrayItemChain;
@@ -2592,6 +2598,17 @@ export class RuleChain<Output = unknown> {
 			if (!targetsContent) next.#lastRule = lastRule;
 		}
 		return next;
+	}
+
+	/**
+	 * This chain's `message()` target, re-pointed at the copy of its rule in
+	 * `copies` (same positions as `#rules`) when it is a value rule.
+	 */
+	#lastRuleIn(copies: RuleDef[]): LastRule {
+		const last = this.#lastRule;
+		if (last?.kind !== "value") return last;
+		const copy = copies[this.#rules.indexOf(last.ref)];
+		return copy === undefined ? last : { kind: "value", ref: copy };
 	}
 
 	/** Mark field as optional (absent / `undefined` allowed). */
