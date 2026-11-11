@@ -562,7 +562,9 @@ describe("rune > Rust↔TS parity (conformance)", () => {
 	];
 
 	for (const c of cases) {
-		it.skipIf(!isNativeAvailable())(`Rust == TS — ${c.label}`, () => {
+		// No skip: this package's gate fails on a skipped test, and the engine
+		// is required by the suite anyway (see the native-routing block below).
+		it(`Rust == TS — ${c.label}`, () => {
 			const s = schema(c.fields);
 			const { native, ts } = bothEngines(s, c.data);
 			expect(decision(ts)).toEqual(decision(native));
