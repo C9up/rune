@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import rune, {
 	createRule,
 	rules,
@@ -139,5 +139,44 @@ describe("rune > audit 4", () => {
 			meta: { tenantId: 7 },
 		});
 		expect(seen).toBe(7);
+	});
+});
+
+describe("rune > convertEmptyStringsToNull only touches declared fields", () => {
+	afterEach(() => {
+		setConvertEmptyStringsToNull(false);
+	});
+
+	/** `[[[…]]]` nested `depth` levels: a few bytes per level of body. */
+	const nested = (depth: number): unknown =>
+		JSON.parse(`${"[".repeat(depth)}${"]".repeat(depth)}`);
+
+	it("an undeclared key nested 20000 deep is never walked", () => {
+		setConvertEmptyStringsToNull(true);
+		const trimmed = schema({ name: rules.string().trim() });
+		const native = schema({ name: rules.string() });
+		for (const v of [trimmed, native]) {
+			expect(v.validateResult({ name: "x", junk: nested(20000) })).toEqual({
+				valid: true,
+				errors: [],
+				data: { name: "x" },
+			});
+		}
+	});
+
+	it("still converts at every declared node, nested and in arrays", () => {
+		setConvertEmptyStringsToNull(true);
+		const v = schema({
+			profile: rules.object({ bio: rules.string().optional() }),
+			tags: rules.array(rules.string().nullable()),
+			name: rules.string().optional(),
+		});
+		expect(
+			v.validateResult({ profile: { bio: "" }, tags: ["", "a"], name: "" }),
+		).toEqual({
+			valid: true,
+			errors: [],
+			data: { profile: {}, tags: [null, "a"] },
+		});
 	});
 });

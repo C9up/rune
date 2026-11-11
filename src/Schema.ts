@@ -766,22 +766,15 @@ export function getConvertEmptyStringsToNull(): boolean {
 }
 
 /**
- * Rewrite every `""` to `null`, deeply, before validation.
+ * The value a validated node starts from: `""` reads as `null` once the global
+ * conversion is on.
  *
- * Applied to the DATA rather than inside each chain: it has to happen before
- * the optional/nullable decision, and before the native-engine routing — the
- * Rust engine never sees this flag, so converting later would have made the
- * behaviour depend on whether the binary was loadable.
+ * Applied per DECLARED node, as upstream does it, never to the payload as a
+ * whole: walking the raw input recursed into every undeclared key, and a 10 KB
+ * body nested 5000 deep overflowed the stack before a single rule ran.
  */
-function convertEmptyStrings(value: unknown): unknown {
-	if (value === "") return null;
-	if (Array.isArray(value)) return value.map(convertEmptyStrings);
-	if (isPlainObject(value)) {
-		return Object.fromEntries(
-			Object.entries(value).map(([k, v]) => [k, convertEmptyStrings(v)]),
-		);
-	}
-	return value;
+function emptyStringAsNull(value: unknown): unknown {
+	return convertEmptyStringsToNull && value === "" ? null : value;
 }
 
 /** Bind (or clear, with `null`) the resolver backing `activeUrl()`. */
@@ -1939,10 +1932,7 @@ export function schema(
 		};
 	}
 
-	function runSync(rawData: unknown, options?: ValidateOptions): RunOutcome {
-		const data = convertEmptyStringsToNull
-			? convertEmptyStrings(rawData)
-			: rawData;
+	function runSync(data: unknown, options?: ValidateOptions): RunOutcome {
 		if (hasAsyncRules) {
 			throw new Error(
 				"rune: this schema has async rules (unique/exists/useAsync) — call validateResultAsync() (result-based) or validate() (throwing) instead of validateResult().",
@@ -2037,12 +2027,9 @@ export function schema(
 	}
 
 	async function runAsync(
-		rawData: unknown,
+		data: unknown,
 		options?: ValidateOptions,
 	): Promise<RunOutcome> {
-		const data = convertEmptyStringsToNull
-			? convertEmptyStrings(rawData)
-			: rawData;
 		const rootCtx = rootContext(
 			data,
 			options?.messagesProvider ??
@@ -4653,6 +4640,8 @@ export class RuleChain<Output = unknown> {
 		for (const pre of this.#preTransforms) {
 			value = pre(value, parseCtx);
 		}
+		// After `parse()`, before the optional/nullable decision — upstream's order.
+		value = emptyStringAsNull(value);
 
 		if (value === undefined) {
 			if (this.#isOptional || !this.#isRequired(ctx)) {
@@ -5463,7 +5452,7 @@ function validateWithRust(
 	const declared = Object.fromEntries(
 		Object.keys(fields)
 			.filter((field) => Object.hasOwn(data, field))
-			.map((field) => [field, data[field]]),
+			.map((field) => [field, emptyStringAsNull(data[field])]),
 	);
 	const request = JSON.stringify({ schema: schemaDesc, data: declared });
 	const native = validateNative(request);
