@@ -51,3 +51,29 @@ describe("rune > a record's length is its key count", () => {
 		expect(check(chain, { a: 1, b: 2 }).valid).toBe(false);
 	});
 });
+
+describe("rune > string lengths count code points (named deviation)", () => {
+	it("an emoji is one character to every length rule, on both engines", () => {
+		const emoji = "😀";
+		const viaEngine = schema({ s: rules.string().maxLength(1) });
+		const viaTypeScript = schema({ s: rules.string().trim().maxLength(1) });
+		for (const v of [viaEngine, viaTypeScript]) {
+			expect(v.validateResult({ s: emoji }).valid).toBe(true);
+			expect(v.validateResult({ s: `${emoji}${emoji}` }).valid).toBe(false);
+		}
+		expect(
+			schema({ s: rules.string().fixedLength(2) }).validateResult({
+				s: `a${emoji}`,
+			}).valid,
+		).toBe(true);
+		expect(
+			schema({ s: rules.string().min(2) }).validateResult({ s: emoji }).valid,
+		).toBe(false);
+	});
+
+	it("the JSON Schema it emits counts the same way", () => {
+		expect(
+			schema({ s: rules.string().maxLength(1) }).toJSONSchema(),
+		).toMatchObject({ properties: { s: { maxLength: 1 } } });
+	});
+});

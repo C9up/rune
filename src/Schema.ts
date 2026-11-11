@@ -3513,7 +3513,7 @@ export class RuleChain<Output = unknown> {
 			args: { min: n },
 			validate: (v) =>
 				typeof v === "string"
-					? [...v].length >= n
+					? sizedLength(v) >= n
 					: typeof v === "number"
 						? v >= n
 						: false,
@@ -3531,7 +3531,7 @@ export class RuleChain<Output = unknown> {
 			args: { max: n },
 			validate: (v) =>
 				typeof v === "string"
-					? [...v].length <= n
+					? sizedLength(v) <= n
 					: typeof v === "number"
 						? v <= n
 						: false,
@@ -5168,7 +5168,16 @@ function asPrimitive(value: unknown): string | number | boolean {
 	return Symbol.iterator.toString();
 }
 
-/** Code-point length for a string, element count for an array, else -1. */
+/**
+ * Code-point length for a string, element count for an array, else -1.
+ *
+ * NAMED DEVIATION (better): upstream measures a string with `value.length`,
+ * i.e. in UTF-16 code units, so `maxLength(1)` refuses `"😀"`. rune counts
+ * code points — the unit JSON Schema defines `minLength`/`maxLength` in (so
+ * `toJSONSchema()` describes the validator that runs) and the one a
+ * `varchar(n)` column counts in. Every string length rule (`minLength`,
+ * `maxLength`, `fixedLength`, string `min`/`max`) and the native engine use it.
+ */
 function sizedLength(value: unknown): number {
 	if (typeof value === "string") return [...value].length;
 	if (Array.isArray(value)) return value.length;

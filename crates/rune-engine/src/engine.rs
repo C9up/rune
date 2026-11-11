@@ -42,7 +42,8 @@ fn js_number(text: &str) -> Option<f64> {
 }
 
 /// Code-point length for a string, element count for an array, else `-1`.
-/// Mirrors the TS `sizedLength` helper (`[...v].length` counts code points).
+/// Mirrors the TS `sizedLength` helper, which documents why code points and
+/// not UTF-16 units (a named deviation from upstream).
 fn sized_length(value: &serde_json::Value) -> i64 {
     match value {
         serde_json::Value::String(s) => s.chars().count() as i64,
@@ -306,10 +307,9 @@ fn validate_rule(
                 None => return Some(err(field, "min", "Invalid min rule: missing parameter")),
             };
             if let Some(s) = value.as_str() {
-                // Count Unicode code points, not UTF-8 bytes — otherwise the
-                // Rust engine and the TS fallback (which counts UTF-16 code
-                // units via [...str].length) disagree on multi-byte strings
-                // for the SAME schema. Code-point count makes them agree.
+                // Count Unicode code points, not UTF-8 bytes — the TS path
+                // counts code points too (`sizedLength`), and the two engines
+                // must agree on multi-byte strings for the SAME schema.
                 //
                 // Bound the walk to `ceil(min)` code points — that's enough to
                 // decide `< min`, so a pathologically long string can't force a

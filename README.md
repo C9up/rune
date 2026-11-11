@@ -28,6 +28,9 @@ const order = await CreateOrder.validate({ total: 42, email: 'a@b.com', name: ' 
 - `.custom(name, fn, message)` for custom rules
 - `.message()` to override error messages
 - Transforms applied before validation
+- String lengths (`minLength`, `maxLength`, `fixedLength`, `min`, `max`) count
+  characters as Unicode code points: `"😀"` is one character, not two UTF-16
+  units — the unit a database column and a JSON Schema `maxLength` count in
 - Structured error output with field, rule, message
 - Country and locale tables: postal codes (71), mobile numbering plans (169),
   passport numbers (61), VAT numbers (69) — an unknown one is refused, never
