@@ -191,6 +191,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Clippy as an error rather than a note, in a job the publish waits for
+      # and that runs on every push. This engine reads request payloads; the
+      # lints that catch a panic on hostile input are worth more here than the
+      # ones that catch a style.
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
 
   # vitest on the host platform, on every push. The matrix above runs the
