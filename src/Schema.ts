@@ -52,12 +52,7 @@ import type {
 	MessagesProviderContract,
 } from "./MessagesProvider.js";
 import { interpolate, toWildcardPath } from "./MessagesProvider.js";
-import {
-	detectFileType,
-	extensionMatches,
-	MAGIC_HEAD_BYTES,
-	readHead,
-} from "./magic.js";
+import { detectFileType, extensionMatches, MAGIC_HEAD_BYTES } from "./magic.js";
 import {
 	assertNativeAvailable,
 	isNativeAvailable,
@@ -913,8 +908,14 @@ export interface DateCompareOptions {
 }
 
 /**
- * The structural shape `file()` accepts. An Adonis bodyparser `MultipartFile`
- * satisfies it without rune having to know the type.
+ * The structural shape `file()` accepts. A bodyparser upload satisfies it
+ * without rune having to know the type.
+ *
+ * Structural means a JSON body can produce one too, so nothing on it that names
+ * a location is ever trusted: the bytes `verifyContent()` reads come from memory
+ * the value carries (`content` / `buffer`, which `JSON.parse` cannot produce),
+ * from a `Blob`, or from the reader the host bound with {@link bindFileReader}.
+ * A path on the value is never opened.
  */
 export interface FileLike {
 	size: number;
@@ -923,16 +924,42 @@ export interface FileLike {
 	 * `verifyContent()`, which checks it against the real bytes.
 	 */
 	type?: string;
-	/** Adonis bodyparser's temp path — a byte source for `verifyContent()`. */
-	tmpPath?: string;
-	/** Alternative byte-source paths. */
-	filePath?: string;
-	path?: string;
 	/** In-memory bytes, when the upload was buffered. */
+	content?: Uint8Array;
+	/** In-memory bytes, older spelling of {@link content}. */
 	buffer?: Uint8Array;
 	extname?: string | null;
 	clientName?: string;
 	name?: string;
+}
+
+/**
+ * Hands `verifyContent()` the leading bytes of an upload the host recognises —
+ * its own upload class, typically, read from wherever it stored the file.
+ * Returns `null` for a value it does not own, which fails the check.
+ */
+export type FileContentReader = (
+	file: FileLike,
+) => Uint8Array | null | Promise<Uint8Array | null>;
+
+let fileContentReader: FileContentReader | null = null;
+
+/**
+ * Bind (or clear, with `null`) the reader `verifyContent()` asks for an upload's
+ * bytes. Bound by the host that created the upload, because only that host can
+ * tell its own file objects from a request body shaped like one.
+ *
+ * NAMED DEVIATION (hardening): upstream has no content check at all — its file
+ * rule reads `size` and `extname` off the object and never touches the bytes.
+ * rune checks the bytes, and this seam is what keeps that check from becoming a
+ * read of whatever path a payload names.
+ *
+ *     bindFileReader((file) =>
+ *       file instanceof MyUpload ? readHead(file.tmpPath) : null,
+ *     );
+ */
+export function bindFileReader(reader: FileContentReader | null): void {
+	fileContentReader = reader;
 }
 
 /** Byte multipliers for the size spellings Adonis accepts. */
@@ -969,21 +996,41 @@ export function parseByteSize(size: number | string): number {
 }
 
 /**
- * Get the leading bytes of an upload, from whichever source it exposes.
- * Returns `null` when there is none — the caller must treat that as a FAILURE,
- * not as "nothing to check".
+ * Get the leading bytes of an upload from a source the request body cannot
+ * forge: the host's bound reader, in-memory bytes, or a `Blob`.
+ *
+ * A path the value names is NOT a source. The value is whatever the request
+ * body said, so opening `tmpPath` turned a JSON object into a read of any file
+ * the process can open (and a FIFO into a request that never resolves).
+ *
+ * Returns `null` when there is no trusted source — the caller must treat that
+ * as a FAILURE, not as "nothing to check".
  */
 async function readFileHead(file: FileLike): Promise<Uint8Array | null> {
-	if (file.buffer instanceof Uint8Array) {
-		return file.buffer.subarray(0, MAGIC_HEAD_BYTES);
+	if (fileContentReader) {
+		try {
+			const bytes = await fileContentReader(file);
+			if (bytes instanceof Uint8Array) {
+				return bytes.subarray(0, MAGIC_HEAD_BYTES);
+			}
+		} catch {
+			return null;
+		}
 	}
-	const path = file.tmpPath ?? file.filePath ?? file.path;
-	if (typeof path !== "string" || path.length === 0) return null;
-	try {
-		return await readHead(path);
-	} catch {
-		return null;
+	const memory = file.content ?? file.buffer;
+	if (memory instanceof Uint8Array) {
+		return memory.subarray(0, MAGIC_HEAD_BYTES);
 	}
+	if (file instanceof Blob) {
+		try {
+			return new Uint8Array(
+				await file.slice(0, MAGIC_HEAD_BYTES).arrayBuffer(),
+			);
+		} catch {
+			return null;
+		}
+	}
+	return null;
 }
 
 /** Structural guard for {@link FileLike}. */
@@ -3113,8 +3160,10 @@ export class RuleChain<Output = unknown> {
 	 *
 	 * Named deviation: Adonis validates a bodyparser `MultipartFile`, which rune
 	 * cannot import and stay agnostic. It checks the STRUCTURE instead — any
-	 * object exposing `size` and a name/extension — so an Adonis MultipartFile
-	 * satisfies it, and so does any other upload representation.
+	 * object exposing `size` and a name/extension — so a bodyparser upload
+	 * satisfies it, and so does any other upload representation. A JSON body
+	 * can satisfy it too, which is why the content check never trusts a path
+	 * the value carries (see {@link FileLike}).
 	 *
 	 * `size` is a byte count; `extnames` are compared lowercase, without the dot.
 	 */
@@ -3264,10 +3313,11 @@ export class RuleChain<Output = unknown> {
 	 * leading bytes and refuses a mismatch.
 	 *
 	 * Async by nature (it touches the filesystem), so the schema must run with
-	 * `validateResultAsync` / `validate`. Needs a byte source on the file object
-	 * (`buffer`, `tmpPath`, `filePath` or `path`) — an Adonis `MultipartFile`
-	 * carries `tmpPath`. With NO source it FAILS: a content check that cannot
-	 * run must never look like one that passed.
+	 * `validateResultAsync` / `validate`. Needs a byte source the request body
+	 * cannot forge: in-memory `content` / `buffer`, a `Blob`, or the reader the
+	 * host bound with {@link bindFileReader}. A path on the value is never
+	 * opened. With NO source it FAILS: a content check that cannot run must
+	 * never look like one that passed.
 	 */
 	verifyContent(): this {
 		this.#contentVerificationOff = false;

@@ -1,8 +1,15 @@
+import { execFileSync } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
-import { rules, schema } from "../../src/index.js";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+	bindFileReader,
+	type FileLike,
+	readHead,
+	rules,
+	schema,
+} from "../../src/index.js";
 
 /**
  * Content-based type checking (Adonis parity). The declarative checks — size,
@@ -35,7 +42,7 @@ describe("rune > verifyContent (magic number)", () => {
 			avatar: rules.file({ extnames: ["png", "jpg"] }).verifyContent(),
 		});
 		const res = await s.validateResultAsync({
-			avatar: { size: 12, extname: "png", tmpPath: pngPath },
+			avatar: { size: 12, extname: "png", content: PNG_HEAD },
 		});
 		expect(res.valid).toBe(true);
 	});
@@ -52,13 +59,13 @@ describe("rune > verifyContent (magic number)", () => {
 		});
 		expect(
 			optedOut.validateResult({
-				avatar: { size: 8, extname: "png", tmpPath: exePath },
+				avatar: { size: 8, extname: "png", content: EXE_HEAD },
 			}).valid,
 		).toBe(true);
 
 		// With the default, the bytes decide.
 		const res = await s.validateResultAsync({
-			avatar: { size: 8, extname: "png", tmpPath: exePath },
+			avatar: { size: 8, extname: "png", content: EXE_HEAD },
 		});
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("verifyContent");
@@ -143,7 +150,7 @@ describe("rune > la vérification de contenu est le DÉFAUT", () => {
 		// AVANT la validation, donc un validateur transcrit tel quel est sûr.
 		const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
 		const res = await s.validateResultAsync({
-			avatar: { size: 8, extname: "png", tmpPath: exePath },
+			avatar: { size: 8, extname: "png", content: EXE_HEAD },
 		});
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("verifyContent");
@@ -153,7 +160,7 @@ describe("rune > la vérification de contenu est le DÉFAUT", () => {
 		const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
 		expect(() =>
 			s.validateResult({
-				avatar: { size: 8, extname: "png", tmpPath: exePath },
+				avatar: { size: 8, extname: "png", content: EXE_HEAD },
 			}),
 		).toThrow(/validateResultAsync/);
 	});
@@ -161,7 +168,7 @@ describe("rune > la vérification de contenu est le DÉFAUT", () => {
 	it("mimeTypes() active aussi le contrôle", async () => {
 		const s = schema({ doc: rules.nativeFile().mimeTypes(["image/png"]) });
 		const res = await s.validateResultAsync({
-			doc: { size: 8, type: "image/png", tmpPath: exePath },
+			doc: { size: 8, type: "image/png", content: EXE_HEAD },
 		});
 		expect(res.valid).toBe(false);
 	});
@@ -179,8 +186,95 @@ describe("rune > la vérification de contenu est le DÉFAUT", () => {
 		});
 		expect(
 			s.validateResult({
-				avatar: { size: 8, extname: "png", tmpPath: exePath },
+				avatar: { size: 8, extname: "png", content: EXE_HEAD },
 			}).valid,
 		).toBe(true);
 	});
+});
+
+describe("rune > the content check never opens a path the payload names", () => {
+	afterEach(() => {
+		bindFileReader(null);
+	});
+
+	/** What a JSON request body shaped like an upload parses into. */
+	const forged = (key: string, path: string): unknown =>
+		JSON.parse(
+			`{"avatar":{"size":1,"extname":"png",${JSON.stringify(key)}:${JSON.stringify(path)}}}`,
+		);
+
+	it("refuses a JSON lookalike pointing at a real image, without reading it", async () => {
+		const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
+		for (const key of ["tmpPath", "filePath", "path"]) {
+			const res = await s.validateResultAsync(forged(key, pngPath));
+			expect(res.valid).toBe(false);
+			expect(res.errors[0]?.message).toMatch(/Cannot read/);
+		}
+	});
+
+	it("answers the same for every path, so it is no oracle over the filesystem", async () => {
+		const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
+		const messages = new Set<string | undefined>();
+		for (const path of [exePath, pngPath, "/nonexistent/x", dir]) {
+			const res = await s.validateResultAsync(forged("tmpPath", path));
+			messages.add(res.errors[0]?.message);
+		}
+		expect([...messages]).toHaveLength(1);
+	});
+
+	it("reads an upload the host vouches for through the bound reader", async () => {
+		class TrustedUpload implements FileLike {
+			readonly size = 12;
+			readonly extname = "png";
+			constructor(readonly tmpPath: string) {}
+		}
+		bindFileReader((file) =>
+			file instanceof TrustedUpload ? readHead(file.tmpPath) : null,
+		);
+		const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
+		expect(
+			(await s.validateResultAsync({ avatar: new TrustedUpload(pngPath) }))
+				.valid,
+		).toBe(true);
+		const renamed = await s.validateResultAsync({
+			avatar: new TrustedUpload(exePath),
+		});
+		expect(renamed.errors[0]?.message).toMatch(/Content is exe/);
+		// The same path in a lookalike the host does not own is still refused.
+		const res = await s.validateResultAsync(forged("tmpPath", pngPath));
+		expect(res.errors[0]?.message).toMatch(/Cannot read/);
+	});
+
+	it("reads a Blob's own bytes", async () => {
+		const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
+		const png = new File([PNG_HEAD], "avatar.png");
+		expect((await s.validateResultAsync({ avatar: png })).valid).toBe(true);
+		const exe = new File([EXE_HEAD], "avatar.png");
+		expect((await s.validateResultAsync({ avatar: exe })).valid).toBe(false);
+	});
+
+	it("readHead refuses what is not a regular file", async () => {
+		await expect(readHead(dir)).rejects.toMatchObject({
+			code: "E_RUNE_NOT_A_REGULAR_FILE",
+		});
+	});
+
+	// mkfifo is POSIX: on Windows the test is not declared at all.
+	if (process.platform !== "win32") {
+		it("readHead refuses a FIFO instead of blocking on it", async () => {
+			const fifo = join(dir, "pipe");
+			execFileSync("mkfifo", [fifo]);
+			await expect(readHead(fifo)).rejects.toMatchObject({
+				code: "E_RUNE_NOT_A_REGULAR_FILE",
+			});
+		});
+
+		it("a FIFO named by the payload resolves at once", async () => {
+			const fifo = join(dir, "pipe-payload");
+			execFileSync("mkfifo", [fifo]);
+			const s = schema({ avatar: rules.file({ extnames: ["png"] }) });
+			const res = await s.validateResultAsync(forged("tmpPath", fifo));
+			expect(res.valid).toBe(false);
+		});
+	}
 });

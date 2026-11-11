@@ -24,6 +24,7 @@ export type {
 	MessagesProviderContract,
 } from "./MessagesProvider.js";
 export { SimpleMessagesProvider } from "./MessagesProvider.js";
+export { readHead } from "./magic.js";
 export {
 	assertNativeAvailable,
 	isNativeAvailable,
@@ -38,6 +39,8 @@ export type {
 	DatabaseResolver,
 	DatabaseRuleOptions,
 	FieldContext,
+	FileContentReader,
+	FileLike,
 	Infer,
 	RecordKeysCallback,
 	RuleChain,
@@ -52,6 +55,7 @@ export type {
 } from "./Schema.js";
 export {
 	bindDatabase,
+	bindFileReader,
 	bindHostResolver,
 	bindRosetta,
 	compile,
@@ -71,6 +75,7 @@ import type { MessagesProviderContract } from "./MessagesProvider.js";
 import type { RuleChain, ValidateOptions } from "./Schema.js";
 import {
 	bindDatabase,
+	bindFileReader,
 	bindHostResolver,
 	bindRosetta,
 	compile,
@@ -128,6 +133,7 @@ const rune = {
 		otherwise: groupElse,
 	}),
 	bindDatabase,
+	bindFileReader,
 	bindHostResolver,
 	bindRosetta,
 	setDateTransform,

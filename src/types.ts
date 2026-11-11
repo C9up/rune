@@ -37,6 +37,7 @@ export type {
 	ErrorReporterContract,
 	ErrorReporterFactory,
 	FieldContext,
+	FileContentReader,
 	FileLike,
 	HostResolver,
 	Infer,

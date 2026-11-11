@@ -11,7 +11,9 @@
  * container that shares a prefix with another format is not mistaken for it.
  */
 
+import { constants } from "node:fs";
 import { open } from "node:fs/promises";
+import { RuneError } from "./errors.js";
 
 /** One magic-number signature. */
 interface Signature {
@@ -150,13 +152,30 @@ export function detectFileType(head: Uint8Array): DetectedType | null {
 	return null;
 }
 
-/** Read the leading bytes of a file. */
+/**
+ * Read the leading bytes of a REGULAR file — the helper a host's
+ * `bindFileReader` callback uses for an upload it stored on disk.
+ *
+ * Opened non-blocking and refused unless it is a regular file: a FIFO opened
+ * for reading blocks until a writer appears, which parks a threadpool thread
+ * for good, and a device or a directory is never an upload.
+ */
 export async function readHead(
 	path: string,
 	length = MAGIC_HEAD_BYTES,
 ): Promise<Uint8Array> {
-	const handle = await open(path, "r");
+	// `O_NONBLOCK` is POSIX-only; Windows has no FIFO to block on.
+	const handle = await open(
+		path,
+		constants.O_RDONLY | (constants.O_NONBLOCK ?? 0),
+	);
 	try {
+		if (!(await handle.stat()).isFile()) {
+			throw new RuneError(
+				"NOT_A_REGULAR_FILE",
+				`'${path}' is not a regular file, so it is not an upload.`,
+			);
+		}
 		const buffer = new Uint8Array(length);
 		const { bytesRead } = await handle.read(buffer, 0, length, 0);
 		return buffer.subarray(0, bytesRead);
