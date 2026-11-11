@@ -87,8 +87,6 @@ pub struct FieldSchema {
     pub rules: Vec<RuleDefinition>,
     #[serde(default)]
     pub optional: bool,
-    #[serde(default)]
-    pub transforms: Vec<String>, // e.g., ["trim"]
     /// Stop at this field's first failing rule (upstream `FieldOptions.bail`,
     /// which defaults to `true`). Defaults to `true` here too so a payload
     /// omitting the flag behaves like upstream rather than reporting every rule.
@@ -137,6 +135,11 @@ pub struct ValidationError {
     pub field: String,
     pub rule: String,
     pub message: String,
+    /// Position of the failing rule in the field's `rules`. A field may carry
+    /// the same rule twice (`min(3).min(5)`), and the caller renders the
+    /// message from THAT rule's arguments, not from the first of that name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_index: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -155,11 +158,7 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
         None => {
             return ValidationResult {
                 valid: false,
-                errors: vec![ValidationError {
-                    field: "_root".to_string(),
-                    rule: "type".to_string(),
-                    message: "Input must be an object".to_string(),
-                }],
+                errors: vec![err("_root", "type", "Input must be an object")],
                 data: None,
             };
         }
@@ -176,24 +175,11 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
             if schema.optional {
                 continue;
             }
-            errors.push(ValidationError {
-                field: field.clone(),
-                rule: "required".to_string(),
-                message: format!("{} is required", field),
-            });
+            errors.push(err(field, "required", &format!("{} is required", field)));
             continue;
         }
 
         let mut val = value.unwrap().clone();
-
-        // Apply transforms
-        for transform in &schema.transforms {
-            if transform == "trim" {
-                if let Some(s) = val.as_str() {
-                    val = serde_json::Value::String(s.trim().to_string());
-                }
-            }
-        }
 
         // Coerce before validating, mirroring the TS path: upstream accepts "32"
         // for a number and "on"/"true" for a boolean unless the rule is strict.
@@ -248,7 +234,7 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
         // Validate rules
         let mut field_valid = true;
         let mut type_failed = false;
-        for rule in &schema.rules {
+        for (index, rule) in schema.rules.iter().enumerate() {
             let is_type_rule = matches!(rule.name.as_str(), "string" | "number" | "boolean");
             if !is_type_rule && type_failed {
                 break;
@@ -259,7 +245,8 @@ pub fn validate(request: &ValidationRequest) -> ValidationResult {
                 break;
             }
             let error = validate_rule(&rule.name, &rule.params, &val, field);
-            if let Some(err) = error {
+            if let Some(mut err) = error {
+                err.rule_index = Some(index);
                 errors.push(err);
                 field_valid = false;
                 if is_type_rule {
@@ -540,6 +527,7 @@ fn err(field: &str, rule: &str, message: &str) -> ValidationError {
         field: field.to_string(),
         rule: rule.to_string(),
         message: message.to_string(),
+        rule_index: None,
     }
 }
 
@@ -573,7 +561,6 @@ mod tests {
                     },
                 ],
                 optional: false,
-                transforms: vec![],
             },
         );
         schema.insert(
@@ -591,7 +578,6 @@ mod tests {
                     },
                 ],
                 optional: false,
-                transforms: vec![],
             },
         );
 
@@ -622,7 +608,6 @@ mod tests {
                     },
                 ],
                 optional: false,
-                transforms: vec![],
             },
         );
 
@@ -645,7 +630,6 @@ mod tests {
                     params: serde_json::json!(null),
                 }],
                 optional: false,
-                transforms: vec![],
             },
         );
 
@@ -667,7 +651,6 @@ mod tests {
                     params: serde_json::json!(null),
                 }],
                 optional: true,
-                transforms: vec![],
             },
         );
 
@@ -677,31 +660,35 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_transform() {
+    fn test_error_names_the_rule_that_failed() {
         let mut schema = HashMap::new();
         schema.insert(
-            "name".to_string(),
+            "age".to_string(),
             FieldSchema {
-                bail: false,
+                bail: true,
                 rules: vec![
                     RuleDefinition {
-                        name: "string".to_string(),
-                        params: serde_json::json!(null),
+                        name: "number".to_string(),
+                        params: serde_json::json!({"strict": true}),
                     },
                     RuleDefinition {
                         name: "min".to_string(),
                         params: serde_json::json!({"min": 3}),
                     },
+                    RuleDefinition {
+                        name: "min".to_string(),
+                        params: serde_json::json!({"min": 5}),
+                    },
                 ],
                 optional: false,
-                transforms: vec!["trim".to_string()],
             },
         );
 
-        let req = make_request(schema, serde_json::json!({"name": "  Kaen  "}));
+        let req = make_request(schema, serde_json::json!({"age": 4}));
         let result = validate(&req);
-        assert!(result.valid);
-        assert_eq!(result.data.unwrap()["name"], "Kaen");
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].rule, "min");
+        assert_eq!(result.errors[0].rule_index, Some(2));
     }
 
     #[test]
@@ -716,7 +703,6 @@ mod tests {
                     params: serde_json::json!(null),
                 }],
                 optional: false,
-                transforms: vec![],
             },
         );
 
@@ -743,7 +729,6 @@ mod tests {
                     },
                 ],
                 optional: false,
-                transforms: vec![],
             },
         );
 
@@ -774,7 +759,6 @@ mod tests {
                     params: serde_json::json!(null),
                 }],
                 optional: false,
-                transforms: vec![],
             },
         );
 
@@ -798,7 +782,6 @@ mod tests {
                     params: serde_json::json!({"min": 3}),
                 }],
                 optional: false,
-                transforms: vec![],
             },
         );
         let req = make_request(schema, serde_json::json!({"q": [1, 2, 3, 4, 5]}));
@@ -828,7 +811,6 @@ mod tests {
                     },
                 ],
                 optional: false,
-                transforms: vec![],
             },
         );
         let req = make_request(schema, serde_json::json!({"s": "é"}));
@@ -847,7 +829,6 @@ mod tests {
                     params: serde_json::json!(null),
                 }],
                 optional: false,
-                transforms: vec![],
             },
         );
 
@@ -867,7 +848,6 @@ mod tests {
                             params: serde_json::json!(null),
                         }],
                         optional: false,
-                        transforms: vec![],
                     },
                 );
                 s
@@ -902,7 +882,6 @@ mod tests {
                     },
                 ],
                 optional: false,
-                transforms: vec![],
             },
         );
         let req = ValidationRequest {

@@ -34,12 +34,21 @@ const attempt = loadNativeBinary(isNativeRune, NATIVE_CALLS);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 
+/** One failure as the engine reports it. */
+export interface NativeError {
+	field: string;
+	rule: string;
+	message: string;
+	/** Position of the failing rule in the field's rule list. */
+	ruleIndex?: number;
+}
+
 /**
  * Validate data via the Rust NAPI engine.
  */
 export function validateNative(requestJson: string): {
 	valid: boolean;
-	errors: Array<{ field: string; rule: string; message: string }>;
+	errors: NativeError[];
 	data?: Record<string, unknown>;
 } {
 	if (!native) {

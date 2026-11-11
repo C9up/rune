@@ -59,7 +59,7 @@ import { interpolate, toWildcardPath } from "./MessagesProvider.js";
 import { detectFileType, extensionMatches, MAGIC_HEAD_BYTES } from "./magic.js";
 import {
 	assertNativeAvailable,
-	isNativeAvailable,
+	type NativeError,
 	validateNative,
 } from "./native.js";
 
@@ -1760,21 +1760,31 @@ function resolveReportedMessage(
  */
 function renderNativeMessages(
 	fields: Record<string, RuleChain>,
-	errors: readonly ValidationError[],
+	errors: readonly NativeError[],
 ): ValidationError[] {
-	return errors.map((error) => {
-		const template = defaultMessages[error.rule];
-		if (template === undefined) {
-			return error;
-		}
-		const args = fields[error.field]?.rules.find(
-			(rule) => rule.name === error.rule,
-		)?.args;
-		return {
-			...error,
-			message: interpolate(template, templateData(error.field, args)),
-		};
-	});
+	// The engine iterates its schema as a hash map; the TypeScript path reports
+	// in declaration order, and both must answer alike. The sort is stable, so
+	// a field's own errors keep the order its rules ran in.
+	const order = Object.keys(fields);
+	const position = (field: string): number => order.indexOf(field);
+	return [...errors]
+		.sort((a, b) => position(a.field) - position(b.field))
+		.map(({ field, rule, message, ruleIndex }) => {
+			const template = defaultMessages[rule];
+			if (template === undefined) return { field, rule, message };
+			// The rule the engine NAMES by position: `min(3).min(5)` failing
+			// on the second bound renders 5, not the first `min` it finds.
+			const rules = fields[field]?.rules;
+			const args =
+				ruleIndex === undefined
+					? rules?.find((candidate) => candidate.name === rule)?.args
+					: rules?.[ruleIndex]?.args;
+			return {
+				field,
+				rule,
+				message: interpolate(template, templateData(field, args)),
+			};
+		});
 }
 
 /** Compute once: does any field rule prevent dispatching to Rust? */
@@ -1946,34 +1956,43 @@ export function schema(
 			createdWithMessagesProvider ??
 			globalMessagesProvider ??
 			undefined;
-		if (
-			!hasCustomRules &&
-			!validationTranslator &&
-			!provider &&
-			isPlainObject(data) &&
-			fitsNativeParser(fields, data)
-		) {
-			if (isNativeAvailable()) {
-				const rust = validateWithRust(fields, data);
-				const native = rust.valid
-					? rust
-					: { ...rust, errors: renderNativeMessages(fields, rust.errors) };
-				// Reported here too: the native path returns before the TS
-				// traversal, and the reporter must not go silent on the fast path.
-				return concludeRun(native, data, options);
-			}
-			// This schema carries nothing the engine cannot run, so the engine is
-			// what must run it. Falling back to the TypeScript validator here made
-			// the verdict depend on whether a binary loaded.
-			assertNativeAvailable();
-		}
-
+		const native = runNative(data, provider, options);
+		if (native) return native;
 		const { errors, transformed } = root._validateWithTransform(
 			"",
 			data,
 			rootContext(data, provider, options),
 		);
 		return concludeRun(verdict(errors, transformed), data, options);
+	}
+
+	/**
+	 * Run the payload on the Rust engine when the schema is one it can run —
+	 * from EVERY entry point, sync or async, so which one a caller picked never
+	 * changes who decides. `null` when the TypeScript traversal must run it.
+	 */
+	function runNative(
+		data: unknown,
+		provider: MessagesProviderContract | undefined,
+		options?: ValidateOptions,
+	): RunOutcome | null {
+		if (
+			hasCustomRules ||
+			validationTranslator ||
+			provider ||
+			!isPlainObject(data) ||
+			!fitsNativeParser(fields, data)
+		) {
+			return null;
+		}
+		// This schema carries nothing the engine cannot run, so the engine is
+		// what must run it. Falling back to the TypeScript validator here made
+		// the verdict depend on whether a binary loaded.
+		assertNativeAvailable();
+		const rust = validateWithRust(fields, data);
+		// Reported here too: the native path returns before the TS traversal,
+		// and the reporter must not go silent on the fast path.
+		return concludeRun(rust, data, options);
 	}
 
 	/** Shape a root run's errors and output into a result. */
@@ -2030,15 +2049,17 @@ export function schema(
 		data: unknown,
 		options?: ValidateOptions,
 	): Promise<RunOutcome> {
-		const rootCtx = rootContext(
-			data,
+		const provider =
 			options?.messagesProvider ??
-				validatorMessagesProvider ??
-				createdWithMessagesProvider ??
-				globalMessagesProvider ??
-				undefined,
-			options,
-		);
+			validatorMessagesProvider ??
+			createdWithMessagesProvider ??
+			globalMessagesProvider ??
+			undefined;
+		// A schema with async rules is never native, so the engine's answer is
+		// the whole answer here too.
+		const native = runNative(data, provider, options);
+		if (native) return native;
+		const rootCtx = rootContext(data, provider, options);
 		const pending: PendingAsync[] = [];
 		const result = root._validateWithTransform("", data, rootCtx, pending);
 		const errors = [...result.errors];
@@ -5424,7 +5445,6 @@ function validateWithRust(
 		{
 			rules: Array<{ name: string; params: unknown }>;
 			optional: boolean;
-			transforms: string[];
 			bail: boolean;
 		}
 	> = {};
@@ -5439,7 +5459,6 @@ function validateWithRust(
 		schemaDesc[field] = {
 			rules: ruleDescs,
 			optional: chain.isOptionalField,
-			transforms: chain.transforms.map((t) => t.name),
 			// Sent explicitly so the Rust engine and the TS path agree on bail.
 			bail: chain.bails,
 		};
@@ -5457,7 +5476,7 @@ function validateWithRust(
 	const request = JSON.stringify({ schema: schemaDesc, data: declared });
 	const native = validateNative(request);
 	if (native.valid && native.data !== undefined) {
-		return { valid: true, errors: native.errors, data: native.data };
+		return { valid: true, errors: [], data: native.data };
 	}
-	return { valid: false, errors: native.errors };
+	return { valid: false, errors: renderNativeMessages(fields, native.errors) };
 }
