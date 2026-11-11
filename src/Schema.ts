@@ -1960,7 +1960,8 @@ export function schema(
 			!hasCustomRules &&
 			!validationTranslator &&
 			!provider &&
-			isPlainObject(data)
+			isPlainObject(data) &&
+			fitsNativeParser(fields, data)
 		) {
 			if (isNativeAvailable()) {
 				const rust = validateWithRust(fields, data);
@@ -5389,6 +5390,42 @@ function enumChain(
 }
 
 /** Serialize schema + data and validate via Rust NAPI. */
+/**
+ * How deep a declared value may nest and still go to the engine. Its JSON
+ * parser stops at 128 levels and the request wraps the payload in two of its
+ * own; this leaves a wide margin.
+ */
+const NATIVE_MAX_DEPTH = 64;
+
+/**
+ * Can the engine's parser take every declared value of this payload?
+ *
+ * A deeper value is validated on the TypeScript path instead — the rules a
+ * native-eligible schema carries are implemented identically there, so the
+ * verdict is the same, and the caller gets a verdict rather than a parse
+ * error from inside the engine. Iterative, so the check itself cannot
+ * overflow the stack on the value it is measuring.
+ */
+function fitsNativeParser(
+	fields: Record<string, RuleChain>,
+	data: Record<string, unknown>,
+): boolean {
+	const stack: Array<{ value: unknown; depth: number }> = Object.keys(fields)
+		.filter((field) => Object.hasOwn(data, field))
+		.map((field) => ({ value: data[field], depth: 1 }));
+	for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+		const { value, depth } = next;
+		if (typeof value !== "object" || value === null) continue;
+		if (depth > NATIVE_MAX_DEPTH) return false;
+		const children: unknown[] = Array.isArray(value)
+			? value
+			: Object.values(value);
+		for (const child of children)
+			stack.push({ value: child, depth: depth + 1 });
+	}
+	return true;
+}
+
 function validateWithRust(
 	fields: Record<string, RuleChain>,
 	data: Record<string, unknown>,
@@ -5419,7 +5456,16 @@ function validateWithRust(
 		};
 	}
 
-	const request = JSON.stringify({ schema: schemaDesc, data });
+	// Only the declared fields cross the boundary: the engine never looks at
+	// anything else, and serialising the whole body handed it undeclared junk
+	// nested past what its parser accepts. `fromEntries` defines own keys, so a
+	// field named `__proto__` stays data.
+	const declared = Object.fromEntries(
+		Object.keys(fields)
+			.filter((field) => Object.hasOwn(data, field))
+			.map((field) => [field, data[field]]),
+	);
+	const request = JSON.stringify({ schema: schemaDesc, data: declared });
 	const native = validateNative(request);
 	if (native.valid && native.data !== undefined) {
 		return { valid: true, errors: native.errors, data: native.data };

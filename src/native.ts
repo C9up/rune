@@ -4,6 +4,7 @@
  * @implements FR40
  */
 
+import { RuneError } from "./errors.js";
 import {
 	hasFunctions,
 	loadNativeBinary,
@@ -42,14 +43,33 @@ export function validateNative(requestJson: string): {
 	data?: Record<string, unknown>;
 } {
 	if (!native) {
-		throw new Error(
-			`[E_RUNE_NAPI_NOT_FOUND] Rust validation engine not available: ${loadError ?? "binary not found"}`,
+		throw new RuneError(
+			"NAPI_NOT_FOUND",
+			`Rust validation engine not available: ${loadError ?? "binary not found"}`,
 		);
 	}
-	const result = JSON.parse(native.validate(requestJson));
+	let response: string;
+	try {
+		response = native.validate(requestJson);
+	} catch (cause) {
+		// The engine refused the request itself. Its own wording stays out of
+		// the message: it quotes positions inside the payload.
+		throw new RuneError(
+			"NAPI_REQUEST_REFUSED",
+			"The Rust validation engine refused the request.",
+			{
+				hint:
+					cause instanceof Error
+						? cause.message
+						: "No reason was given by the engine.",
+			},
+		);
+	}
+	const result = JSON.parse(response);
 	if (typeof result.valid !== "boolean" || !Array.isArray(result.errors)) {
-		throw new Error(
-			`[E_RUNE_NAPI_INVALID_RESPONSE] Rust engine returned unexpected shape: ${JSON.stringify(result)}`,
+		throw new RuneError(
+			"NAPI_INVALID_RESPONSE",
+			"The Rust validation engine returned an unexpected shape.",
 		);
 	}
 	return result;

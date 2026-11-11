@@ -122,3 +122,31 @@ describe("rune > native and TypeScript engines agree", () => {
 		});
 	}
 });
+
+describe("rune > the engine only ever sees the declared fields", () => {
+	/** `[[[…]]]`, nested well past the engine parser's 128 levels. */
+	const deep = JSON.parse(`${"[".repeat(200)}${"]".repeat(200)}`);
+
+	it("an undeclared key nested past the parser's limit is simply dropped", () => {
+		const v = schema({ name: rules.string() });
+		expect(v.validateResult({ name: "x", junk: deep })).toEqual({
+			valid: true,
+			errors: [],
+			data: { name: "x" },
+		});
+		expect(v.validateOrThrow({ name: "x", junk: deep })).toEqual({ name: "x" });
+		expect(v.tryValidateSync({ name: "x", junk: deep })).toEqual([
+			null,
+			{ name: "x" },
+		]);
+	});
+
+	it("a declared value nested past the limit gets a verdict, not a parse error", () => {
+		const v = schema({ name: rules.string() });
+		expect(v.validateResult({ name: deep }).errors).toEqual([
+			expect.objectContaining({ field: "name", rule: "string" }),
+		]);
+		const sized = schema({ list: rules.any().minLength(1) });
+		expect(sized.validateResult({ list: deep }).valid).toBe(true);
+	});
+});
