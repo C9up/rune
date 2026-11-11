@@ -11,7 +11,11 @@ import {
 	resolveOperand,
 	truncateTo,
 } from "./date.js";
-import { messages as defaultMessages, requiredMessage } from "./defaults.js";
+import {
+	fields as defaultFieldLabels,
+	messages as defaultMessages,
+	requiredMessage,
+} from "./defaults.js";
 import type { RuneErrorNode } from "./errors.js";
 import { RuneError, RuneValidationError } from "./errors.js";
 import {
@@ -652,7 +656,7 @@ interface RunContext {
  * together so a throwing entry point raises the error of ITS run.
  */
 interface RunOutcome {
-	result: ValidationResult<Record<string, unknown>>;
+	result: ValidationResult<unknown>;
 	createError?: () => Error;
 }
 
@@ -1609,7 +1613,16 @@ function templateData(
 	// `a.b` as "The b field ...", and a provider mapping labels reads the same
 	// way. Args come after so a rule reporting against another field can put
 	// its own `field` in and win.
-	return { field: fieldNameOf(field), ...args };
+	return { field: fieldLabel(field), ...args };
+}
+
+/**
+ * The `{{ field }}` a default message renders: the catalogue's label for the
+ * path when it has one — the root payload `""` reads as "data" — otherwise
+ * the path's last segment.
+ */
+function fieldLabel(field: string): string | number {
+	return defaultFieldLabels[field] ?? fieldNameOf(field);
 }
 
 /**
@@ -1623,7 +1636,7 @@ function translatorParams(
 	field: string,
 	args?: Record<string, unknown>,
 ): ValidationMessageParams {
-	const params: ValidationMessageParams = { field: fieldNameOf(field) };
+	const params: ValidationMessageParams = { field: fieldLabel(field) };
 	for (const [key, value] of Object.entries(args ?? {})) {
 		if (
 			typeof value === "string" ||
@@ -1830,16 +1843,16 @@ export type Infer<S> = Prettify<
  */
 export function schema<S extends Record<string, RuleChain>>(
 	fields: S,
-	objectChain?: RuleChain,
+	rootChain?: RuleChain,
 ): ValidationSchema<Infer<S>>;
 export function schema<T = Record<string, unknown>>(
 	fields: Record<string, RuleChain>,
-	objectChain?: RuleChain,
+	rootChain?: RuleChain,
 ): ValidationSchema<T>;
 export function schema(
 	fields: Record<string, RuleChain>,
-	objectChain?: RuleChain,
-): ValidationSchema<Record<string, unknown>> {
+	rootChain?: RuleChain,
+): ValidationSchema<unknown> {
 	// Per-validator reporter (upstream `validator.errorReporter = …`), overridable
 	// per call. Mutable on purpose: that is how upstream exposes it.
 	let validatorErrorReporter:
@@ -1867,7 +1880,7 @@ export function schema(
 	// hands its own chain, and walking only its properties dropped everything
 	// set on the object itself — `denyUnknownProperties()`, `merge(group)`,
 	// `toCamelCase()` — exactly as a nested object would not have.
-	const root = objectChain ?? new RuleChain().object(fields);
+	const root = rootChain ?? new RuleChain().object(fields);
 	// Computed once at construction time, not per validate() call. The engine
 	// validates a field map, so a root carrying anything of its own stays off it.
 	const hasCustomRules =
@@ -1887,7 +1900,7 @@ export function schema(
 	 * then threw that run's error.
 	 */
 	function concludeRun(
-		result: ValidationResult<Record<string, unknown>>,
+		result: ValidationResult<unknown>,
 		data: unknown,
 		options?: ValidateOptions,
 	): RunOutcome {
@@ -1906,15 +1919,24 @@ export function schema(
 		return { result, createError: reporter?.createError };
 	}
 
-	/** The root value is not an object. Reported like any other failure. */
-	function rootTypeFailure(
+	/**
+	 * The context a root run starts from. A payload that is not an object
+	 * still reaches the root chain, whose own type rule reports it — on field
+	 * `""`, through the provider and translator like any other failure.
+	 */
+	function rootContext(
 		data: unknown,
+		provider: MessagesProviderContract | undefined,
 		options?: ValidateOptions,
-	): RunOutcome {
-		const errors: ValidationError[] = [
-			{ field: "_root", rule: "type", message: "Input must be an object" },
-		];
-		return concludeRun({ valid: false, errors }, data, options);
+	): RunContext {
+		const root = isPlainObject(data) ? data : {};
+		return {
+			data: root,
+			parent: root,
+			meta: options?.meta ?? {},
+			errorReporter: options?.errorReporter,
+			messagesProvider: provider,
+		};
 	}
 
 	function runSync(rawData: unknown, options?: ValidateOptions): RunOutcome {
@@ -1926,10 +1948,6 @@ export function schema(
 				"rune: this schema has async rules (unique/exists/useAsync) — call validateResultAsync() (result-based) or validate() (throwing) instead of validateResult().",
 			);
 		}
-		if (!isPlainObject(data)) {
-			return rootTypeFailure(data, options);
-		}
-
 		// The global provider counts exactly like a per-call one: the Rust engine
 		// renders default messages, so routing there would silently ignore it.
 		const provider =
@@ -1938,7 +1956,12 @@ export function schema(
 			createdWithMessagesProvider ??
 			globalMessagesProvider ??
 			undefined;
-		if (!hasCustomRules && !validationTranslator && !provider) {
+		if (
+			!hasCustomRules &&
+			!validationTranslator &&
+			!provider &&
+			isPlainObject(data)
+		) {
 			if (isNativeAvailable()) {
 				const rust = validateWithRust(fields, data);
 				const native = rust.valid
@@ -1954,17 +1977,10 @@ export function schema(
 			assertNativeAvailable();
 		}
 
-		const rootCtx: RunContext = {
-			data,
-			parent: data,
-			meta: options?.meta ?? {},
-			errorReporter: options?.errorReporter,
-			messagesProvider: provider,
-		};
 		const { errors, transformed } = root._validateWithTransform(
 			"",
 			data,
-			rootCtx,
+			rootContext(data, provider, options),
 		);
 		return concludeRun(verdict(errors, transformed), data, options);
 	}
@@ -1973,19 +1989,15 @@ export function schema(
 	function verdict(
 		errors: ValidationError[],
 		transformed: unknown,
-	): ValidationResult<Record<string, unknown>> {
+	): ValidationResult<unknown> {
 		if (errors.length > 0) return { valid: false, errors };
-		return {
-			valid: true,
-			errors,
-			data: isPlainObject(transformed) ? transformed : {},
-		};
+		return { valid: true, errors, data: transformed };
 	}
 
 	function validateResult(
 		data: unknown,
 		options?: ValidateOptions,
-	): ValidationResult<Record<string, unknown>> {
+	): ValidationResult<unknown> {
 		return runSync(data, options).result;
 	}
 
@@ -2017,10 +2029,7 @@ export function schema(
 			: new RuneValidationError(outcome.result.errors.map(toErrorNode));
 	}
 
-	function validateOrThrow(
-		data: unknown,
-		options?: ValidateOptions,
-	): Record<string, unknown> {
+	function validateOrThrow(data: unknown, options?: ValidateOptions): unknown {
 		const outcome = runSync(data, options);
 		if (outcome.result.valid) return outcome.result.data;
 		throw thrownFailure(outcome);
@@ -2033,22 +2042,15 @@ export function schema(
 		const data = convertEmptyStringsToNull
 			? convertEmptyStrings(rawData)
 			: rawData;
-		if (!isPlainObject(data)) {
-			return rootTypeFailure(data, options);
-		}
-		const rootCtx: RunContext = {
+		const rootCtx = rootContext(
 			data,
-			parent: data,
-			meta: options?.meta ?? {},
-			errorReporter: options?.errorReporter,
-			messagesProvider:
-				options?.messagesProvider ??
+			options?.messagesProvider ??
 				validatorMessagesProvider ??
 				createdWithMessagesProvider ??
 				globalMessagesProvider ??
 				undefined,
-		};
-
+			options,
+		);
 		const pending: PendingAsync[] = [];
 		const result = root._validateWithTransform("", data, rootCtx, pending);
 		const errors = [...result.errors];
@@ -2066,7 +2068,7 @@ export function schema(
 	async function validateResultAsync(
 		data: unknown,
 		options?: ValidateOptions,
-	): Promise<ValidationResult<Record<string, unknown>>> {
+	): Promise<ValidationResult<unknown>> {
 		return (await runAsync(data, options)).result;
 	}
 
@@ -2077,7 +2079,7 @@ export function schema(
 	function tryValidateSync(
 		data: unknown,
 		options?: ValidateOptions,
-	): [RuneValidationError, null] | [null, Record<string, unknown>] {
+	): [RuneValidationError, null] | [null, unknown] {
 		const outcome = runSync(data, options);
 		if (outcome.result.valid) return [null, outcome.result.data];
 		return [reportedFailure(outcome), null];
@@ -2087,7 +2089,7 @@ export function schema(
 	async function tryValidate(
 		data: unknown,
 		options?: ValidateOptions,
-	): Promise<[RuneValidationError, null] | [null, Record<string, unknown>]> {
+	): Promise<[RuneValidationError, null] | [null, unknown]> {
 		const outcome = await runAsync(data, options);
 		if (outcome.result.valid) return [null, outcome.result.data];
 		return [reportedFailure(outcome), null];
@@ -2096,7 +2098,7 @@ export function schema(
 	async function validateOrThrowAsync(
 		data: unknown,
 		options?: ValidateOptions,
-	): Promise<Record<string, unknown>> {
+	): Promise<unknown> {
 		const outcome = await runAsync(data, options);
 		if (outcome.result.valid) return outcome.result.data;
 		throw thrownFailure(outcome);
@@ -2110,7 +2112,7 @@ export function schema(
 	async function validate(
 		data: unknown,
 		options?: ValidateOptions,
-	): Promise<Record<string, unknown>> {
+	): Promise<unknown> {
 		return validateOrThrowAsync(data, options);
 	}
 
@@ -2134,7 +2136,14 @@ export function schema(
 	 * otherwise omitted rather than guessed at.
 	 */
 	function toJSONSchema(): Record<string, unknown> {
-		return chainToJSONSchema(fields, objectChain?.allowsUnknown === true);
+		if (root.getProperties() === null) {
+			// A scalar or array root describes itself, not an object of fields.
+			const node = chainToJSONSchema({ data: root }).properties;
+			return isRecordOfUnknown(node) && isRecordOfUnknown(node.data)
+				? node.data
+				: {};
+		}
+		return chainToJSONSchema(fields, root.allowsUnknown);
 	}
 
 	/**
@@ -2172,7 +2181,7 @@ export function schema(
 		validate: (
 			value: unknown,
 		): Promise<
-			| { value: Record<string, unknown> }
+			| { value: unknown }
 			| { issues: ReadonlyArray<{ message: string; path: string[] }> }
 		> =>
 			validateResultAsync(value).then((result) =>
@@ -2187,7 +2196,8 @@ export function schema(
 							// break every consumer that follows the contract.
 							issues: result.errors.map((error) => ({
 								message: error.message,
-								path: error.field.split("."),
+								// The root payload's own failure has no segment.
+								path: error.field === "" ? [] : error.field.split("."),
 							})),
 						},
 			),
@@ -2230,40 +2240,23 @@ export function schema(
 }
 
 /**
- * upstream's `create(...)`. Same thing as {@link schema} — the Adonis
- * spelling is provided so a validator reads the same in both frameworks.
- */
-/**
  * upstream's `create(...)`. Accepts either a map of fields (rune's native
- * spelling) or the `RuleChain` produced by `rune.object({...})`, because
- * `create(rune.object({...}))` is the documented form.
+ * spelling) or any chain — `create(rune.object({...}))` is the documented
+ * form, and a scalar or array root (`create(rune.string())`) is validated as
+ * the single field `""`, as upstream does.
  */
 export function create<S extends Record<string, RuleChain>>(
 	fields: S,
 ): ValidationSchema<Infer<S>>;
-export function create(chain: RuleChain): ValidationSchema;
+export function create<C extends RuleChain>(
+	chain: C,
+): ValidationSchema<OutputOf<C>>;
 export function create(
 	input: Record<string, RuleChain> | RuleChain,
-): ValidationSchema {
+): ValidationSchema<unknown> {
 	return input instanceof RuleChain
-		? schema(toFieldMap(input), input)
+		? schema(input.getProperties() ?? {}, input)
 		: schema(input);
-}
-
-/** Unwrap `rune.object({...})` back to the field map `schema()` expects. */
-function toFieldMap(
-	input: Record<string, RuleChain> | RuleChain,
-): Record<string, RuleChain> {
-	if (!(input instanceof RuleChain)) return input;
-	const shape = input.getProperties();
-	if (!shape) {
-		throw new RuneError(
-			"NOT_AN_OBJECT",
-			"create()/compile() received a chain that declares no object shape.",
-			{ hint: "Use rune.object({ … }), or pass the field map directly." },
-		);
-	}
-	return shape;
 }
 
 /** Map an internal {@link ValidationError} to a {@link RuneErrorNode}. */
@@ -5248,13 +5241,17 @@ function evalRequiredCondition(
 }
 
 /** No-op alias of {@link schema} — upstream `compile()` API parity. */
-export function compile<T extends ValidationSchema>(s: T): T;
-export function compile(chain: RuleChain): ValidationSchema;
-export function compile(input: ValidationSchema | RuleChain): ValidationSchema {
+export function compile<T extends ValidationSchema<unknown>>(s: T): T;
+export function compile<C extends RuleChain>(
+	chain: C,
+): ValidationSchema<OutputOf<C>>;
+export function compile(
+	input: ValidationSchema<unknown> | RuleChain,
+): ValidationSchema<unknown> {
 	// A rune schema is already compiled, so this is identity for that form; the
 	// `RuleChain` form exists because `compile(rune.object({…}))` is the
 	// documented shape.
-	return input instanceof RuleChain ? schema(toFieldMap(input), input) : input;
+	return input instanceof RuleChain ? create(input) : input;
 }
 
 /** Entry point for building rules. */

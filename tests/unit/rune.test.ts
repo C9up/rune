@@ -224,7 +224,13 @@ describe("rune > security & edge cases", () => {
 		const s = schema({ name: rules.string() });
 		const result = s.validateResult(null as unknown as Record<string, unknown>);
 		expect(result.valid).toBe(false);
-		expect(defined(result.errors[0]).field).toBe("_root");
+		expect(result.errors).toEqual([
+			{
+				field: "",
+				rule: "required",
+				message: "The data field must be defined",
+			},
+		]);
 	});
 
 	it("handles undefined input to schema.validate", () => {

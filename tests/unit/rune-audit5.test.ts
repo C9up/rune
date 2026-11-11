@@ -926,7 +926,7 @@ describe("rune > audit 11 — root failures and file content", () => {
 			errorReporter: (e) => seen.push(`${e.field}:${e.rule}`),
 		});
 		expect(res.valid).toBe(false);
-		expect(seen).toEqual(["_root:type"]);
+		expect(seen).toEqual([":object"]);
 	});
 
 	it("the same holds on the async path", async () => {

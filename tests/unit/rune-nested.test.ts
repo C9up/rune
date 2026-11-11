@@ -99,6 +99,12 @@ describe("rune > rules.any() and chain edge cases", () => {
 		// needed for runtime-shape testing.
 		const result = s.validateResult([1, 2, 3]);
 		expect(result.valid).toBe(false);
-		expect(defined(result.errors[0]).field).toBe("_root");
+		expect(result.errors).toEqual([
+			{
+				field: "",
+				rule: "object",
+				message: "The data field must be an object",
+			},
+		]);
 	});
 });

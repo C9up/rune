@@ -72,7 +72,12 @@ export {
 
 import * as runeHelpers from "./helpers.js";
 import type { MessagesProviderContract } from "./MessagesProvider.js";
-import type { RuleChain, ValidateOptions } from "./Schema.js";
+import type {
+	Infer,
+	RuleChain,
+	ValidateOptions,
+	ValidationSchema,
+} from "./Schema.js";
 import {
 	bindDatabase,
 	bindFileReader,
@@ -193,15 +198,15 @@ const rune = {
 	): {
 		create<T extends Record<string, RuleChain>>(
 			fields: T,
-		): WithRequiredMeta<ReturnType<typeof create<T>>, M>;
+		): WithRequiredMeta<ValidationSchema<Infer<T>>, M>;
 		compile<T extends Record<string, RuleChain>>(
 			fields: T,
-		): WithRequiredMeta<ReturnType<typeof create<T>>, M>;
+		): WithRequiredMeta<ValidationSchema<Infer<T>>, M>;
 	} {
 		function build<T extends Record<string, RuleChain>>(fields: T) {
 			const validator = create(fields);
 			if (!validateMeta) {
-				return validator as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
+				return validator as WithRequiredMeta<ValidationSchema<Infer<T>>, M>;
 			}
 			// The callback runs BEFORE the payload: meta that is wrong makes
 			// every rule reading it meaningless, so failing early is the only
@@ -232,7 +237,7 @@ const rune = {
 				tryValidate: guard(validator.tryValidate),
 				tryValidateSync: guard(validator.tryValidateSync),
 			});
-			return wrapped as WithRequiredMeta<ReturnType<typeof create<T>>, M>;
+			return wrapped as WithRequiredMeta<ValidationSchema<Infer<T>>, M>;
 		}
 		// upstream exposes BOTH spellings behind withMetaData; `compile` is the
 		// one its own documentation uses, and it was missing here.
