@@ -5142,39 +5142,17 @@ export class RuleChain<Output = unknown> {
 	#applyTransformsTo(value: unknown, field: string, ctx: RunContext): unknown {
 		let result = value;
 		for (const transform of this.#transforms) {
-			LAST_FIELD.value = result;
-			LAST_FIELD.data = ctx.data;
-			LAST_FIELD.parent = ctx.parent;
-			LAST_FIELD.field = field;
-			LAST_FIELD.meta = ctx.meta;
-			result = transform.fn(result, LAST_FIELD);
+			// A context of its own per call: a module-wide scratch object left
+			// `name`/`wildCardPath`/`getFieldPath()` blank, and a callback that
+			// kept it read whatever the next transform wrote.
+			result = transform.fn(
+				result,
+				this.#makeFieldContext(field, result, ctx, [], () => {}),
+			);
 		}
 		return result;
 	}
 }
-
-/**
- * Scratch FieldContext reused for `.transform()` callbacks — transforms run
- * inline in {@link RuleChain.#applyTransformsTo}, which repopulates it before
- * each call. A shared object avoids per-transform allocation; it is never
- * retained across calls.
- */
-const LAST_FIELD: FieldContext = {
-	value: undefined,
-	data: {},
-	parent: {},
-	field: "",
-	meta: {},
-	isValid: true,
-	name: "",
-	wildCardPath: "",
-	isArrayMember: false,
-	isDefined: false,
-	isValidDataType: true,
-	getFieldPath: () => "",
-	mutate: (): void => {},
-	report(): void {},
-};
 
 /** Coerce a value to a comparable primitive for `in`/`enum` membership. */
 function asPrimitive(value: unknown): string | number | boolean {

@@ -266,3 +266,50 @@ describe("rune > message() targeting across rule registers", () => {
 		).toThrow(/must be called after a rule/);
 	});
 });
+
+describe("rune > a transform callback sees its own field", () => {
+	it("hands the real path, name and wildcard of the field", () => {
+		const seen: Array<Record<string, unknown>> = [];
+		const capture = rules.string().transform((value, field) => {
+			seen.push({
+				path: field.getFieldPath(),
+				name: field.name,
+				wildCardPath: field.wildCardPath,
+				isArrayMember: field.isArrayMember,
+				value: field.value,
+			});
+			return value;
+		});
+		schema({
+			a: capture,
+			rows: rules.array(rules.object({ tag: capture.clone() })),
+		}).validateResult({ a: "x", rows: [{ tag: "y" }] });
+		expect(seen).toEqual([
+			{
+				path: "a",
+				name: "a",
+				wildCardPath: "a",
+				isArrayMember: false,
+				value: "x",
+			},
+			{
+				path: "rows.0.tag",
+				name: "tag",
+				wildCardPath: "rows.*.tag",
+				isArrayMember: false,
+				value: "y",
+			},
+		]);
+	});
+
+	it("a context kept by one callback is not rewritten by the next", () => {
+		const kept: Array<{ getFieldPath(): string }> = [];
+		const keep = () =>
+			rules.string().transform((value, field) => {
+				kept.push(field);
+				return value;
+			});
+		schema({ a: keep(), b: keep() }).validateResult({ a: "x", b: "y" });
+		expect(kept.map((field) => field.getFieldPath())).toEqual(["a", "b"]);
+	});
+});
