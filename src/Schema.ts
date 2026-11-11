@@ -1436,6 +1436,14 @@ function isAcceptedValue(value: unknown): boolean {
 /** Default context for internal callers that don't supply one (no root available). */
 const EMPTY_RUN_CONTEXT: RunContext = { data: {}, parent: {}, meta: {} };
 
+/**
+ * The path of a child of `field`. The root payload's path is `""`, and its
+ * children are `name`, not `.name`.
+ */
+function childPath(field: string, key: string | number): string {
+	return field === "" ? String(key) : `${field}.${key}`;
+}
+
 /** Type guard: narrows `unknown` to a plain object (non-null, non-array, typeof 'object'). */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1855,13 +1863,18 @@ export function schema(
 	// drop translated messages.
 	const createdWithMessagesProvider = globalMessagesProvider;
 	const createdWithErrorReporter = globalErrorReporter;
-	// Computed once at construction time, not per validate() call.
-	const hasCustomRules = detectHasCustomRules(fields);
-	// Any field carrying async rules (`unique`/`exists`/`useAsync`) forces callers
+	// The chain the payload is validated THROUGH. `create(rune.object(…))`
+	// hands its own chain, and walking only its properties dropped everything
+	// set on the object itself — `denyUnknownProperties()`, `merge(group)`,
+	// `toCamelCase()` — exactly as a nested object would not have.
+	const root = objectChain ?? new RuleChain().object(fields);
+	// Computed once at construction time, not per validate() call. The engine
+	// validates a field map, so a root carrying anything of its own stays off it.
+	const hasCustomRules =
+		!root.isBareObjectShape || detectHasCustomRules(fields);
+	// Any chain carrying async rules (`unique`/`exists`/`useAsync`) forces callers
 	// onto the async path — the sync path throws rather than silently skipping them.
-	const hasAsyncRules = Object.values(fields).some(
-		(chain) => chain.hasAsyncRulesDeep,
-	);
+	const hasAsyncRules = root.hasAsyncRulesDeep;
 
 	/**
 	 * Hand a run's errors to the bound reporter, and keep the error it builds
@@ -1941,8 +1954,6 @@ export function schema(
 			assertNativeAvailable();
 		}
 
-		const errors: ValidationError[] = [];
-		const validated: Record<string, unknown> = {};
 		const rootCtx: RunContext = {
 			data,
 			parent: data,
@@ -1950,26 +1961,25 @@ export function schema(
 			errorReporter: options?.errorReporter,
 			messagesProvider: provider,
 		};
-
-		for (const [field, chain] of Object.entries(fields)) {
-			const value = data[field];
-			const result = chain._validateWithTransform(field, value, rootCtx);
-			errors.push(...result.errors);
-			// Gate on the TRANSFORMED result, not the raw input: a pre-transform
-			// (`parse(() => 42)`) can produce a value for an absent field, and that
-			// value must land in `data` — testing the raw `value` dropped it.
-			if (result.errors.length === 0 && result.transformed !== undefined) {
-				validated[field] = result.transformed;
-			}
-		}
-
-		return concludeRun(
-			errors.length === 0
-				? { valid: true, errors, data: validated }
-				: { valid: false, errors },
+		const { errors, transformed } = root._validateWithTransform(
+			"",
 			data,
-			options,
+			rootCtx,
 		);
+		return concludeRun(verdict(errors, transformed), data, options);
+	}
+
+	/** Shape a root run's errors and output into a result. */
+	function verdict(
+		errors: ValidationError[],
+		transformed: unknown,
+	): ValidationResult<Record<string, unknown>> {
+		if (errors.length > 0) return { valid: false, errors };
+		return {
+			valid: true,
+			errors,
+			data: isPlainObject(transformed) ? transformed : {},
+		};
 	}
 
 	function validateResult(
@@ -2026,8 +2036,6 @@ export function schema(
 		if (!isPlainObject(data)) {
 			return rootTypeFailure(data, options);
 		}
-		const errors: ValidationError[] = [];
-		const validated: Record<string, unknown> = {};
 		const rootCtx: RunContext = {
 			data,
 			parent: data,
@@ -2041,41 +2049,18 @@ export function schema(
 				undefined,
 		};
 
-		for (const [field, chain] of Object.entries(fields)) {
-			// One collector per top-level field, drained straight away, so async
-			// errors stay grouped with their field rather than piling up at the end.
-			const pending: PendingAsync[] = [];
-			const result = chain._validateWithTransform(
-				field,
-				data[field],
-				rootCtx,
-				pending,
+		const pending: PendingAsync[] = [];
+		const result = root._validateWithTransform("", data, rootCtx, pending);
+		const errors = [...result.errors];
+		// The collector already applied the gate at every depth: a chain records
+		// itself only when its own subtree passed and its value is present —
+		// mirrors Lucid skipping a DB rule on an already-invalid or absent field.
+		for (const task of pending) {
+			errors.push(
+				...(await task.chain._runAsyncRules(task.field, task.value, task.ctx)),
 			);
-			const fieldErrors = [...result.errors];
-			// The collector already applied the gate at every depth: a chain records
-			// itself only when its own subtree passed and its value is present —
-			// mirrors Lucid skipping a DB rule on an already-invalid or absent field.
-			for (const task of pending) {
-				const asyncErrors = await task.chain._runAsyncRules(
-					task.field,
-					task.value,
-					task.ctx,
-				);
-				fieldErrors.push(...asyncErrors);
-			}
-			errors.push(...fieldErrors);
-			if (fieldErrors.length === 0 && result.transformed !== undefined) {
-				validated[field] = result.transformed;
-			}
 		}
-
-		return concludeRun(
-			errors.length === 0
-				? { valid: true, errors, data: validated }
-				: { valid: false, errors },
-			data,
-			options,
-		);
+		return concludeRun(verdict(errors, result.transformed), data, options);
 	}
 
 	async function validateResultAsync(
@@ -2230,7 +2215,7 @@ export function schema(
 		// ALWAYS a chain, even when the validator was built from a bare field map:
 		// upstream documents `createUserValidator.schema.partial()`, and returning
 		// the map left that broken on the most common Adonis path.
-		schema: objectChain ?? new RuleChain().object(fields),
+		schema: root,
 		"~standard": standard,
 		toJSON,
 		toJSONSchema,
@@ -2494,6 +2479,33 @@ export class RuleChain<Output = unknown> {
 	/** Whether an undeclared key fails the payload rather than being dropped. */
 	get deniesUnknown(): boolean {
 		return this.#denyUnknown;
+	}
+
+	/**
+	 * Is this chain anything more than a bare `object(shape)` — a flag on the
+	 * object itself (unknown keys, groups, camelCase keys), a rule of its own, a
+	 * transform, a modifier? Only a bare shape can be validated field by field
+	 * without walking the chain, which is what the native engine does.
+	 */
+	get isBareObjectShape(): boolean {
+		return (
+			this.#nestedSchema !== null &&
+			this.#rules.length === 1 &&
+			this.#rules[0]?.name === "object" &&
+			!this.#rules[0].hasCustomMessage &&
+			!this.#allowUnknown &&
+			!this.#denyUnknown &&
+			!this.#camelCaseKeys &&
+			this.#groups.length === 0 &&
+			this.#useRules.length === 0 &&
+			this.#asyncRules.length === 0 &&
+			this.#transforms.length === 0 &&
+			this.#preTransforms.length === 0 &&
+			this.#coercions.length === 0 &&
+			!this.#isOptional &&
+			!this.#isNullable &&
+			this.#requiredConditions.length === 0
+		);
 	}
 	/** Free-form JSON Schema metadata attached with `meta()`. */
 	get metadata(): Record<string, unknown> | null {
@@ -4742,7 +4754,7 @@ export class RuleChain<Output = unknown> {
 					// caller to guess which spelling was expected.
 					for (const key of undeclared) {
 						errors.push({
-							field: field ? `${field}.${key}` : key,
+							field: childPath(field, key),
 							rule: "unknownField",
 							message: `unknown field \`${key}\`, expected one of ${[...declared].join(", ")}`,
 						});
@@ -4751,7 +4763,7 @@ export class RuleChain<Output = unknown> {
 			}
 			for (const [nestedField, chain] of Object.entries(shape)) {
 				const nestedResult = chain._validateWithTransform(
-					`${field}.${nestedField}`,
+					childPath(field, nestedField),
 					source[nestedField],
 					{ ...ctx, parent: source },
 					pending,
@@ -4786,7 +4798,7 @@ export class RuleChain<Output = unknown> {
 			transformed = obj;
 			for (const key of Object.keys(obj)) {
 				const res = this.#recordValueChain._validateWithTransform(
-					`${field}.${key}`,
+					childPath(field, key),
 					obj[key],
 					{ ...ctx, parent: obj },
 					pending,
@@ -4802,7 +4814,7 @@ export class RuleChain<Output = unknown> {
 			transformed = arr;
 			this.#tupleChains.forEach((chain, i) => {
 				const res = chain._validateWithTransform(
-					`${field}.${i}`,
+					childPath(field, i),
 					arr[i],
 					{ ...ctx, parent: arr },
 					pending,
@@ -4895,7 +4907,7 @@ export class RuleChain<Output = unknown> {
 			transformed = arr;
 			for (let i = 0; i < arr.length; i++) {
 				const itemResult = this.#arrayItemChain._validateWithTransform(
-					`${field}.${i}`,
+					childPath(field, i),
 					arr[i],
 					{ ...ctx, parent: arr },
 					pending,
