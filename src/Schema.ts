@@ -3619,14 +3619,16 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Must be a valid URL (TS-only — uses the WHATWG URL parser). */
+	/**
+	 * Must be a valid URL (TS-only — uses the WHATWG URL parser). With or
+	 * without options it is the same check, with validator.js's defaults:
+	 * http/https/ftp, a dotted host, no `_` in it, the scheme optional.
+	 */
 	url(options?: UrlOptions): this {
 		this.#pushRule({
 			name: "url",
 			args: options ? { ...options } : undefined,
-			validate: (v) =>
-				typeof v === "string" &&
-				(options ? isUrlWithOptions(v, options) : isValidUrl(v)),
+			validate: (v) => typeof v === "string" && isUrlWithOptions(v, options),
 			message: "Must be a valid URL",
 		});
 		return this;
@@ -5193,29 +5195,6 @@ function sizedLength(value: unknown): number {
 	if (typeof value === "string") return [...value].length;
 	if (Array.isArray(value)) return value.length;
 	return -1;
-}
-
-/**
- * WHATWG URL validity, restricted to the protocols a link may safely be — the
- * point of the allow-list is to refuse `javascript:`, `data:` and `mailto:`,
- * which this list does exactly as the reference one does.
- *
- * `ftp` belongs in it: leaving it out made `url()` refuse what
- * `helpers.isURL()` accepted, so the same string passed or failed depending on
- * which half of this package you asked. Narrow it per call with
- * `url({ protocols: ["https"] })`.
- */
-function isValidUrl(value: string): boolean {
-	try {
-		const url = new URL(value);
-		return (
-			url.protocol === "http:" ||
-			url.protocol === "https:" ||
-			url.protocol === "ftp:"
-		);
-	} catch {
-		return false;
-	}
 }
 
 /** Read a sibling field's value from the immediate parent (object only). */

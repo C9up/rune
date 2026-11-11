@@ -425,9 +425,12 @@ export interface UrlOptions {
 	require_tld?: boolean;
 	/** validator.js spelling. */
 	allow_underscores?: boolean;
-	/** Require an explicit scheme. Defaults to `true`, like validator.js. */
+	/**
+	 * Require an explicit scheme. Defaults to `false`, like validator.js: a
+	 * scheme-less `example.com` is read as `https://example.com`.
+	 */
 	requireProtocol?: boolean;
-	/** Allowed schemes, without the colon. Defaults to http/https. */
+	/** Allowed schemes, without the colon. Defaults to http/https/ftp. */
 	protocols?: string[];
 	/** Require a dotted host (rejects `http://localhost`). Defaults to `true`. */
 	requireTld?: boolean;
@@ -443,7 +446,18 @@ export function isUrlWithOptions(
 	// validator arrives in snake_case. Both spellings are honoured, snake_case
 	// first, so neither form is silently ignored.
 	const requireProtocol =
-		(options.require_protocol ?? options.requireProtocol) !== false;
+		(options.require_protocol ?? options.requireProtocol) === true;
+	// validator.js's up-front refusals: whitespace and angle brackets, a
+	// `mailto:` (which would otherwise read as `user:password@host`), a
+	// protocol-relative `//host`, and anything past 2083 characters.
+	if (
+		/[\s<>]/.test(value) ||
+		value.startsWith("mailto:") ||
+		value.startsWith("//") ||
+		value.length >= 2083
+	) {
+		return false;
+	}
 	// The reference default is http/https/ftp. Narrow it per call with
 	// `{ protocols: ["https"] }` — dropping ftp here refused a valid URL.
 	const protocols = options.protocols ?? ["http", "https", "ftp"];

@@ -170,6 +170,24 @@ describe("rune > format rule options (upstream)", () => {
 		).toBe(false);
 	});
 
+	it("url() and url({}) are one validator with validator.js's defaults", () => {
+		for (const make of [
+			() => rules.string().url(),
+			() => rules.string().url({}),
+		]) {
+			// No scheme is required, a dotted host is, `_` is refused.
+			expect(ok(make, "example.com")).toBe(true);
+			expect(ok(make, "https://example.com/x")).toBe(true);
+			expect(ok(make, "http://localhost/x")).toBe(false);
+			expect(ok(make, "http://a_b.com")).toBe(false);
+			// validator.js's own refusals.
+			expect(ok(make, "//example.com")).toBe(false);
+			expect(ok(make, "mailto:a@example.com")).toBe(false);
+			expect(ok(make, "http://exa mple.com")).toBe(false);
+			expect(ok(make, `https://example.com/${"a".repeat(2083)}`)).toBe(false);
+		}
+	});
+
 	it("mobile accepts a locale and fails closed on an unknown one", () => {
 		expect(
 			ok(() => rules.string().mobile({ locale: "fr-CH" }), "+41791234567"),

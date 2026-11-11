@@ -424,22 +424,24 @@ describe("rune > the alpha character class", () => {
 });
 
 describe("rune > URLs with options", () => {
-	it("requires a scheme by default", () => {
+	it("does not require a scheme by default, like validator.js", () => {
 		expect(isUrlWithOptions("https://acme.test")).toBe(true);
-		expect(isUrlWithOptions("acme.test")).toBe(false);
-		expect(isUrlWithOptions("acme.test", { requireProtocol: false })).toBe(
-			true,
+		expect(isUrlWithOptions("acme.test")).toBe(true);
+		expect(isUrlWithOptions("acme.test", { requireProtocol: true })).toBe(
+			false,
 		);
 	});
 
 	it("takes the snake_case spelling too", () => {
-		expect(isUrlWithOptions("acme.test", { require_protocol: false })).toBe(
-			true,
+		expect(isUrlWithOptions("acme.test", { require_protocol: true })).toBe(
+			false,
 		);
 	});
 
 	it("accepts only the schemes it was given", () => {
-		expect(isUrlWithOptions("acme.test", { protocols: ["https"] })).toBe(false);
+		expect(isUrlWithOptions("http://acme.test", { protocols: ["https"] })).toBe(
+			false,
+		);
 		expect(isUrlWithOptions("https://acme.test", { protocols: ["ftp"] })).toBe(
 			false,
 		);
