@@ -96,7 +96,9 @@ describe("rune > audit 4", () => {
 		// expect-error fails the build if that stops being true — and still guarded
 		// at runtime for a JS caller.
 		// @ts-expect-error withMetaData<T>() makes `meta` required
-		expect(() => v.validateResult({ name: "Ada" })).toThrow(TypeError);
+		expect(() => v.validateResult({ name: "Ada" })).toThrow(
+			expect.objectContaining({ code: "E_RUNE_META_REQUIRED" }),
+		);
 		// Wrong meta shape is a runtime failure too, loud rather than silent — a JS
 		// caller gets no help from the compiler.
 		expect(() =>
@@ -178,5 +180,35 @@ describe("rune > convertEmptyStringsToNull only touches declared fields", () => 
 			errors: [],
 			data: { profile: {}, tags: [null, "a"] },
 		});
+	});
+});
+
+describe("rune > an error reporter is told apart by arity, then checked", () => {
+	it("an observer written with a default parameter is refused loudly", () => {
+		const v = schema({ name: rules.string() });
+		const observer = (_error: unknown = undefined): void => {};
+		const rest = (..._errors: unknown[]): void => {};
+		for (const errorReporter of [observer, rest]) {
+			expect(() => v.validateResult({}, { errorReporter })).toThrow(
+				expect.objectContaining({ code: "E_RUNE_INVALID_ERROR_REPORTER" }),
+			);
+		}
+	});
+
+	it("a factory and a declared observer both still work", () => {
+		const v = schema({ name: rules.string() });
+		const seen: string[] = [];
+		v.validateResult({}, { errorReporter: (error) => seen.push(error.rule) });
+		expect(seen).toEqual(["required"]);
+		const factory = () => ({
+			hasErrors: false,
+			report() {
+				this.hasErrors = true;
+			},
+			createError: () => new Error("from the factory"),
+		});
+		expect(() => v.validateOrThrow({}, { errorReporter: factory })).toThrow(
+			"from the factory",
+		);
 	});
 });

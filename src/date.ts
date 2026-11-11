@@ -166,7 +166,8 @@ export function parseWithFormat(value: string, format: string): Date | null {
 		// just matched, so each one has a value.
 		if (raw === undefined) return;
 		if (t === "A" || t === "a") {
-			meridiem = raw.toLowerCase() as "am" | "pm";
+			const lower = raw.toLowerCase();
+			meridiem = lower === "pm" ? "pm" : lower === "am" ? "am" : null;
 			return;
 		}
 		if (t === "MMMM" || t === "MMM") {

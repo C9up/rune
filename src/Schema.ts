@@ -429,10 +429,33 @@ export interface ErrorReporterContract {
 /** A zero-argument factory producing a fresh {@link ErrorReporterContract}. */
 export type ErrorReporterFactory = () => ErrorReporterContract;
 
+/** A factory takes no argument; an observer declares the error it receives. */
+function isReporterFactory(
+	reporter: ErrorReporterFactory | ((error: ValidationError) => void),
+): reporter is ErrorReporterFactory {
+	return reporter.length === 0;
+}
+
+/** Does `value` carry the reporter contract's two methods? */
+function isReporterContract(value: unknown): value is ErrorReporterContract {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"report" in value &&
+		typeof value.report === "function" &&
+		"createError" in value &&
+		typeof value.createError === "function"
+	);
+}
+
 /**
  * Normalise either accepted spelling into one "report this error" callback.
  * A factory is built ONCE per validation, so a stateful upstream reporter sees the
  * whole run and can assemble its own error shape.
+ *
+ * Arity tells them apart, and the factory's product is CHECKED: an observer
+ * written `(error = …) => …` has arity 0, and it used to be called as a factory
+ * and its return value used as a reporter, which crashed at the first report.
  */
 function toReporter(
 	reporter:
@@ -448,12 +471,20 @@ function toReporter(
 	  }
 	| undefined {
 	if (!reporter) return undefined;
-	if (reporter.length > 0) {
+	if (!isReporterFactory(reporter)) {
 		// Plain observer: it consumes each error and never decides the outcome.
-		const observe = reporter as (error: ValidationError) => void;
-		return { report: observe };
+		return { report: reporter };
 	}
-	const built = (reporter as ErrorReporterFactory)();
+	const built: unknown = reporter();
+	if (!isReporterContract(built)) {
+		throw new RuneError(
+			"INVALID_ERROR_REPORTER",
+			"errorReporter takes no argument but did not return a reporter ({ report, createError }).",
+			{
+				hint: "A factory returns a reporter; an observer must declare its parameter without a default: (error) => …",
+			},
+		);
+	}
 	return {
 		report(error) {
 			// upstream hands the reporter a FieldContext, not a path string: a real
@@ -648,7 +679,6 @@ interface RunContext {
 	parent: Record<string, unknown> | unknown[];
 	meta: Record<string, unknown>;
 	messagesProvider?: MessagesProviderContract;
-	errorReporter?: (error: ValidationError) => void;
 }
 
 /**
@@ -1045,7 +1075,7 @@ function isFileLike(value: unknown): value is FileLike {
 		typeof value === "object" &&
 		value !== null &&
 		"size" in value &&
-		typeof (value as FileLike).size === "number"
+		typeof value.size === "number"
 	);
 }
 
@@ -1441,6 +1471,11 @@ function childPath(field: string, key: string | number): string {
 	return field === "" ? String(key) : `${field}.${key}`;
 }
 
+/** A date operand given as a callback, resolved per validation. */
+function isThunk(value: unknown): value is () => unknown {
+	return typeof value === "function";
+}
+
 /** Type guard: narrows `unknown` to a plain object (non-null, non-array, typeof 'object'). */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1806,7 +1841,7 @@ function detectHasCustomRules(fields: Record<string, RuleChain>): boolean {
 }
 
 /** Extract the phantom output type of a chain. */
-type OutputOf<C> = C extends RuleChain<infer O> ? O : never;
+export type OutputOf<C> = C extends RuleChain<infer O> ? O : never;
 /** Keys whose output includes `undefined` become optional in the inferred shape. */
 type OptionalKeys<S> = {
 	[K in keyof S]: undefined extends OutputOf<S[K]> ? K : never;
@@ -1937,7 +1972,6 @@ export function schema(
 			data: root,
 			parent: root,
 			meta: options?.meta ?? {},
-			errorReporter: options?.errorReporter,
 			messagesProvider: provider,
 		};
 	}
@@ -2849,10 +2883,7 @@ export class RuleChain<Output = unknown> {
 					? undefined
 					: { operand, expectedValue: operand },
 			validate: (v) => {
-				const raw =
-					typeof operand === "function"
-						? (operand as () => unknown)()
-						: operand;
+				const raw = isThunk(operand) ? operand() : operand;
 				const other =
 					formats && typeof raw === "string"
 						? parseDateValue(raw, formats)
@@ -2988,12 +3019,12 @@ export class RuleChain<Output = unknown> {
 	 * broke that idiom.
 	 */
 	pick<K extends string>(keys: readonly K[]): Record<string, RuleChain> {
-		return this.#subsetOfProperties((key) => keys.includes(key as K));
+		return this.#subsetOfProperties((key) => keys.some((k) => k === key));
 	}
 
 	/** A cloned copy of the properties EXCLUDING `keys` (upstream `omit`). */
 	omit<K extends string>(keys: readonly K[]): Record<string, RuleChain> {
-		return this.#subsetOfProperties((key) => !keys.includes(key as K));
+		return this.#subsetOfProperties((key) => !keys.some((k) => k === key));
 	}
 
 	/** Shared body of `pick`/`omit` — clones so the source stays untouched. */

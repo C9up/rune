@@ -70,11 +70,12 @@ export {
 	setValidationTranslator,
 } from "./Schema.js";
 
+import { RuneError, type RuneValidationError } from "./errors.js";
 import * as runeHelpers from "./helpers.js";
 import type { MessagesProviderContract } from "./MessagesProvider.js";
 import type {
 	Infer,
-	RuleChain,
+	OutputOf,
 	ValidateOptions,
 	ValidationSchema,
 } from "./Schema.js";
@@ -93,6 +94,7 @@ import {
 	group,
 	groupElse,
 	groupIf,
+	RuleChain,
 	rules,
 	schema,
 	setConvertEmptyStringsToNull,
@@ -114,6 +116,46 @@ type WithRequiredMeta<V, M> = {
 		? (data: D, options: Omit<O & object, "meta"> & { meta: M }) => R
 		: V[K];
 };
+
+/** What the one-shot `validate` / `tryValidate` take. */
+type OneShotOptions<S> = { schema: S; data: unknown } & ValidateOptions;
+
+/** The validator a one-shot call builds — whichever form the schema has. */
+function oneShotValidator(
+	schema: Record<string, RuleChain> | RuleChain,
+): ValidationSchema<unknown> {
+	return schema instanceof RuleChain ? create(schema) : create(schema);
+}
+
+/** One-shot validation, upstream `validate({ schema, data })`. */
+function validateOnce<S extends Record<string, RuleChain>>(
+	options: OneShotOptions<S>,
+): Promise<Infer<S>>;
+function validateOnce<C extends RuleChain>(
+	options: OneShotOptions<C>,
+): Promise<OutputOf<C>>;
+function validateOnce(
+	options: OneShotOptions<Record<string, RuleChain> | RuleChain>,
+): Promise<unknown> {
+	// Spread the whole ValidateOptions rather than re-listing its keys: the
+	// hand-listed version silently dropped `errorReporter` when it was added.
+	const { schema: fields, data, ...validateOptions } = options;
+	return oneShotValidator(fields).validate(data, validateOptions);
+}
+
+/** One-shot non-throwing validation, upstream `tryValidate`. */
+function tryValidateOnce<S extends Record<string, RuleChain>>(
+	options: OneShotOptions<S>,
+): Promise<[RuneValidationError, null] | [null, Infer<S>]>;
+function tryValidateOnce<C extends RuleChain>(
+	options: OneShotOptions<C>,
+): Promise<[RuneValidationError, null] | [null, OutputOf<C>]>;
+function tryValidateOnce(
+	options: OneShotOptions<Record<string, RuleChain> | RuleChain>,
+): Promise<[RuneValidationError, null] | [null, unknown]> {
+	const { schema: fields, data, ...validateOptions } = options;
+	return oneShotValidator(fields).tryValidate(data, validateOptions);
+}
 
 /**
  * Default export: one object carrying the whole surface, imported as
@@ -172,23 +214,9 @@ const rune = {
 			),
 	},
 	/** One-shot validation, upstream `validate({ schema, data })`. */
-	validate<T extends Record<string, RuleChain>>(
-		options: { schema: T | RuleChain; data: unknown } & ValidateOptions,
-	) {
-		// Spread the whole ValidateOptions rather than re-listing its keys: the
-		// hand-listed version silently dropped `errorReporter` when it was added.
-		const { schema: fields, data, ...validateOptions } = options;
-		return create(fields as T).validate(data, validateOptions);
-	},
+	validate: validateOnce,
 	/** One-shot non-throwing validation, upstream `tryValidate`. */
-	tryValidate<T extends Record<string, RuleChain>>(
-		options: { schema: T | RuleChain; data: unknown } & ValidateOptions,
-	) {
-		// Spread the whole ValidateOptions rather than re-listing its keys: the
-		// hand-listed version silently dropped `errorReporter` when it was added.
-		const { schema: fields, data, ...validateOptions } = options;
-		return create(fields as T).tryValidate(data, validateOptions);
-	},
+	tryValidate: tryValidateOnce,
 	/**
 	 * Type the `meta` passed to `validate(data, { meta })` (upstream
 	 * `withMetaData`). Purely a typing seam — rune carries meta on the call.
@@ -203,32 +231,60 @@ const rune = {
 			fields: T,
 		): WithRequiredMeta<ValidationSchema<Infer<T>>, M>;
 	} {
-		function build<T extends Record<string, RuleChain>>(fields: T) {
+		function build<T extends Record<string, RuleChain>>(
+			fields: T,
+		): WithRequiredMeta<ValidationSchema<Infer<T>>, M> {
 			const validator = create(fields);
-			if (!validateMeta) {
-				return validator as WithRequiredMeta<ValidationSchema<Infer<T>>, M>;
-			}
+			if (!validateMeta) return validator;
+			const check = validateMeta;
 			// The callback runs BEFORE the payload: meta that is wrong makes
 			// every rule reading it meaningless, so failing early is the only
 			// honest outcome.
-			const guard = <A extends unknown[], R>(
-				run: (...args: A) => R,
-			): ((...args: A) => R) => {
-				return (...args: A): R => {
-					const options = args[1] as { meta?: M } | undefined;
-					validateMeta((options?.meta ?? {}) as M);
-					return run(...args);
+			//
+			// NAMED DEVIATION (fail closed): upstream hands the callback `{}`
+			// when a JS caller passes no metadata. The declared contract is that
+			// `meta` is there, so a call without it is refused outright rather
+			// than run against an empty object posing as the declared type.
+			const guard =
+				<R>(run: (data: unknown, options?: ValidateOptions) => R) =>
+				(
+					data: unknown,
+					options: Omit<ValidateOptions, "meta"> & { meta: M },
+				): R => {
+					if (options?.meta === undefined) {
+						throw new RuneError(
+							"META_REQUIRED",
+							"This validator was built with withMetaData(), so every call must pass { meta }.",
+						);
+					}
+					check(options.meta);
+					return run(data, options);
 				};
-			};
-			// Copy DESCRIPTORS, not values: `errorReporter` and
-			// `messagesProvider` are accessor pairs, and a spread would
-			// flatten them into dead plain properties — assigning to the copy
-			// would then silently do nothing.
-			const wrapped: typeof validator = Object.create(
-				Object.getPrototypeOf(validator),
-				Object.getOwnPropertyDescriptors(validator),
-			);
-			Object.assign(wrapped, {
+			// Accessors DELEGATE: `errorReporter` and `messagesProvider` are live
+			// on the validator, and a copy of their values would leave assigning
+			// to the wrapper silently doing nothing.
+			return {
+				get fields() {
+					return validator.fields;
+				},
+				get schema() {
+					return validator.schema;
+				},
+				"~standard": validator["~standard"],
+				get errorReporter() {
+					return validator.errorReporter;
+				},
+				set errorReporter(reporter) {
+					validator.errorReporter = reporter;
+				},
+				get messagesProvider() {
+					return validator.messagesProvider;
+				},
+				set messagesProvider(provider) {
+					validator.messagesProvider = provider;
+				},
+				toJSON: validator.toJSON,
+				toJSONSchema: validator.toJSONSchema,
 				validate: guard(validator.validate),
 				validateResult: guard(validator.validateResult),
 				validateResultAsync: guard(validator.validateResultAsync),
@@ -236,8 +292,7 @@ const rune = {
 				validateOrThrowAsync: guard(validator.validateOrThrowAsync),
 				tryValidate: guard(validator.tryValidate),
 				tryValidateSync: guard(validator.tryValidateSync),
-			});
-			return wrapped as WithRequiredMeta<ValidationSchema<Infer<T>>, M>;
+			};
 		}
 		// upstream exposes BOTH spellings behind withMetaData; `compile` is the
 		// one its own documentation uses, and it was missing here.
