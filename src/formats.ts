@@ -508,6 +508,11 @@ export interface EmailOptions {
 	allow_display_name?: boolean;
 	/** Require a dotted domain. On by default. */
 	require_tld?: boolean;
+	/**
+	 * Accept non-ASCII letters in the local part (`josé@…`, RFC 6531). On by
+	 * default, as in validator.js; `false` restricts it to ASCII atext.
+	 */
+	allow_utf8_local_part?: boolean;
 	/** Accept `user@[192.168.0.1]` / `user@[IPv6:…]`. Off by default. */
 	allow_ip_domain?: boolean;
 	/** Skip the RFC length caps (64 local / 254 total). Off by default. */
@@ -524,6 +529,20 @@ const MAX_EMAIL_INPUT = 998;
 /** Unquoted local part: dot-separated atoms of RFC 5322 atext. */
 const ATEXT = "[a-zA-Z0-9!#$%&'*+/=?^_`{|}~-]+";
 const DOT_ATOM_RE = new RegExp(`^${ATEXT}(?:\\.${ATEXT})*$`);
+/**
+ * The same atoms with the RFC 6531 UTF-8 letters validator.js accepts: the
+ * Basic Multilingual Plane above Latin-1 punctuation, minus surrogates and
+ * the non-characters it excludes.
+ */
+const UTF8_ATEXT =
+	"[a-zA-Z0-9!#$%&'*+/=?^_`{|}~\\u00A1-\\uD7FF\\uF900-\\uFDCF\\uFDF0-\\uFFEF-]+";
+const UTF8_DOT_ATOM_RE = new RegExp(`^${UTF8_ATEXT}(?:\\.${UTF8_ATEXT})*$`);
+/**
+ * A TLD as validator.js's `isFQDN` takes it: two or more letters, Unicode
+ * letters included, or a punycode `xn--…` label.
+ */
+const TLD_RE =
+	/^([a-z\u00A1-\u00A8\u00AA-\uD7FF\uF900-\uFDCF\uFDF0-\uFFEF]{2,}|xn[a-z0-9-]{2,})$/i;
 /** Quoted local part: `"anything but bare quote/backslash, or escaped"`. */
 const QUOTED_LOCAL_RE = /^"(?:[^"\\]|\\.)*"$/;
 /**
@@ -575,11 +594,21 @@ function closingQuoteIndex(input: string): number {
 	return -1;
 }
 
-/** A single DNS label: alphanumerics and inner hyphens, 1..63 chars. */
+/**
+ * A single domain label as validator.js's `isFQDN` takes it: letters (an
+ * internationalised domain's included), digits and inner hyphens, 1..63
+ * characters, no full-width forms, no underscore.
+ */
 function isDnsLabel(label: string): boolean {
 	if (label.length === 0 || label.length > 63) return false;
 	if (label.startsWith("-") || label.endsWith("-")) return false;
-	return /^[a-zA-Z0-9-]+$/.test(label);
+	if (/[\uff01-\uff5e]/.test(label)) return false;
+	return /^[a-z\u00a1-\uffff0-9-]+$/i.test(label);
+}
+
+/** UTF-8 byte length — the unit RFC 5321's 64/254 caps are written in. */
+function byteLength(value: string): number {
+	return new TextEncoder().encode(value).length;
 }
 
 /** Bracketed IP domain literal — `[192.168.0.1]` or `[IPv6:::1]`. */
@@ -630,8 +659,15 @@ export function isEmail(value: string, options: EmailOptions = {}): boolean {
 	}
 
 	const quoted = QUOTED_LOCAL_RE.test(local);
-	if (!quoted && !DOT_ATOM_RE.test(local)) return false;
-	if (!options.ignore_max_length && local.length > 64) return false;
+	const dotAtom =
+		options.allow_utf8_local_part === false ? DOT_ATOM_RE : UTF8_DOT_ATOM_RE;
+	if (!quoted && !dotAtom.test(local)) return false;
+	if (
+		!options.ignore_max_length &&
+		(byteLength(local) > 64 || byteLength(domain) > 254)
+	) {
+		return false;
+	}
 
 	if (domain.startsWith("[")) {
 		return options.allow_ip_domain === true && isIpDomainLiteral(domain);
@@ -640,9 +676,7 @@ export function isEmail(value: string, options: EmailOptions = {}): boolean {
 	const labels = domain.split(".");
 	if (options.require_tld !== false) {
 		if (labels.length < 2) return false;
-		// A TLD is alphabetic and at least two characters.
-		const tld = labels.at(-1) ?? "";
-		if (tld.length < 2 || !/^[a-zA-Z]+$/.test(tld)) return false;
+		if (!TLD_RE.test(labels.at(-1) ?? "")) return false;
 	}
 	if (!labels.every(isDnsLabel)) return false;
 

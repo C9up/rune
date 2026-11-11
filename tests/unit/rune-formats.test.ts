@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { bindHostResolver, RuneError, rules, schema } from "../../src/index.js";
+import {
+	bindHostResolver,
+	type RuleChain,
+	RuneError,
+	rules,
+	schema,
+} from "../../src/index.js";
 
 /** One valid / one invalid per rule — the invalid case is the one that matters. */
 const ok = (chain: () => ReturnType<typeof rules.string>, value: unknown) =>
@@ -251,5 +257,38 @@ describe("rune > activeUrl", () => {
 		await expect(
 			s.validateResultAsync({ site: "https://example.com" }),
 		).rejects.toBeInstanceOf(RuneError);
+	});
+});
+
+describe("rune > email() takes internationalised addresses like validator.js", () => {
+	const valid = (value: string, options?: Parameters<RuleChain["email"]>[0]) =>
+		schema({ e: rules.string().email(options) }).validateResult({ e: value })
+			.valid;
+
+	it("accepts a UTF-8 local part, a Unicode domain and a punycode TLD", () => {
+		expect(valid("josé@example.com")).toBe(true);
+		expect(valid("user@münchen.de")).toBe(true);
+		expect(valid("user@example.xn--p1ai")).toBe(true);
+		expect(valid("用户@例子.广告")).toBe(true);
+	});
+
+	it("allow_utf8_local_part: false restricts the local part to ASCII", () => {
+		expect(valid("josé@example.com", { allow_utf8_local_part: false })).toBe(
+			false,
+		);
+		expect(valid("jose@münchen.de", { allow_utf8_local_part: false })).toBe(
+			true,
+		);
+	});
+
+	it("still refuses what validator.js refuses", () => {
+		expect(valid("user@example.c")).toBe(false);
+		expect(valid("user@example.123")).toBe(false);
+		expect(valid("user@-example.com")).toBe(false);
+		expect(valid("user@exa_mple.com")).toBe(false);
+		expect(valid("user@ｅxample.com")).toBe(false);
+		expect(valid("😀@example.com")).toBe(false);
+		// The 64 cap is in bytes: 33 two-byte letters are 66.
+		expect(valid(`${"é".repeat(33)}@example.com`)).toBe(false);
 	});
 });
