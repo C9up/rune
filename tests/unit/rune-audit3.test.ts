@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import rune, {
 	bindDatabase,
 	compile,
@@ -8,7 +8,19 @@ import rune, {
 	rules,
 	SimpleMessagesProvider,
 	schema,
+	setValidationTranslator,
 } from "../../src/index.js";
+
+/**
+ * These are process-wide settings. A failing assertion between a test's set and
+ * its inline reset would leave them installed for every later test of the file.
+ */
+afterEach(() => {
+	rune.errorReporter = null;
+	rune.messagesProvider = null;
+	rune.convertEmptyStringsToNull = false;
+	setValidationTranslator(undefined);
+});
 
 /**
  * Regressions found by the third parity audit. All three are the same family as
@@ -196,6 +208,5 @@ describe("rune > object composition and the upstream entrypoint shapes", () => {
 		});
 		const res = schema({ n: rules.number() }).validateResult({ n: "abc" });
 		expect(res.errors[0]?.message).toBe("Doit être un nombre");
-		rune.messagesProvider = null;
 	});
 });

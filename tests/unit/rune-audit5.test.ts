@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { NormalizeUrlOptions, RuleValidator } from "../../src/index.js";
 import rune, {
 	create,
@@ -16,6 +16,17 @@ function defined<T>(value: T | null | undefined): T {
 	if (value == null) throw new Error("expected a defined value");
 	return value;
 }
+
+/**
+ * These are process-wide settings. A failing assertion between a test's set and
+ * its inline reset would leave them installed for every later test of the file.
+ */
+afterEach(() => {
+	rune.errorReporter = null;
+	rune.messagesProvider = null;
+	rune.convertEmptyStringsToNull = false;
+	setValidationTranslator(undefined);
+});
 
 describe("rune > audit 5", () => {
 	it("nested objects DROP undeclared keys unless allowUnknownProperties()", () => {
@@ -386,7 +397,6 @@ describe("rune > message keys and native routing are independent", () => {
 			e: "bad",
 		});
 		expect(res.errors[0]?.message).toBe("Email invalide");
-		setValidationTranslator(undefined);
 	});
 
 	it("a TS-only option is never routed to an engine that ignores it", () => {
@@ -761,8 +771,6 @@ describe("rune > audit 9 — contrat du reporter, types optional/null, JSON Sche
 			},
 		);
 		expect(hits.at(-1)).toBe("call");
-		v.errorReporter = null;
-		rune.errorReporter = null;
 	});
 
 	it("optional() et null() sont des TYPES de schéma", () => {
@@ -1369,7 +1377,6 @@ describe("rune > audit 15", () => {
 		expect(validator.validateResult({}).errors[0]?.message).toBe("BEFORE");
 		rune.messagesProvider = new SimpleMessagesProvider({ required: "AFTER" });
 		expect(validator.validateResult({}).errors[0]?.message).toBe("BEFORE");
-		rune.messagesProvider = null;
 	});
 
 	it("a validator built before any provider still picks up a later one", () => {
@@ -1381,6 +1388,5 @@ describe("rune > audit 15", () => {
 		const validator = schema({ a: rules.string() });
 		rune.messagesProvider = new SimpleMessagesProvider({ required: "LATE" });
 		expect(validator.validateResult({}).errors[0]?.message).toBe("LATE");
-		rune.messagesProvider = null;
 	});
 });
