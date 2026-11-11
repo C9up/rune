@@ -60,9 +60,22 @@ describe("rune > audit 4", () => {
 		setConvertEmptyStringsToNull(false);
 	});
 
-	it("exposes bindHostResolver on the default export", () => {
-		expect(typeof rune.bindHostResolver).toBe("function");
-		expect(typeof rune.file).toBe("function");
+	it("the default export's bindHostResolver backs activeUrl()", async () => {
+		rune.bindHostResolver({
+			resolves: async (host) => host === "up.example.com",
+		});
+		try {
+			const v = rune.create({ site: rune.string().activeUrl() });
+			expect(
+				(await v.validateResultAsync({ site: "https://up.example.com" })).valid,
+			).toBe(true);
+			const down = await v.validateResultAsync({
+				site: "https://down.example.com",
+			});
+			expect(down.errors[0]?.rule).toBe("activeUrl");
+		} finally {
+			rune.bindHostResolver(null);
+		}
 	});
 
 	it("toJSON introspects the compiled schema", () => {

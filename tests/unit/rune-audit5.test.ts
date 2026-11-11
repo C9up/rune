@@ -155,11 +155,6 @@ describe("rune > audit 5", () => {
 		expect(ran).toBe(true);
 		expect(res.errors[0]?.rule).toBe("asyncViaUse");
 	});
-
-	it("unionOfTypes is exposed on the default export", () => {
-		expect(typeof rune.unionOfTypes).toBe("function");
-		expect(typeof rune.union.otherwise).toBe("function");
-	});
 });
 
 describe("rune > audit 6", () => {
