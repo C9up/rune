@@ -187,3 +187,91 @@ describe("rune > async validation at depth", () => {
 		expect(called).toBe(false);
 	});
 });
+
+describe("rune > a run's reporter error belongs to that run", () => {
+	/** A reporter that stamps every error it builds with the run it came from. */
+	class TaggedReporter {
+		hasErrors = false;
+		readonly fields: string[] = [];
+		constructor(readonly tag: string) {}
+		report(_message: string, _rule: string, field: { getFieldPath(): string }) {
+			this.hasErrors = true;
+			this.fields.push(field.getFieldPath());
+		}
+		createError(): Error {
+			return new Error(`reporter ${this.tag}`);
+		}
+	}
+
+	/** Two overlapping runs, each held on the same async rule until both started. */
+	function overlapping() {
+		let release = (): void => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const v = schema({
+			email: rules.string().unique(async () => {
+				await gate;
+				return false;
+			}),
+		});
+		return { v, release };
+	}
+
+	it("validate() throws each run's own reporter error", async () => {
+		const { v, release } = overlapping();
+		const a = v
+			.validate(
+				{ email: "a" },
+				{ errorReporter: () => new TaggedReporter("A") },
+			)
+			.catch((error: unknown) => error);
+		const b = v
+			.validate(
+				{ email: "b" },
+				{ errorReporter: () => new TaggedReporter("B") },
+			)
+			.catch((error: unknown) => error);
+		release();
+		const [errorA, errorB] = await Promise.all([a, b]);
+		expect(errorA).toMatchObject({ message: "reporter A" });
+		expect(errorB).toMatchObject({ message: "reporter B" });
+	});
+
+	it("tryValidate() returns each run's own reporter error", async () => {
+		const { v, release } = overlapping();
+		const reporterFor = (tag: string) => () => {
+			const reporter = new TaggedReporter(tag);
+			return {
+				get hasErrors() {
+					return reporter.hasErrors;
+				},
+				report: reporter.report.bind(reporter),
+				createError: () =>
+					new RuneValidationError([
+						{ message: tag, rule: "unique", field: "email" },
+					]),
+			};
+		};
+		const a = v.tryValidate(
+			{ email: "a" },
+			{ errorReporter: reporterFor("A") },
+		);
+		const b = v.tryValidate(
+			{ email: "b" },
+			{ errorReporter: reporterFor("B") },
+		);
+		release();
+		const [[errorA], [errorB]] = await Promise.all([a, b]);
+		expect(errorA?.messages[0]?.message).toBe("A");
+		expect(errorB?.messages[0]?.message).toBe("B");
+	});
+
+	it("a run without a reporter never throws the previous run's reporter error", async () => {
+		const v = schema({ email: rules.string() });
+		await expect(
+			v.validate({}, { errorReporter: () => new TaggedReporter("A") }),
+		).rejects.toMatchObject({ message: "reporter A" });
+		await expect(v.validate({})).rejects.toBeInstanceOf(RuneValidationError);
+	});
+});

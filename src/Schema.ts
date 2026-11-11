@@ -648,6 +648,15 @@ interface RunContext {
 }
 
 /**
+ * One run's verdict together with the error its reporter built — returned
+ * together so a throwing entry point raises the error of ITS run.
+ */
+interface RunOutcome {
+	result: ValidationResult<Record<string, unknown>>;
+	createError?: () => Error;
+}
+
+/**
  * An async rule run deferred by the (synchronous) traversal and awaited by
  * `validateResultAsync`. Collected at EVERY depth — top-level fields, nested object
  * fields and array items alike.
@@ -1846,10 +1855,6 @@ export function schema(
 	// drop translated messages.
 	const createdWithMessagesProvider = globalMessagesProvider;
 	const createdWithErrorReporter = globalErrorReporter;
-	// Set by the last run; the throwing entry points prefer the reporter's own
-	// error, because upstream lets the reporter decide the failure shape.
-	let reporterError: (() => Error) | undefined;
-
 	// Computed once at construction time, not per validate() call.
 	const hasCustomRules = detectHasCustomRules(fields);
 	// Any field carrying async rules (`unique`/`exists`/`useAsync`) forces callers
@@ -1859,21 +1864,20 @@ export function schema(
 	);
 
 	/**
-	 * The root value is not an object.
+	 * Hand a run's errors to the bound reporter, and keep the error it builds
+	 * WITH the run's verdict.
 	 *
-	 * upstream routes EVERY failure through the reporter, root included, and lets
-	 * it decide the error shape. Returning the verdict directly left a bound
-	 * reporter unaware of the failure, so `validateOrThrow(null)` threw rune's
-	 * own error and — worse — the PREVIOUS run's reporter error, because
-	 * `reporterError` was never reset on this path.
+	 * upstream routes every failure through the reporter and lets it decide the
+	 * error shape. The builder travels in the return value because a validator
+	 * is a module-level constant shared by every request: a slot on it was
+	 * overwritten by whichever overlapping run finished last, and the other run
+	 * then threw that run's error.
 	 */
-	function rootTypeFailure(
+	function concludeRun(
+		result: ValidationResult<Record<string, unknown>>,
 		data: unknown,
 		options?: ValidateOptions,
-	): ValidationResult<Record<string, unknown>> {
-		const errors: ValidationError[] = [
-			{ field: "_root", rule: "type", message: "Input must be an object" },
-		];
+	): RunOutcome {
 		const reporter = toReporter(
 			options?.errorReporter ??
 				validatorErrorReporter ??
@@ -1884,16 +1888,23 @@ export function schema(
 			options?.meta ?? {},
 		);
 		if (reporter) {
-			for (const error of errors) reporter.report(error);
+			for (const error of result.errors) reporter.report(error);
 		}
-		reporterError = reporter?.createError;
-		return { valid: false, errors };
+		return { result, createError: reporter?.createError };
 	}
 
-	function validateResult(
-		rawData: unknown,
+	/** The root value is not an object. Reported like any other failure. */
+	function rootTypeFailure(
+		data: unknown,
 		options?: ValidateOptions,
-	): ValidationResult<Record<string, unknown>> {
+	): RunOutcome {
+		const errors: ValidationError[] = [
+			{ field: "_root", rule: "type", message: "Input must be an object" },
+		];
+		return concludeRun({ valid: false, errors }, data, options);
+	}
+
+	function runSync(rawData: unknown, options?: ValidateOptions): RunOutcome {
 		const data = convertEmptyStringsToNull
 			? convertEmptyStrings(rawData)
 			: rawData;
@@ -1920,23 +1931,9 @@ export function schema(
 				const native = rust.valid
 					? rust
 					: { ...rust, errors: renderNativeMessages(fields, rust.errors) };
-				// Report here too: the native path returns before the TS traversal,
-				// so instrumenting only the latter left the reporter silent exactly
-				// when the fast path was taken.
-				const nativeReporter = toReporter(
-					options?.errorReporter ??
-						validatorErrorReporter ??
-						createdWithErrorReporter ??
-						globalErrorReporter ??
-						undefined,
-					data,
-					options?.meta ?? {},
-				);
-				if (nativeReporter) {
-					for (const error of native.errors) nativeReporter.report(error);
-				}
-				reporterError = nativeReporter?.createError;
-				return native;
+				// Reported here too: the native path returns before the TS
+				// traversal, and the reporter must not go silent on the fast path.
+				return concludeRun(native, data, options);
 			}
 			// This schema carries nothing the engine cannot run, so the engine is
 			// what must run it. Falling back to the TypeScript validator here made
@@ -1966,23 +1963,20 @@ export function schema(
 			}
 		}
 
-		const reporter = toReporter(
-			options?.errorReporter ??
-				validatorErrorReporter ??
-				createdWithErrorReporter ??
-				globalErrorReporter ??
-				undefined,
+		return concludeRun(
+			errors.length === 0
+				? { valid: true, errors, data: validated }
+				: { valid: false, errors },
 			data,
-			options?.meta ?? {},
+			options,
 		);
-		if (reporter) {
-			for (const error of errors) reporter.report(error);
-		}
-		reporterError = reporter?.createError;
-		if (errors.length === 0) {
-			return { valid: true, errors, data: validated };
-		}
-		return { valid: false, errors };
+	}
+
+	function validateResult(
+		data: unknown,
+		options?: ValidateOptions,
+	): ValidationResult<Record<string, unknown>> {
+		return runSync(data, options).result;
 	}
 
 	/**
@@ -1997,35 +1991,35 @@ export function schema(
 	 * Error is what would make it worthless. upstream draws the line in the same
 	 * place — its `tryValidate` catches only its own ValidationError.
 	 */
-	function reportedFailure(
-		result: ValidationResult<Record<string, unknown>>,
-	): RuneValidationError {
-		const reported = reporterError?.();
+	function reportedFailure(outcome: RunOutcome): RuneValidationError {
+		const reported = outcome.createError?.();
 		if (reported === undefined) {
-			return new RuneValidationError(result.errors.map(toErrorNode));
+			return new RuneValidationError(outcome.result.errors.map(toErrorNode));
 		}
 		if (reported instanceof RuneValidationError) return reported;
 		throw reported;
+	}
+
+	/** The error a throwing entry point raises: the reporter decides when bound. */
+	function thrownFailure(outcome: RunOutcome): Error {
+		return outcome.createError
+			? outcome.createError()
+			: new RuneValidationError(outcome.result.errors.map(toErrorNode));
 	}
 
 	function validateOrThrow(
 		data: unknown,
 		options?: ValidateOptions,
 	): Record<string, unknown> {
-		const result = validateResult(data, options);
-		if (result.valid) {
-			return result.data;
-		}
-		// The reporter decides the failure shape when one is bound (upstream).
-		throw reporterError
-			? reporterError()
-			: new RuneValidationError(result.errors.map(toErrorNode));
+		const outcome = runSync(data, options);
+		if (outcome.result.valid) return outcome.result.data;
+		throw thrownFailure(outcome);
 	}
 
-	async function validateResultAsync(
+	async function runAsync(
 		rawData: unknown,
 		options?: ValidateOptions,
-	): Promise<ValidationResult<Record<string, unknown>>> {
+	): Promise<RunOutcome> {
 		const data = convertEmptyStringsToNull
 			? convertEmptyStrings(rawData)
 			: rawData;
@@ -2075,23 +2069,20 @@ export function schema(
 			}
 		}
 
-		const reporter = toReporter(
-			options?.errorReporter ??
-				validatorErrorReporter ??
-				createdWithErrorReporter ??
-				globalErrorReporter ??
-				undefined,
+		return concludeRun(
+			errors.length === 0
+				? { valid: true, errors, data: validated }
+				: { valid: false, errors },
 			data,
-			options?.meta ?? {},
+			options,
 		);
-		if (reporter) {
-			for (const error of errors) reporter.report(error);
-		}
-		reporterError = reporter?.createError;
-		if (errors.length === 0) {
-			return { valid: true, errors, data: validated };
-		}
-		return { valid: false, errors };
+	}
+
+	async function validateResultAsync(
+		data: unknown,
+		options?: ValidateOptions,
+	): Promise<ValidationResult<Record<string, unknown>>> {
+		return (await runAsync(data, options)).result;
 	}
 
 	/**
@@ -2102,9 +2093,9 @@ export function schema(
 		data: unknown,
 		options?: ValidateOptions,
 	): [RuneValidationError, null] | [null, Record<string, unknown>] {
-		const result = validateResult(data, options);
-		if (result.valid) return [null, result.data];
-		return [reportedFailure(result), null];
+		const outcome = runSync(data, options);
+		if (outcome.result.valid) return [null, outcome.result.data];
+		return [reportedFailure(outcome), null];
 	}
 
 	/** Async counterpart of {@link tryValidate}. */
@@ -2112,23 +2103,18 @@ export function schema(
 		data: unknown,
 		options?: ValidateOptions,
 	): Promise<[RuneValidationError, null] | [null, Record<string, unknown>]> {
-		const result = await validateResultAsync(data, options);
-		if (result.valid) return [null, result.data];
-		return [reportedFailure(result), null];
+		const outcome = await runAsync(data, options);
+		if (outcome.result.valid) return [null, outcome.result.data];
+		return [reportedFailure(outcome), null];
 	}
 
 	async function validateOrThrowAsync(
 		data: unknown,
 		options?: ValidateOptions,
 	): Promise<Record<string, unknown>> {
-		const result = await validateResultAsync(data, options);
-		if (result.valid) {
-			return result.data;
-		}
-		// The reporter decides the failure shape when one is bound (upstream).
-		throw reporterError
-			? reporterError()
-			: new RuneValidationError(result.errors.map(toErrorNode));
+		const outcome = await runAsync(data, options);
+		if (outcome.result.valid) return outcome.result.data;
+		throw thrownFailure(outcome);
 	}
 
 	/**
