@@ -18,6 +18,13 @@
  *   the country, where upstream throws. A validation predicate that throws
  *   turns "I don't know" into a 500; `null` lets the caller decide, and the
  *   chain rules already fail closed on it.
+ * - **`isSlug` is a lowercase ASCII slug.** Upstream hands the value to
+ *   validator.js, whose pattern is `/^[^\s-_](?!.*?[-_]{2,})[a-z0-9-\\][^\s]*[^-_\s]$/`:
+ *   three characters minimum, any non-space character in the middle and at
+ *   the ends — it accepts `"Ab-c"` and `"ab<script>"`, and refuses `"a"`.
+ *   rune accepts `[a-z0-9]` with single inner `-`/`_` only, one character or
+ *   more: what a URL segment needs, and nothing a template could mistake for
+ *   markup.
  */
 
 import { type DateFormat, parseDateValue } from "./date.js";
@@ -54,7 +61,10 @@ const BOOLEAN_POSITIVES: readonly unknown[] = ["on", "1", 1, "true", true];
 /** The exact values upstream accepts as `false`. `"off"` and `"no"` are NOT. */
 const BOOLEAN_NEGATIVES: readonly unknown[] = ["0", 0, "false", false];
 
-/** validator.js `isSlug`, transcribed from 13.15.35. */
+/**
+ * A lowercase ASCII slug of one character or more — NOT validator.js's
+ * pattern; see the named deviation in the module header.
+ */
 const SLUG_RE = /^[a-z0-9](?!.*[-_]{2,})(?:[a-z0-9_-]*[a-z0-9])?$/;
 
 /** validator.js `isUUID`, one pattern per version plus the special names. */
@@ -244,7 +254,11 @@ export function isAscii(value: string): boolean {
 	return isAsciiFormat(value);
 }
 
-/** A lowercase slug: no leading separator, no doubled `-`/`_`, no trailing one. */
+/**
+ * A lowercase ASCII slug: letters, digits, single `-`/`_` between them, no
+ * leading or trailing separator, one character or more. A named deviation from
+ * the upstream helper (see the module header).
+ */
 export function isSlug(value: string): boolean {
 	return SLUG_RE.test(value);
 }

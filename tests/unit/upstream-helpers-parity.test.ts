@@ -104,10 +104,17 @@ describe("rune > helpers parity", () => {
 		});
 	});
 
-	it("the format predicates answer as validator.js does", () => {
+	it("isSlug is a lowercase ASCII slug (named deviation)", () => {
 		expect(
-			["hello-world", "Hello", "a--b", "-a"].map((v) => h.isSlug(v)),
-		).toEqual([true, false, false, false]);
+			["hello-world", "a", "snake_case", "a1-b2"].map((v) => h.isSlug(v)),
+		).toEqual([true, true, true, true]);
+		// validator.js accepts the first two and would refuse "a" above.
+		expect(
+			["Ab-c", "ab<script>", "a--b", "-a", "a-", ""].map((v) => h.isSlug(v)),
+		).toEqual([false, false, false, false, false, false]);
+	});
+
+	it("the format predicates answer as validator.js does", () => {
 		expect(["1.5", "1", "", "1."].map((v) => h.isDecimal(v))).toEqual([
 			true,
 			true,
