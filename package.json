@@ -12,7 +12,6 @@
     "README.md",
     "dist",
     "index.*.node",
-    "scripts",
     "src"
   ],
   "scripts": {
