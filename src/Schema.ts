@@ -2937,6 +2937,10 @@ export class RuleChain<Output = unknown> {
 	 * Keep keys the object shape does not declare (upstream
 	 * `allowUnknownProperties`). Off by default: dropping undeclared keys is what
 	 * makes a validated payload safe to hand to a mass assignment.
+	 *
+	 * Only undeclared keys are kept, unchanged (not camelCased by
+	 * `toCamelCase()`); a declared field appears once, under its output name,
+	 * with its validated value.
 	 */
 	allowUnknownProperties(): this {
 		this.#allowUnknown = true;
@@ -4787,9 +4791,7 @@ export class RuleChain<Output = unknown> {
 			// `object({ name })` let an `isAdmin` through. `allowUnknownProperties()`
 			// is the opt-in, as in upstream.
 			const source: Record<string, unknown> = transformed;
-			const obj: Record<string, unknown> = this.#allowUnknown
-				? copyWithoutProtoKey(source)
-				: {};
+			const obj: Record<string, unknown> = {};
 			transformed = obj;
 			// A conditional group contributes its branch's properties for THIS
 			// payload, so the shape is resolved per validation, not at build time.
@@ -4832,12 +4834,28 @@ export class RuleChain<Output = unknown> {
 						nestedResult.transformed;
 				}
 			}
-			if (this.#camelCaseKeys && this.#allowUnknown) {
-				// Undeclared keys are camelCased too, otherwise the output would mix
-				// both spellings depending on whether a key was declared.
-				for (const [key, value] of Object.entries(source)) {
-					const camel = toCamelCaseKey(key);
-					if (!(camel in obj)) obj[camel] = value;
+			if (this.#allowUnknown) {
+				// Only the UNDECLARED keys move, as they are (upstream's
+				// `moveProperties` with the declared names as `fieldsToIgnore`).
+				// Copying every input key let a declared field's RAW value survive
+				// beside its validated one whenever the output name differed
+				// (`toCamelCase()`) or the validated value was `undefined`, so
+				// `escape()`/`trim()` were bypassed by whoever persisted the payload.
+				// Every branch of every group counts as declared, matched or not.
+				const declared = new Set(Object.keys(this.#nestedSchema));
+				for (const grp of this.#groups) {
+					for (const branch of grp.branches) {
+						for (const key of Object.keys(branch.shape)) declared.add(key);
+					}
+				}
+				for (const key of Object.keys(source)) {
+					if (key === "__proto__" || declared.has(key)) continue;
+					// NAMED DEVIATION (hardening): upstream lets an unknown key
+					// overwrite a declared field's output (`userBio` sent beside a
+					// declared `user_bio` under `toCamelCase()`), replacing the
+					// validated value with raw input. The validated value wins here.
+					if (Object.hasOwn(obj, key)) continue;
+					obj[key] = source[key];
 				}
 			}
 		}
