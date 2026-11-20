@@ -124,7 +124,7 @@ describe("rune > rule names are the message keys", () => {
 			[
 				"nativeFile.minSize",
 				{ f: rules.nativeFile().minSize("1kb") },
-				{ f: { size: 1, type: "text/plain" } },
+				{ f: new File(["x"], "f.txt", { type: "text/plain" }) },
 			],
 		];
 		for (const [expected, fields, data] of cases) {

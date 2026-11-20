@@ -3258,8 +3258,9 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Uploaded file with upstream `nativeFile` options — `minSize`, `maxSize`,
-	 * `mimeTypes`. Same structural contract as {@link file}, and the same
+	 * Platform `File` with upstream `nativeFile` options — `minSize`, `maxSize`,
+	 * `mimeTypes`. Unlike {@link file}, which is structural (a host's upload
+	 * object), the value must be a real `File`, as upstream. Same
 	 * guarantee: declaring `mimeTypes` is a SECURITY statement, so the leading
 	 * bytes are read and confronted with the declaration. The reported type is
 	 * checked too, but it is the uploader's word and never the last one.
@@ -3281,7 +3282,10 @@ export class RuleChain<Output = unknown> {
 			name: "nativeFile",
 			args: options ? { ...options } : undefined,
 			validate: (v) => {
-				if (!isFileLike(v)) return false;
+				// The platform `File`, as upstream (`value instanceof File`): a
+				// structural check let a JSON body with a numeric `size` through,
+				// typed as a file the handler then calls `arrayBuffer()` on.
+				if (typeof File === "undefined" || !(v instanceof File)) return false;
 				if (min !== undefined && v.size < min) return false;
 				if (max !== undefined && v.size > max) return false;
 				if (options?.mimeTypes) {

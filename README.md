@@ -48,16 +48,19 @@ const s = schema({
   report: rules.nativeFile({ maxSize: '10mb', mimeTypes: ['application/pdf'] }),
 })
 
+const form = await request.formData() // a web Request
 const result = await s.validateResultAsync({
   avatar: ctx.request.file('avatar'),
-  report: ctx.request.file('report'),
+  report: form.get('report'),
 })
 ```
 
 - `rules.file({ size, extnames, verifyContent })` accepts any object with a
-  `size` and a name or extension. `extnames` are compared lowercase, without
-  the dot.
-- `rules.nativeFile({ minSize, maxSize, mimeTypes })` adds a lower bound and a
+  `size` and a name or extension — the body parser's upload. `extnames` are
+  compared lowercase, without the dot.
+- `rules.nativeFile({ minSize, maxSize, mimeTypes })` is for the platform
+  `File` (what `formData()` returns): anything else, a JSON object shaped like
+  a file included, fails with `nativeFile`. It adds a lower bound and a
   MIME-type list.
 - Sizes are a byte count or a spelling such as `'512kb'`, `'2mb'`, `'1gb'`
   (powers of 1024). A spelling rune cannot read throws `E_RUNE_INVALID_SIZE`

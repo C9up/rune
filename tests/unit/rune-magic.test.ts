@@ -131,13 +131,13 @@ describe("rune > verifyContent (magic number)", () => {
 		expect(
 			(
 				await s.validateResultAsync({
-					doc: { size: 8, type: "application/pdf", buffer: PDF_HEAD },
+					doc: new File([PDF_HEAD], "doc.pdf", { type: "application/pdf" }),
 				})
 			).valid,
 		).toBe(true);
 		// Claims PDF, is a PNG.
 		const lying = await s.validateResultAsync({
-			doc: { size: 12, type: "application/pdf", buffer: PNG_HEAD },
+			doc: new File([PNG_HEAD], "doc.pdf", { type: "application/pdf" }),
 		});
 		expect(lying.valid).toBe(false);
 		expect(lying.errors[0]?.rule).toBe("verifyContent");
@@ -168,9 +168,10 @@ describe("rune > la vérification de contenu est le DÉFAUT", () => {
 	it("mimeTypes() active aussi le contrôle", async () => {
 		const s = schema({ doc: rules.nativeFile().mimeTypes(["image/png"]) });
 		const res = await s.validateResultAsync({
-			doc: { size: 8, type: "image/png", content: EXE_HEAD },
+			doc: new File([EXE_HEAD], "doc.png", { type: "image/png" }),
 		});
 		expect(res.valid).toBe(false);
+		expect(res.errors[0]?.rule).toBe("verifyContent");
 	});
 
 	it("sans extnames ni mimeTypes, file() reste déclaratif", () => {

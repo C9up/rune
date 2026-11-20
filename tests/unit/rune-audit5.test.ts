@@ -225,6 +225,8 @@ describe("rune > audit 6", () => {
 		// Declaring mimeTypes turns the content check on, so the payload carries
 		// real bytes and the schema runs async.
 		const PDF = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+		const doc = (size: number, type: string) =>
+			new File([PDF, new Uint8Array(size - PDF.length)], "doc.pdf", { type });
 		const s = schema({
 			doc: rules.nativeFile({
 				minSize: "1kb",
@@ -233,28 +235,19 @@ describe("rune > audit 6", () => {
 			}),
 		});
 		expect(
-			(
-				await s.validateResultAsync({
-					doc: { size: 5000, type: "application/pdf", buffer: PDF },
-				})
-			).valid,
+			(await s.validateResultAsync({ doc: doc(5000, "application/pdf") }))
+				.valid,
 		).toBe(true);
 		// Dans la forme à options, min/max/mimeTypes sont vérifiés PAR la règle
 		// nativeFile : c'est elle qui rapporte. La forme fluide, elle, nomme la
 		// contrainte fautive — voir le test suivant.
 		expect(
-			(
-				await s.validateResultAsync({
-					doc: { size: 100, type: "application/pdf", buffer: PDF },
-				})
-			).errors[0]?.rule,
+			(await s.validateResultAsync({ doc: doc(100, "application/pdf") }))
+				.errors[0]?.rule,
 		).toBe("nativeFile");
 		expect(
-			(
-				await s.validateResultAsync({
-					doc: { size: 5000, type: "image/png", buffer: PDF },
-				})
-			).errors[0]?.rule,
+			(await s.validateResultAsync({ doc: doc(5000, "image/png") })).errors[0]
+				?.rule,
 		).toBe("nativeFile");
 	});
 
@@ -515,23 +508,22 @@ describe("rune > nativeFile fluent API (upstream)", () => {
 				.maxSize("1mb")
 				.mimeTypes(["application/pdf"]),
 		});
-		const run = (doc: Record<string, unknown>) =>
-			s.validateResultAsync({ doc });
-		expect(
-			(await run({ size: 5000, type: "application/pdf", buffer: PDF })).valid,
-		).toBe(true);
-		expect(
-			(await run({ size: 100, type: "application/pdf", buffer: PDF })).errors[0]
-				?.rule,
-		).toBe("nativeFile.minSize");
-		expect(
-			(await run({ size: 5_000_000, type: "application/pdf", buffer: PDF }))
-				.errors[0]?.rule,
-		).toBe("nativeFile.maxSize");
-		expect(
-			(await run({ size: 5000, type: "image/png", buffer: PDF })).errors[0]
-				?.rule,
-		).toBe("nativeFile.mimeTypes");
+		const run = (size: number, type: string) =>
+			s.validateResultAsync({
+				doc: new File([PDF, new Uint8Array(size - PDF.length)], "doc.pdf", {
+					type,
+				}),
+			});
+		expect((await run(5000, "application/pdf")).valid).toBe(true);
+		expect((await run(100, "application/pdf")).errors[0]?.rule).toBe(
+			"nativeFile.minSize",
+		);
+		expect((await run(5_000_000, "application/pdf")).errors[0]?.rule).toBe(
+			"nativeFile.maxSize",
+		);
+		expect((await run(5000, "image/png")).errors[0]?.rule).toBe(
+			"nativeFile.mimeTypes",
+		);
 	});
 });
 
@@ -957,7 +949,7 @@ describe("rune > audit 11 — root failures and file content", () => {
 			f: rules.any().nativeFile({ mimeTypes: ["application/pdf"] }),
 		});
 		const res = await v.validateResultAsync({
-			f: { size: 12, type: "application/pdf", buffer: PNG },
+			f: new File([PNG], "f.pdf", { type: "application/pdf" }),
 		});
 		expect(res.valid).toBe(false);
 		expect(res.errors[0]?.rule).toBe("verifyContent");
@@ -967,7 +959,7 @@ describe("rune > audit 11 — root failures and file content", () => {
 				await schema({
 					f: rules.any().nativeFile({ mimeTypes: ["image/png"] }),
 				}).validateResultAsync({
-					f: { size: 12, type: "image/png", buffer: PNG },
+					f: new File([PNG], "f.png", { type: "image/png" }),
 				})
 			).valid,
 		).toBe(true);
