@@ -21,24 +21,76 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// coerced it to 16. Same schema, same input, two verdicts, decided by whether
 /// the application happened to install a messages provider.
 ///
+/// Every step mirrors the ECMAScript `StringToNumber` grammar:
+/// - the white space trimmed is JS's (`js_whitespace`), not Rust's `trim()`;
+/// - a radix body is digits only — no sign, never empty (`u128::from_str_radix`
+///   took `"0x+10"`, which JS reads as `NaN`);
+/// - a radix body of any length is read, correctly rounded, as JS does — a
+///   `u128` refused anything wider than 128 bits.
+///
 /// It also accepts a few spellings JS does not (`"inf"`, `"nan"`), which need
 /// no special case: both are non-finite and the caller refuses those anyway.
 fn js_number(text: &str) -> Option<f64> {
-    let trimmed = text.trim();
+    let trimmed = text.trim_matches(js_whitespace);
     // A radix prefix takes no sign in JS, so anything else falls through to the
     // ordinary parser — which is what rejects `"-0x10"`, as JS does.
-    let radix = match trimmed.get(..2) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("0x") => Some(16),
-        Some(prefix) if prefix.eq_ignore_ascii_case("0b") => Some(2),
-        Some(prefix) if prefix.eq_ignore_ascii_case("0o") => Some(8),
+    let radix_bits = match trimmed.get(..2) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("0x") => Some(4),
+        Some(prefix) if prefix.eq_ignore_ascii_case("0b") => Some(1),
+        Some(prefix) if prefix.eq_ignore_ascii_case("0o") => Some(3),
         _ => None,
     };
-    match radix {
-        Some(radix) => u128::from_str_radix(&trimmed[2..], radix)
-            .ok()
-            .map(|n| n as f64),
+    match radix_bits {
+        Some(bits) => parse_power_of_two_radix(&trimmed[2..], bits),
         None => trimmed.parse::<f64>().ok(),
     }
+}
+
+/// ECMAScript `WhiteSpace` + `LineTerminator`, the set `String.prototype.trim`
+/// and `Number()` strip. Rust's `White_Space` property differs on two code
+/// points: it lacks U+FEFF (ZWNBSP, a JS white space) and has U+0085 (NEL, a
+/// control character JS keeps).
+fn js_whitespace(c: char) -> bool {
+    c == '\u{FEFF}' || (c != '\u{85}' && c.is_whitespace())
+}
+
+/// A radix-2/8/16 integer body (`bits` per digit), rounded to the nearest
+/// `f64` with ties to even — what JS's `Number("0x…")` returns, for any width.
+/// `None` for an empty body or any character that is not a digit of the radix.
+fn parse_power_of_two_radix(body: &str, bits: u32) -> Option<f64> {
+    let radix = 1u32 << bits;
+    if body.is_empty() {
+        return None;
+    }
+    // The top 64 significant bits, then a sticky flag for any set bit below.
+    let mut mantissa: u64 = 0;
+    let mut width: u32 = 0; // significant bits seen so far
+    let mut sticky = false;
+    for c in body.chars() {
+        let digit = c.to_digit(radix)?;
+        for shift in (0..bits).rev() {
+            let bit = u64::from((digit >> shift) & 1);
+            if width == 0 && bit == 0 {
+                continue; // leading zero
+            }
+            if width < 64 {
+                mantissa = (mantissa << 1) | bit;
+            } else if bit == 1 {
+                sticky = true;
+            }
+            width = width.saturating_add(1);
+        }
+    }
+    if width <= 64 {
+        // Exact integer: `as` rounds to nearest, ties to even.
+        return Some(mantissa as f64);
+    }
+    // 64 > 53 + 1, so folding the sticky bit into the lowest kept bit leaves the
+    // rounding of the cast exact. Scaling by a power of two is exact too, up to
+    // the overflow to infinity JS also produces.
+    let kept = mantissa | u64::from(sticky);
+    let exponent = i32::try_from(width - 64).unwrap_or(i32::MAX);
+    Some(kept as f64 * 2f64.powi(exponent))
 }
 
 /// Code-point length for a string, element count for an array, else `-1`.
@@ -541,6 +593,45 @@ mod tests {
         data: serde_json::Value,
     ) -> ValidationRequest {
         ValidationRequest { schema, data }
+    }
+
+    #[test]
+    fn js_number_refuses_a_signed_or_empty_radix_body() {
+        for text in ["0x+10", "0b+1", "0o+7", "0x-1", "0x", "0b", "0x1g"] {
+            assert_eq!(js_number(text), None, "{text}");
+        }
+        assert_eq!(js_number("0x10"), Some(16.0));
+        assert_eq!(js_number("0B101"), Some(5.0));
+        assert_eq!(js_number("0o17"), Some(15.0));
+    }
+
+    #[test]
+    fn js_number_trims_the_javascript_white_space_set() {
+        assert_eq!(js_number("\u{FEFF}12"), Some(12.0));
+        assert_eq!(js_number("12\u{FEFF}"), Some(12.0));
+        assert_eq!(js_number("\u{3000}12\u{2028}"), Some(12.0));
+        // NEL is Unicode White_Space but not JS white space.
+        assert_eq!(js_number("\u{85}12"), None);
+    }
+
+    #[test]
+    fn js_number_reads_radix_strings_wider_than_128_bits() {
+        // 2^160 - 1 rounds to 2^160.
+        assert_eq!(
+            js_number(&format!("0x{}", "f".repeat(40))),
+            Some(2f64.powi(160))
+        );
+        // 2^53 + 1 ties to even (2^53); a set bit below breaks the tie upward.
+        assert_eq!(js_number("0x20000000000001"), Some(2f64.powi(53)));
+        assert_eq!(
+            js_number(&format!("0x20000000000001{}1", "0".repeat(20))),
+            Some((2f64.powi(53) + 2.0) * 2f64.powi(84))
+        );
+        // Past f64: infinite, which the caller refuses — as JS's `Infinity`.
+        assert_eq!(
+            js_number(&format!("0x{}", "f".repeat(300))),
+            Some(f64::INFINITY)
+        );
     }
 
     #[test]

@@ -74,6 +74,29 @@ const COERCIONS: ReadonlyArray<
 	["an octal string", rules.number(), "0o17"],
 	// A sign in front of a radix prefix is not a number in JS either.
 	["a signed hexadecimal string", rules.number(), "-0x10"],
+	// `from_str_radix` takes a `+` after the prefix; `Number()` does not.
+	["a sign after a hexadecimal prefix", rules.number(), "0x+10"],
+	["a sign after a binary prefix", rules.number(), "0b+1"],
+	["a sign after an octal prefix", rules.number(), "0o+7"],
+	["a negative sign after a prefix", rules.number(), "0x-1"],
+	["a bare prefix", rules.number(), "0x"],
+	// JS trims U+FEFF; Rust's `trim()` does not. And Rust trims U+0085,
+	// which is not JS white space.
+	["a leading byte order mark", rules.number(), "\uFEFF12"],
+	["a trailing byte order mark", rules.number(), "12\uFEFF"],
+	["a leading next-line character", rules.number(), "\u008512"],
+	["ideographic spaces", rules.number(), "\u300012\u3000"],
+	// Wider than 128 bits: `u128` overflowed where JS reads a float.
+	["a 160-bit hexadecimal string", rules.number(), `0x${"f".repeat(40)}`],
+	["a 1100-bit binary string", rules.number(), `0b1${"0".repeat(1099)}`],
+	["a hexadecimal string past f64", rules.number(), `0x${"f".repeat(300)}`],
+	// Rounding: 2^53 + 1 ties to even, a set bit far below breaks the tie.
+	["a 54-bit tie", rules.number(), "0x20000000000001"],
+	[
+		"a tie broken by a sticky bit",
+		rules.number(),
+		`0x20000000000001${"0".repeat(20)}1`,
+	],
 	["exponent notation", rules.number(), "1e3"],
 	["an empty string", rules.number(), ""],
 	["a non-finite spelling", rules.number(), "Infinity"],
@@ -96,6 +119,35 @@ describe("rune > native and TypeScript engines coerce alike", () => {
 			expect(viaNative.data?.v).toEqual(viaTypeScript.data?.v);
 		});
 	}
+
+	it("agrees with Number() on random radix strings of every width", () => {
+		// Deterministic LCG: the inputs are reproducible from the seed.
+		let seed = 0x2545f491;
+		const next = () => {
+			seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+			return seed;
+		};
+		const s = schema({ v: rules.number() });
+		for (let i = 0; i < 300; i++) {
+			const [prefix, alphabet] =
+				i % 3 === 0
+					? ["0x", "0123456789abcdefABCDEF"]
+					: i % 3 === 1
+						? ["0b", "01"]
+						: ["0o", "01234567"];
+			let body = "";
+			const width = 1 + (next() % 120);
+			for (let j = 0; j < width; j++) {
+				body += alphabet[next() % alphabet.length];
+			}
+			const input = `${prefix}${body}`;
+			const expected = Number(input);
+			expect({ input, v: s.validateResult({ v: input }).data?.v }).toEqual({
+				input,
+				v: expected,
+			});
+		}
+	});
 });
 
 describe("rune > native and TypeScript engines agree", () => {
