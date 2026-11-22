@@ -122,7 +122,7 @@ describe("rune > passports and postal codes", () => {
 		expect(isPassport("123456789", "US")).toBe(true);
 	});
 
-	it("answers null for a country it has no pattern for", () => {
+	it("answers null for a country it has no passport pattern for", () => {
 		expect(isPassport("123", "XX")).toBeNull();
 		expect(SUPPORTED_PASSPORTS).toContain("FR");
 	});
@@ -139,7 +139,7 @@ describe("rune > passports and postal codes", () => {
 		expect(isPostalCode("ABCDE", "US")).toBe(false);
 	});
 
-	it("answers null for a country it has no pattern for", () => {
+	it("answers null for a country it has no postal-code pattern for", () => {
 		expect(isPostalCode("1", "XX")).toBeNull();
 		expect(SUPPORTED_POSTAL_CODES).toContain("FR");
 	});
