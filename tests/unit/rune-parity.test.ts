@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+	errors,
 	type RuleChain,
-	RuneValidationError,
 	rules,
 	SimpleMessagesProvider,
 	schema,
@@ -165,14 +165,14 @@ describe("rune parity > transform / parse change the output", () => {
 });
 
 describe("rune parity > validateOrThrow (E_VALIDATION_ERROR)", () => {
-	it("throws RuneValidationError with code + status + messages on failure", () => {
+	it("throws errors.E_VALIDATION_ERROR with code + status + messages on failure", () => {
 		const s = schema({ email: rules.string().email() });
 		try {
 			s.validateOrThrow({ email: "nope" });
 			expect.fail("expected validateOrThrow to throw");
 		} catch (err) {
-			expect(err).toBeInstanceOf(RuneValidationError);
-			if (err instanceof RuneValidationError) {
+			expect(err).toBeInstanceOf(errors.E_VALIDATION_ERROR);
+			if (err instanceof errors.E_VALIDATION_ERROR) {
 				expect(err.code).toBe("E_VALIDATION_ERROR");
 				expect(err.status).toBe(422);
 				expect(err.messages.length).toBeGreaterThan(0);

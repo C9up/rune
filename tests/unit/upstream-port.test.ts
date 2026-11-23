@@ -7,6 +7,7 @@
  * reading it: the port was checked against 58 290 differential cases, and these
  * pin the ones a future edit would most easily break.
  */
+
 import { describe, expect, it } from "vitest";
 import {
 	isMobileForLocale,
@@ -21,7 +22,7 @@ import {
 	SUPPORTED_VAT_COUNTRIES,
 } from "../../src/formats.js";
 import type { RuleChain } from "../../src/index.js";
-import { create, RuneError, rules, schema } from "../../src/index.js";
+import { create, errors, rules, schema } from "../../src/index.js";
 
 describe("rune > the tables carry validator.js's coverage", () => {
 	it("covers every locale validator.js does, and then some", () => {
@@ -217,7 +218,7 @@ describe("rune > partial() refuses what it cannot relax", () => {
 			.any()
 			.object({ a: rules.string() })
 			.allowUnknownProperties();
-		expect(() => shape.partial()).toThrow(RuneError);
+		expect(() => shape.partial()).toThrow(errors.E_RUNE_PARTIAL_NOT_APPLICABLE);
 	});
 
 	it("still relaxes an ordinary shape without touching the source", () => {

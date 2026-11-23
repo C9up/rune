@@ -5,8 +5,9 @@
  * wrapped it in a whole schema, or hand-rolled a FieldContext and tested the
  * rule against a shape no real run ever produces.
  */
+
 import { describe, expect, it } from "vitest";
-import { createAsyncRule, createRule, RuneError } from "../../src/index.js";
+import { createAsyncRule, createRule, errors } from "../../src/index.js";
 import { fieldContext, runRule, runRuleAsync } from "../../src/testing.js";
 
 const isEven = createRule((value, _options: undefined, field) => {
@@ -76,7 +77,9 @@ describe("rune > testing helpers", () => {
 		const slow = createAsyncRule(async (_v, _o: undefined, field) => {
 			field.report("nope", "slow", field);
 		});
-		expect(() => runRule(slow(), "x")).toThrow(RuneError);
+		expect(() => runRule(slow(), "x")).toThrow(
+			errors.E_RUNE_ASYNC_RULE_NOT_AWAITED,
+		);
 	});
 
 	it("awaits an async rule", async () => {

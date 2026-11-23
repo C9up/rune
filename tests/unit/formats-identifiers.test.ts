@@ -392,6 +392,14 @@ describe("rune > escaping and normalisation", () => {
 		).toBe("https://acme.test");
 	});
 
+	it("refuses forceHttp and forceHttps together", () => {
+		expect(() =>
+			normalizeUrl("http://acme.test", { forceHttp: true, forceHttps: true }),
+		).toThrow(
+			expect.objectContaining({ code: "E_RUNE_CONFLICTING_URL_OPTIONS" }),
+		);
+	});
+
 	it("hands back an unparseable URL untouched, for url() to report", () => {
 		expect(normalizeUrl("not a url", { forceHttps: true })).toBe("not a url");
 	});

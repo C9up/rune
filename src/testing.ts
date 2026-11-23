@@ -31,12 +31,12 @@
  * package mirrors in shape and never in naming.
  */
 
-import { RuneError } from "./errors.js";
+import { E_RUNE_ASYNC_RULE_NOT_AWAITED } from "./errors.js";
 import type {
 	AsyncCompiledRule,
 	CompiledRule,
 	FieldContext,
-	ValidationError,
+	ValidationErrorNode,
 } from "./Schema.js";
 
 /** What a rule saw and what it did about it. */
@@ -44,7 +44,7 @@ export interface RuleRunResult {
 	/** `true` when the rule reported nothing. */
 	valid: boolean;
 	/** Everything the rule reported, in order. */
-	errors: ValidationError[];
+	errors: ValidationErrorNode[];
 	/** The value after any `field.mutate()` — the input otherwise. */
 	value: unknown;
 }
@@ -64,7 +64,7 @@ export interface FieldContextOptions {
 	/** Whether the value passed its type rule. Defaults to `isValid`. */
 	isValidDataType?: boolean;
 	/** Called for each `field.report(...)`. */
-	onReport?: (error: ValidationError) => void;
+	onReport?: (error: ValidationErrorNode) => void;
 	/** Called for `field.mutate(next)`. */
 	onMutate?: (next: unknown) => void;
 }
@@ -147,8 +147,8 @@ export function fieldContext(
 function prepare(
 	value: unknown,
 	options: FieldContextOptions,
-): { errors: ValidationError[]; field: FieldContext; read: () => unknown } {
-	const errors: ValidationError[] = [];
+): { errors: ValidationErrorNode[]; field: FieldContext; read: () => unknown } {
+	const errors: ValidationErrorNode[] = [];
 	let mutated = value;
 	const field = fieldContext(value, {
 		...options,
@@ -180,10 +180,9 @@ export function runRule(
 	options: FieldContextOptions = {},
 ): RuleRunResult {
 	if (rule.__rune !== "rule") {
-		throw new RuneError(
-			"ASYNC_RULE_NOT_AWAITED",
+		throw new E_RUNE_ASYNC_RULE_NOT_AWAITED(
 			"runRule() cannot run an async rule: its verdict would arrive after the call returned.",
-			{ hint: "Use runRuleAsync()." },
+			"Use runRuleAsync().",
 		);
 	}
 	const { errors, field, read } = prepare(value, options);

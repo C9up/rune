@@ -4,7 +4,12 @@
  * @implements FR40
  */
 
-import { RuneError } from "./errors.js";
+import {
+	E_RUNE_NAPI_INVALID_RESPONSE,
+	E_RUNE_NAPI_NOT_FOUND,
+	E_RUNE_NAPI_REQUEST_REFUSED,
+	E_RUNE_NAPI_REQUIRED,
+} from "./errors.js";
 import {
 	hasFunctions,
 	loadNativeBinary,
@@ -52,34 +57,19 @@ export function validateNative(requestJson: string): {
 	data?: Record<string, unknown>;
 } {
 	if (!native) {
-		throw new RuneError(
-			"NAPI_NOT_FOUND",
-			`Rust validation engine not available: ${loadError ?? "binary not found"}`,
-		);
+		throw new E_RUNE_NAPI_NOT_FOUND([String(loadError ?? "binary not found")], {
+			cause: loadError,
+		});
 	}
 	let response: string;
 	try {
 		response = native.validate(requestJson);
 	} catch (cause) {
-		// The engine refused the request itself. Its own wording stays out of
-		// the message: it quotes positions inside the payload.
-		throw new RuneError(
-			"NAPI_REQUEST_REFUSED",
-			"The Rust validation engine refused the request.",
-			{
-				hint:
-					cause instanceof Error
-						? cause.message
-						: "No reason was given by the engine.",
-			},
-		);
+		throw new E_RUNE_NAPI_REQUEST_REFUSED(cause);
 	}
 	const result = JSON.parse(response);
 	if (typeof result.valid !== "boolean" || !Array.isArray(result.errors)) {
-		throw new RuneError(
-			"NAPI_INVALID_RESPONSE",
-			"The Rust validation engine returned an unexpected shape.",
-		);
+		throw new E_RUNE_NAPI_INVALID_RESPONSE();
 	}
 	return result;
 }
@@ -94,18 +84,6 @@ function unavailableReason(): string {
 		return `failed to load (${loadError instanceof Error ? loadError.message : String(loadError)})`;
 	}
 	return vendorUnavailableReason();
-}
-
-/** Raised when a schema needs the Rust engine and it is not there. */
-export class RuneNativeRequiredError extends Error {
-	readonly code = "E_RUNE_NAPI_REQUIRED" as const;
-	constructor() {
-		super(
-			`[E_RUNE_NAPI_REQUIRED] The Rust validation engine is required but not loaded — ${unavailableReason()}.\n` +
-				"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
-		);
-		this.name = "RuneNativeRequiredError";
-	}
 }
 
 /**
@@ -123,5 +101,6 @@ export class RuneNativeRequiredError extends Error {
  * implementation, not a second one.
  */
 export function assertNativeAvailable(): void {
-	if (native === undefined) throw new RuneNativeRequiredError();
+	if (native === undefined)
+		throw new E_RUNE_NAPI_REQUIRED([unavailableReason()]);
 }

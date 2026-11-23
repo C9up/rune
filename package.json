@@ -28,6 +28,9 @@
     "prepublishOnly": "pnpm build",
     "prepack": "pnpm build"
   },
+  "dependencies": {
+    "@c9up/flare": "^0.1.0"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",
     "@types/node": "^22.20.1",

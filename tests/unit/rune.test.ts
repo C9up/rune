@@ -1,16 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	bindRosetta,
+	errors,
 	type RuleChain,
 	rules,
 	schema,
 	setValidationTranslator,
 } from "../../src/index.js";
-import {
-	assertNativeAvailable,
-	isNativeAvailable,
-	RuneNativeRequiredError,
-} from "../../src/native.js";
+import { assertNativeAvailable, isNativeAvailable } from "../../src/native.js";
 
 /** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
 function defined<T>(value: T | null | undefined): T {
@@ -299,8 +296,10 @@ describe("rune > no silent fallback to the TypeScript validator", () => {
 		}
 		// A one-time warning used to let the TypeScript validator take over, so
 		// the same code could reach different verdicts on two machines.
-		expect(() => assertNativeAvailable()).toThrow(RuneNativeRequiredError);
-		expect(() => assertNativeAvailable()).toThrow(/E_RUNE_NAPI_REQUIRED/);
+		expect(() => assertNativeAvailable()).toThrow(errors.E_RUNE_NAPI_REQUIRED);
+		expect(() => assertNativeAvailable()).toThrow(
+			expect.objectContaining({ code: "E_RUNE_NAPI_REQUIRED" }),
+		);
 	});
 
 	it("keeps the TypeScript path for what the engine cannot run", async () => {

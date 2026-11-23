@@ -9,6 +9,8 @@
  * licence. See LICENSE-THIRD-PARTY.md.
  */
 
+import { E_RUNE_CONFLICTING_URL_OPTIONS } from "./errors.js";
+
 const DATA_URL_DEFAULT_MIME_TYPE = "text/plain";
 const DATA_URL_DEFAULT_CHARSET = "us-ascii";
 
@@ -319,9 +321,7 @@ export function normalizeUrl(
 ): string {
 	const o = { ...DEFAULTS, ...options };
 	if (o.forceHttp && o.forceHttps) {
-		throw new Error(
-			"normalizeUrl(): forceHttp and forceHttps cannot be used together.",
-		);
+		throw new E_RUNE_CONFLICTING_URL_OPTIONS();
 	}
 	const defaultProtocol = o.defaultProtocol.endsWith(":")
 		? o.defaultProtocol

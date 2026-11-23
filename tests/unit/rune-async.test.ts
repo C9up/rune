@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-	createAsyncRule,
-	RuneValidationError,
-	rules,
-	schema,
-} from "../../src/index.js";
+import { createAsyncRule, errors, rules, schema } from "../../src/index.js";
 
 /**
  * Async validation (`validateResultAsync` / `validate`) + DB-backed `unique`/`exists` rules
@@ -83,13 +78,13 @@ describe("rune > async validation", () => {
 		);
 	});
 
-	it("validateOrThrowAsync throws RuneValidationError on failure", async () => {
+	it("validateOrThrowAsync throws errors.E_VALIDATION_ERROR on failure", async () => {
 		const s = schema({
 			email: rules.string().unique(async () => false),
 		});
 		await expect(
 			s.validateOrThrowAsync({ email: "x@y.io" }),
-		).rejects.toBeInstanceOf(RuneValidationError);
+		).rejects.toBeInstanceOf(errors.E_VALIDATION_ERROR);
 		const s2 = schema({ email: rules.string().unique(async () => true) });
 		await expect(s2.validateOrThrowAsync({ email: "x@y.io" })).resolves.toEqual(
 			{
@@ -248,7 +243,7 @@ describe("rune > a run's reporter error belongs to that run", () => {
 				},
 				report: reporter.report.bind(reporter),
 				createError: () =>
-					new RuneValidationError([
+					new errors.E_VALIDATION_ERROR([
 						{ message: tag, rule: "unique", field: "email" },
 					]),
 			};
@@ -272,6 +267,8 @@ describe("rune > a run's reporter error belongs to that run", () => {
 		await expect(
 			v.validate({}, { errorReporter: () => new TaggedReporter("A") }),
 		).rejects.toMatchObject({ message: "reporter A" });
-		await expect(v.validate({})).rejects.toBeInstanceOf(RuneValidationError);
+		await expect(v.validate({})).rejects.toBeInstanceOf(
+			errors.E_VALIDATION_ERROR,
+		);
 	});
 });

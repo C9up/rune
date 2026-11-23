@@ -18,7 +18,7 @@ const result = CreateOrder.validateResult({ total: 42, email: 'a@b.com', name: '
 // result.valid === true, result.data.name === 'Alice'
 
 const order = await CreateOrder.validate({ total: 42, email: 'a@b.com', name: '  Alice  ' })
-// order.name === 'Alice' — throws RuneValidationError instead of reporting
+// order.name === 'Alice' — throws ValidationError (errors.E_VALIDATION_ERROR) instead of reporting
 ```
 
 ## Features

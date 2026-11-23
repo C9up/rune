@@ -1,10 +1,10 @@
+import { Exception } from "@c9up/flare";
 import { afterEach, describe, expect, it } from "vitest";
 import type { NormalizeUrlOptions, RuleValidator } from "../../src/index.js";
 import rune, {
 	create,
 	createRule,
-	RuneError,
-	RuneValidationError,
+	errors,
 	rules,
 	SimpleMessagesProvider,
 	schema,
@@ -62,7 +62,9 @@ describe("rune > audit 5", () => {
 			}).valid,
 		).toBe(false);
 		// A cap that cannot be read must not silently become "no cap".
-		expect(() => rules.file({ size: "2 bananas" })).toThrow(RuneError);
+		expect(() => rules.file({ size: "2 bananas" })).toThrow(
+			errors.E_RUNE_INVALID_SIZE,
+		);
 	});
 
 	it("range takes the upstream tuple", () => {
@@ -204,8 +206,10 @@ describe("rune > audit 6", () => {
 		// Two branches of the same type: the second could never be reached.
 		expect(() =>
 			rune.unionOfTypes([rules.string().email(), rules.string().uuid()]),
-		).toThrow(RuneError);
-		expect(() => rune.unionOfTypes([rules.any()])).toThrow(RuneError);
+		).toThrow(errors.E_RUNE_DUPLICATE_UNION_TYPE);
+		expect(() => rune.unionOfTypes([rules.any()])).toThrow(
+			errors.E_RUNE_NO_TYPE_RULE,
+		);
 	});
 
 	it("url and normalizeEmail accept the validator.js snake_case options", () => {
@@ -847,7 +851,9 @@ describe("rune > audit 10 — confirmed(as), ~standard.jsonSchema, vat, meta", (
 		// so a schema claiming to describe the result would be a guess. rune used
 		// to hand back the INPUT schema, which was that guess dressed as an
 		// answer.
-		expect(() => v["~standard"].jsonSchema.output()).toThrow(RuneError);
+		expect(() => v["~standard"].jsonSchema.output()).toThrow(
+			errors.E_RUNE_NO_OUTPUT_SCHEMA,
+		);
 	});
 
 	it("vat() valide format ET checksum, et lève sur un pays inconnu", () => {
@@ -868,7 +874,7 @@ describe("rune > audit 10 — confirmed(as), ~standard.jsonSchema, vat, meta", (
 			}).validateResult({ n: "BE0428759497" }).valid,
 		).toBe(true);
 
-		expect(() => rules.string().vat({ countryCode: "ZZ" })).toThrow(RuneError);
+		expect(() => rules.string().vat({ countryCode: "ZZ" })).toThrow(Exception);
 	});
 
 	it("meta() et objets fermés dans le JSON Schema", () => {
@@ -999,7 +1005,7 @@ describe("rune > audit 12 — tryValidate and the reporter agree", () => {
 	const reporter = () => ({
 		hasErrors: true,
 		createError: () =>
-			new RuneValidationError([
+			new errors.E_VALIDATION_ERROR([
 				{ field: "a", rule: "custom", message: "from the reporter" },
 			]),
 		report: () => undefined,
@@ -1027,7 +1033,7 @@ describe("rune > audit 12 — tryValidate and the reporter agree", () => {
 
 	it("without a reporter the tuple still carries rune's own error", () => {
 		const [error] = create({ a: rules.string() }).tryValidateSync({ a: 1 });
-		expect(error).toBeInstanceOf(RuneValidationError);
+		expect(error).toBeInstanceOf(errors.E_VALIDATION_ERROR);
 		expect(error?.messages[0]?.rule).toBe("string");
 	});
 
@@ -1087,7 +1093,9 @@ describe("rune > audit 13 — async rules and the messages provider", () => {
 		const returnsThenable: RuleValidator = () => Promise.resolve();
 		const sneaky = createRule(returnsThenable);
 		const v = schema({ a: rules.string().use(sneaky()) });
-		expect(() => v.validateResult({ a: "x" })).toThrow(RuneError);
+		expect(() => v.validateResult({ a: "x" })).toThrow(
+			errors.E_RUNE_ASYNC_RULE_NOT_AWAITED,
+		);
 	});
 
 	it("{ isAsync: true } still works, and stays the spelling", () => {
@@ -1272,14 +1280,14 @@ describe("rune > audit 14", () => {
 		// nullability `nullable: true`, not a `type` array.
 		for (const target of ["openapi-3.0", "draft-07", "unknown"]) {
 			expect(() => standard.jsonSchema.input({ target })).toThrowError(
-				RuneError,
+				errors.E_RUNE_UNSUPPORTED_JSON_SCHEMA_TARGET,
 			);
 		}
 		let code: string | undefined;
 		try {
 			standard.jsonSchema.input({ target: "openapi-3.0" });
 		} catch (error) {
-			if (error instanceof RuneError) code = error.code;
+			if (error instanceof Exception) code = error.code;
 		}
 		expect(code).toBe("E_RUNE_UNSUPPORTED_JSON_SCHEMA_TARGET");
 	});

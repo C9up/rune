@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
 	bindHostResolver,
+	errors,
 	type RuleChain,
-	RuneError,
 	rules,
 	schema,
 } from "../../src/index.js";
@@ -95,7 +95,7 @@ describe("rune > format rules (upstream parity)", () => {
 		).toBe(true);
 		// An unsupported country must NOT silently accept everything.
 		expect(() => rules.string().postalCode({ countryCode: "ZZ" })).toThrow(
-			RuneError,
+			errors.E_RUNE_UNSUPPORTED_COUNTRY,
 		);
 	});
 
@@ -208,7 +208,9 @@ describe("rune > format rule options (upstream)", () => {
 				"+33612345678",
 			),
 		).toBe(true);
-		expect(() => rules.string().mobile({ locale: "xx-XX" })).toThrow(RuneError);
+		expect(() => rules.string().mobile({ locale: "xx-XX" })).toThrow(
+			errors.E_RUNE_UNSUPPORTED_LOCALE,
+		);
 	});
 
 	it("postalCode accepts several countries and a callback", () => {
@@ -256,7 +258,7 @@ describe("rune > activeUrl", () => {
 		const s = schema({ site: rules.string().activeUrl() });
 		await expect(
 			s.validateResultAsync({ site: "https://example.com" }),
-		).rejects.toBeInstanceOf(RuneError);
+		).rejects.toBeInstanceOf(errors.E_RUNE_NO_HOST_RESOLVER);
 	});
 });
 

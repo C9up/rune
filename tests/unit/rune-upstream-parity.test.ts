@@ -5,8 +5,6 @@ import rune, {
 	create,
 	createRule,
 	errors,
-	RuneError,
-	RuneValidationError,
 	rules,
 	schema,
 } from "../../src/index.js";
@@ -155,6 +153,10 @@ describe("rune > unique/exists Lucid options form", () => {
 		expect((await v.validateResultAsync({ email: "taken@x.io" })).valid).toBe(
 			false,
 		);
+		// The synchronous run cannot await the resolver, so it refuses.
+		expect(() => v.validateResult({ email: "free@x.io" })).toThrow(
+			expect.objectContaining({ code: "E_RUNE_ASYNC_RULE_NOT_AWAITED" }),
+		);
 		expect(seen[0]).toMatchObject({
 			table: "users",
 			column: "email",
@@ -168,7 +170,7 @@ describe("rune > unique/exists Lucid options form", () => {
 		const v = schema({ email: rules.string().unique({ table: "users" }) });
 		await expect(
 			v.validateResultAsync({ email: "a@b.io" }),
-		).rejects.toBeInstanceOf(RuneError);
+		).rejects.toBeInstanceOf(errors.E_RUNE_NO_DATABASE_RESOLVER);
 	});
 });
 
@@ -205,7 +207,7 @@ describe("rune > string mutations and extra formats", () => {
 		expect(v.validateResult({ p: "X1234567" }).valid).toBe(true);
 		expect(v.validateResult({ p: "12345" }).valid).toBe(false);
 		expect(() => rules.string().passport({ countryCode: "ZZ" })).toThrow(
-			RuneError,
+			errors.E_RUNE_UNSUPPORTED_COUNTRY,
 		);
 	});
 });
@@ -254,7 +256,7 @@ describe("rune > validate() follows the upstream contract", () => {
 			email: "a@b.io",
 		});
 		await expect(v.validate({ email: "bad" })).rejects.toBeInstanceOf(
-			RuneValidationError,
+			errors.E_VALIDATION_ERROR,
 		);
 	});
 
@@ -262,7 +264,7 @@ describe("rune > validate() follows the upstream contract", () => {
 		const v = schema({ email: rules.string().unique(async () => false) });
 		// The old sync entry point would have thrown "call validateAsync instead".
 		await expect(v.validate({ email: "a@b.io" })).rejects.toBeInstanceOf(
-			RuneValidationError,
+			errors.E_VALIDATION_ERROR,
 		);
 	});
 
@@ -320,10 +322,6 @@ describe("errors namespace (upstream parity)", () => {
 		await expect(v.validate({ name: "a" })).rejects.toBeInstanceOf(
 			errors.E_VALIDATION_ERROR,
 		);
-
-		// The alias must BE the thrown class, not a look-alike: Adonis code does
-		// `error instanceof errors.E_VALIDATION_ERROR`.
-		expect(errors.E_VALIDATION_ERROR).toBe(RuneValidationError);
 
 		try {
 			await v.validate({ name: "a" });

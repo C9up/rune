@@ -11,7 +11,11 @@ export type { DateFormat } from "./date.js";
  * the root and not only on the subpath.
  */
 export * as errors from "./errors.js";
-export { RuneError, RuneValidationError } from "./errors.js";
+/**
+ * The validation exception under its class name too, as upstream exports it:
+ * `ValidationError` and `errors.E_VALIDATION_ERROR` are the same class.
+ */
+export { E_VALIDATION_ERROR as ValidationError } from "./errors.js";
 export type {
 	AlphaOptions,
 	EmailOptions,
@@ -28,7 +32,6 @@ export { readHead } from "./magic.js";
 export {
 	assertNativeAvailable,
 	isNativeAvailable,
-	RuneNativeRequiredError,
 } from "./native.js";
 export type {
 	AsyncCompiledRule,
@@ -47,7 +50,7 @@ export type {
 	RuleValidator,
 	UnionNoMatchCallback,
 	ValidateOptions,
-	ValidationError,
+	ValidationErrorNode,
 	ValidationMessageParams,
 	ValidationResult,
 	ValidationSchema,
@@ -69,8 +72,10 @@ export {
 	setGlobalErrorReporter,
 	setValidationTranslator,
 } from "./Schema.js";
+export { SimpleErrorReporter } from "./SimpleErrorReporter.js";
 
-import { RuneError, type RuneValidationError } from "./errors.js";
+import type { E_VALIDATION_ERROR } from "./errors.js";
+import { E_RUNE_META_REQUIRED } from "./errors.js";
 import * as runeHelpers from "./helpers.js";
 import type { MessagesProviderContract } from "./MessagesProvider.js";
 import type {
@@ -146,13 +151,13 @@ function validateOnce(
 /** One-shot non-throwing validation, upstream `tryValidate`. */
 function tryValidateOnce<S extends Record<string, RuleChain>>(
 	options: OneShotOptions<S>,
-): Promise<[RuneValidationError, null] | [null, Infer<S>]>;
+): Promise<[E_VALIDATION_ERROR, null] | [null, Infer<S>]>;
 function tryValidateOnce<C extends RuleChain>(
 	options: OneShotOptions<C>,
-): Promise<[RuneValidationError, null] | [null, OutputOf<C>]>;
+): Promise<[E_VALIDATION_ERROR, null] | [null, OutputOf<C>]>;
 function tryValidateOnce(
 	options: OneShotOptions<Record<string, RuleChain> | RuleChain>,
-): Promise<[RuneValidationError, null] | [null, unknown]> {
+): Promise<[E_VALIDATION_ERROR, null] | [null, unknown]> {
 	const { schema: fields, data, ...validateOptions } = options;
 	return oneShotValidator(fields).tryValidate(data, validateOptions);
 }
@@ -252,10 +257,7 @@ const rune = {
 					options: Omit<ValidateOptions, "meta"> & { meta: M },
 				): R => {
 					if (options?.meta === undefined) {
-						throw new RuneError(
-							"META_REQUIRED",
-							"This validator was built with withMetaData(), so every call must pass { meta }.",
-						);
+						throw new E_RUNE_META_REQUIRED();
 					}
 					check(options.meta);
 					return run(data, options);

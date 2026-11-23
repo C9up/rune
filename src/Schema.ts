@@ -17,7 +17,24 @@ import {
 	requiredMessage,
 } from "./defaults.js";
 import type { RuneErrorNode } from "./errors.js";
-import { RuneError, RuneValidationError } from "./errors.js";
+import {
+	E_RUNE_ASYNC_RULE_NOT_AWAITED,
+	E_RUNE_DUPLICATE_UNION_TYPE,
+	E_RUNE_INVALID_ERROR_REPORTER,
+	E_RUNE_INVALID_RULE,
+	E_RUNE_INVALID_SIZE,
+	E_RUNE_NO_DATABASE_RESOLVER,
+	E_RUNE_NO_HOST_RESOLVER,
+	E_RUNE_NO_OUTPUT_SCHEMA,
+	E_RUNE_NO_RULE,
+	E_RUNE_NO_TYPE_RULE,
+	E_RUNE_NOT_AN_OBJECT,
+	E_RUNE_PARTIAL_NOT_APPLICABLE,
+	E_RUNE_UNSUPPORTED_COUNTRY,
+	E_RUNE_UNSUPPORTED_JSON_SCHEMA_TARGET,
+	E_RUNE_UNSUPPORTED_LOCALE,
+	E_VALIDATION_ERROR,
+} from "./errors.js";
 import {
 	type AlphaOptions,
 	alphaPattern,
@@ -69,7 +86,12 @@ export type ValidationTranslator = (
 	params?: ValidationMessageParams,
 ) => string | undefined;
 
-export interface ValidationError {
+/**
+ * One failure as the traversal collects it, before it is handed to a reporter
+ * or put on `E_VALIDATION_ERROR.messages`. (`ValidationError` is the exception
+ * class, as upstream names it.)
+ */
+export interface ValidationErrorNode {
 	field: string;
 	rule: string;
 	message: string;
@@ -290,12 +312,9 @@ export function createRule<Options>(
 			// the run is over. Refuse loudly rather than report a pass nobody
 			// checked.
 			if (isThenable(returned)) {
-				throw new RuneError(
-					"ASYNC_RULE_NOT_AWAITED",
+				throw new E_RUNE_ASYNC_RULE_NOT_AWAITED(
 					`rule '${ruleOptions?.name ?? (validator.name || "anonymous")}' returned a promise but is not declared async, so its verdict would arrive after validation ended.`,
-					{
-						hint: "Declare the validator `async`, or pass { async: true } (alias { isAsync: true }) to createRule().",
-					},
+					"Declare the validator `async`, or pass { async: true } (alias { isAsync: true }) to createRule().",
 				);
 			}
 		},
@@ -375,8 +394,8 @@ export function createAsyncRule<Options>(
  * `data` separately.
  */
 export type ValidationResult<T = Record<string, unknown>> =
-	| { valid: true; errors: ValidationError[]; data: T }
-	| { valid: false; errors: ValidationError[]; data?: undefined };
+	| { valid: true; errors: ValidationErrorNode[]; data: T }
+	| { valid: false; errors: ValidationErrorNode[]; data?: undefined };
 
 /** Options for {@link ValidationSchema.validate}. */
 export interface ValidateOptions {
@@ -399,7 +418,7 @@ export interface ValidateOptions {
 	 * Either way the reporter OBSERVES: the validation result is never changed by
 	 * it, so a reporter cannot mask a failure.
 	 */
-	errorReporter?: ErrorReporterFactory | ((error: ValidationError) => void);
+	errorReporter?: ErrorReporterFactory | ((error: ValidationErrorNode) => void);
 }
 
 /**
@@ -431,7 +450,7 @@ export type ErrorReporterFactory = () => ErrorReporterContract;
 
 /** A factory takes no argument; an observer declares the error it receives. */
 function isReporterFactory(
-	reporter: ErrorReporterFactory | ((error: ValidationError) => void),
+	reporter: ErrorReporterFactory | ((error: ValidationErrorNode) => void),
 ): reporter is ErrorReporterFactory {
 	return reporter.length === 0;
 }
@@ -460,13 +479,13 @@ function isReporterContract(value: unknown): value is ErrorReporterContract {
 function toReporter(
 	reporter:
 		| ErrorReporterFactory
-		| ((error: ValidationError) => void)
+		| ((error: ValidationErrorNode) => void)
 		| undefined,
 	data: unknown,
 	meta: Record<string, unknown>,
 ):
 	| {
-			report(error: ValidationError): void;
+			report(error: ValidationErrorNode): void;
 			createError?: () => Error;
 	  }
 	| undefined {
@@ -477,13 +496,7 @@ function toReporter(
 	}
 	const built: unknown = reporter();
 	if (!isReporterContract(built)) {
-		throw new RuneError(
-			"INVALID_ERROR_REPORTER",
-			"errorReporter takes no argument but did not return a reporter ({ report, createError }).",
-			{
-				hint: "A factory returns a reporter; an observer must declare its parameter without a default: (error) => …",
-			},
-		);
+		throw new E_RUNE_INVALID_ERROR_REPORTER();
 	}
 	return {
 		report(error) {
@@ -519,7 +532,7 @@ function fieldNameOf(path: string): string | number {
  * reads is derivable from the field path plus the root data.
  */
 function reportedFieldContext(
-	error: ValidationError,
+	error: ValidationErrorNode,
 	data: unknown,
 	meta: Record<string, unknown>,
 ): FieldContext {
@@ -572,12 +585,9 @@ const SUPPORTED_JSON_SCHEMA_TARGET = "draft-2020-12";
 /** Refuse a dialect rune does not emit, rather than hand back the wrong one. */
 function assertJsonSchemaTarget(target?: JsonSchemaTarget): void {
 	if (target === undefined || target === SUPPORTED_JSON_SCHEMA_TARGET) return;
-	throw new RuneError(
-		"UNSUPPORTED_JSON_SCHEMA_TARGET",
-		`rune emits ${SUPPORTED_JSON_SCHEMA_TARGET} JSON Schema, not '${target}'.`,
-		{
-			hint: `Ask for '${SUPPORTED_JSON_SCHEMA_TARGET}', or omit the target to get it.`,
-		},
+	throw new E_RUNE_UNSUPPORTED_JSON_SCHEMA_TARGET(
+		target,
+		SUPPORTED_JSON_SCHEMA_TARGET,
 	);
 }
 
@@ -615,7 +625,7 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	 */
 	errorReporter:
 		| ErrorReporterFactory
-		| ((error: ValidationError) => void)
+		| ((error: ValidationErrorNode) => void)
 		| null;
 	/**
 	 * Messages provider for this validator (upstream `validator.messagesProvider`).
@@ -627,7 +637,7 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	/** JSON Schema for the compiled validator (upstream `toJSONSchema`). */
 	toJSONSchema(): Record<string, unknown>;
 	/**
-	 * Validate and return the payload, throwing {@link RuneValidationError} on
+	 * Validate and return the payload, throwing {@link E_VALIDATION_ERROR} on
 	 * failure — the upstream contract (`validator.validate(data)`), async
 	 * so a schema carrying `unique`/`exists` behaves like any other.
 	 *
@@ -652,7 +662,7 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	): Promise<ValidationResult<T>>;
 	/**
 	 * Throwing validation (upstream parity). Returns the validated data on
-	 * success; throws {@link RuneValidationError} (`E_VALIDATION_ERROR`, HTTP 422)
+	 * success; throws {@link E_VALIDATION_ERROR} (`E_VALIDATION_ERROR`, HTTP 422)
 	 * with a structured `.messages` array on failure.
 	 */
 	validateOrThrow(data: unknown, options?: ValidateOptions): T;
@@ -663,12 +673,12 @@ export interface ValidationSchema<T = Record<string, unknown>> {
 	tryValidate(
 		data: unknown,
 		options?: ValidateOptions,
-	): Promise<[RuneValidationError, null] | [null, T]>;
+	): Promise<[E_VALIDATION_ERROR, null] | [null, T]>;
 	/** Synchronous counterpart of {@link tryValidate} (rune superset). */
 	tryValidateSync(
 		data: unknown,
 		options?: ValidateOptions,
-	): [RuneValidationError, null] | [null, T];
+	): [E_VALIDATION_ERROR, null] | [null, T];
 	/** Throwing async validation (see {@link validateResultAsync} + {@link validateOrThrow}). */
 	validateOrThrowAsync(data: unknown, options?: ValidateOptions): Promise<T>;
 }
@@ -725,12 +735,15 @@ let globalMessagesProvider: MessagesProviderContract | null = null;
  */
 let globalErrorReporter:
 	| ErrorReporterFactory
-	| ((error: ValidationError) => void)
+	| ((error: ValidationErrorNode) => void)
 	| null = null;
 
 /** Bind (or clear) the process-wide error reporter. */
 export function setGlobalErrorReporter(
-	reporter: ErrorReporterFactory | ((error: ValidationError) => void) | null,
+	reporter:
+		| ErrorReporterFactory
+		| ((error: ValidationErrorNode) => void)
+		| null,
 ): void {
 	globalErrorReporter = reporter;
 }
@@ -769,7 +782,7 @@ function copyWithoutProtoKey(
 /** Read the process-wide error reporter. */
 export function getGlobalErrorReporter():
 	| ErrorReporterFactory
-	| ((error: ValidationError) => void)
+	| ((error: ValidationErrorNode) => void)
 	| null {
 	return globalErrorReporter;
 }
@@ -883,13 +896,7 @@ function toDatabaseCheck(
 	const options = checkOrOptions;
 	return async (value, field) => {
 		if (!databaseResolver) {
-			throw new RuneError(
-				"NO_DATABASE_RESOLVER",
-				`rules.${kind}({ table }) needs a database resolver.`,
-				{
-					hint: "Call bindDatabase(resolver) once at boot, or pass a callback.",
-				},
-			);
+			throw new E_RUNE_NO_DATABASE_RESOLVER(kind);
 		}
 		const found = await databaseResolver.exists({
 			table: options.table,
@@ -1016,17 +1023,13 @@ export function parseByteSize(size: number | string): number {
 	if (typeof size === "number") return size;
 	const match = /^\s*(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|tb)\s*$/i.exec(size);
 	if (!match) {
-		throw new RuneError("INVALID_SIZE", `file(): cannot read size '${size}'.`, {
-			hint: 'Use a byte count, or "2mb" / "512kb" / "1gb".',
-		});
+		throw new E_RUNE_INVALID_SIZE(size);
 	}
 	const [, amount, unit] = match;
 	const multiplier =
 		unit === undefined ? undefined : BYTE_UNITS[unit.toLowerCase()];
 	if (amount === undefined || multiplier === undefined) {
-		throw new RuneError("INVALID_SIZE", `file(): cannot read size '${size}'.`, {
-			hint: 'Use a byte count, or "2mb" / "512kb" / "1gb".',
-		});
+		throw new E_RUNE_INVALID_SIZE(size);
 	}
 	return Math.round(Number(amount) * multiplier);
 }
@@ -1796,7 +1799,7 @@ function resolveReportedMessage(
 function renderNativeMessages(
 	fields: Record<string, RuleChain>,
 	errors: readonly NativeError[],
-): ValidationError[] {
+): ValidationErrorNode[] {
 	// The engine iterates its schema as a hash map; the TypeScript path reports
 	// in declaration order, and both must answer alike. The sort is stable, so
 	// a field's own errors keep the order its rules ran in.
@@ -1895,7 +1898,7 @@ export function schema(
 	// per call. Mutable on purpose: that is how upstream exposes it.
 	let validatorErrorReporter:
 		| ErrorReporterFactory
-		| ((error: ValidationError) => void)
+		| ((error: ValidationErrorNode) => void)
 		| null = null;
 	// Per-validator messages provider (upstream `validator.messagesProvider = …`).
 	// Sits between the per-call provider and the global one, exactly as the
@@ -1978,7 +1981,7 @@ export function schema(
 
 	function runSync(data: unknown, options?: ValidateOptions): RunOutcome {
 		if (hasAsyncRules) {
-			throw new Error(
+			throw new E_RUNE_ASYNC_RULE_NOT_AWAITED(
 				"rune: this schema has async rules (unique/exists/useAsync) — call validateResultAsync() (result-based) or validate() (throwing) instead of validateResult().",
 			);
 		}
@@ -2031,7 +2034,7 @@ export function schema(
 
 	/** Shape a root run's errors and output into a result. */
 	function verdict(
-		errors: ValidationError[],
+		errors: ValidationErrorNode[],
 		transformed: unknown,
 	): ValidationResult<unknown> {
 		if (errors.length > 0) return { valid: false, errors };
@@ -2057,12 +2060,12 @@ export function schema(
 	 * Error is what would make it worthless. upstream draws the line in the same
 	 * place — its `tryValidate` catches only its own ValidationError.
 	 */
-	function reportedFailure(outcome: RunOutcome): RuneValidationError {
+	function reportedFailure(outcome: RunOutcome): E_VALIDATION_ERROR {
 		const reported = outcome.createError?.();
 		if (reported === undefined) {
-			return new RuneValidationError(outcome.result.errors.map(toErrorNode));
+			return new E_VALIDATION_ERROR(outcome.result.errors.map(toErrorNode));
 		}
-		if (reported instanceof RuneValidationError) return reported;
+		if (reported instanceof E_VALIDATION_ERROR) return reported;
 		throw reported;
 	}
 
@@ -2070,7 +2073,7 @@ export function schema(
 	function thrownFailure(outcome: RunOutcome): Error {
 		return outcome.createError
 			? outcome.createError()
-			: new RuneValidationError(outcome.result.errors.map(toErrorNode));
+			: new E_VALIDATION_ERROR(outcome.result.errors.map(toErrorNode));
 	}
 
 	function validateOrThrow(data: unknown, options?: ValidateOptions): unknown {
@@ -2122,7 +2125,7 @@ export function schema(
 	function tryValidateSync(
 		data: unknown,
 		options?: ValidateOptions,
-	): [RuneValidationError, null] | [null, unknown] {
+	): [E_VALIDATION_ERROR, null] | [null, unknown] {
 		const outcome = runSync(data, options);
 		if (outcome.result.valid) return [null, outcome.result.data];
 		return [reportedFailure(outcome), null];
@@ -2132,7 +2135,7 @@ export function schema(
 	async function tryValidate(
 		data: unknown,
 		options?: ValidateOptions,
-	): Promise<[RuneValidationError, null] | [null, unknown]> {
+	): Promise<[E_VALIDATION_ERROR, null] | [null, unknown]> {
 		const outcome = await runAsync(data, options);
 		if (outcome.result.valid) return [null, outcome.result.data];
 		return [reportedFailure(outcome), null];
@@ -2212,13 +2215,7 @@ export function schema(
 			// schema instead was the lie this replaces.
 			output: (options?: JsonSchemaOptions): never => {
 				assertJsonSchemaTarget(options?.target);
-				throw new RuneError(
-					"NO_OUTPUT_SCHEMA",
-					"rune cannot describe a validator's OUTPUT as JSON Schema: a transform may produce anything.",
-					{
-						hint: "Use `~standard.jsonSchema.input()` for the shape rune accepts.",
-					},
-				);
+				throw new E_RUNE_NO_OUTPUT_SCHEMA();
 			},
 		},
 		validate: (
@@ -2254,7 +2251,7 @@ export function schema(
 		},
 		set errorReporter(reporter:
 			| ErrorReporterFactory
-			| ((error: ValidationError) => void)
+			| ((error: ValidationErrorNode) => void)
 			| null,) {
 			validatorErrorReporter = reporter;
 		},
@@ -2302,8 +2299,8 @@ export function create(
 		: schema(input);
 }
 
-/** Map an internal {@link ValidationError} to a {@link RuneErrorNode}. */
-function toErrorNode(error: ValidationError): RuneErrorNode {
+/** Map an internal {@link ValidationErrorNode} to a {@link RuneErrorNode}. */
+function toErrorNode(error: ValidationErrorNode): RuneErrorNode {
 	const node: RuneErrorNode = {
 		message: error.message,
 		rule: error.rule,
@@ -2981,10 +2978,9 @@ export class RuleChain<Output = unknown> {
 	 */
 	merge(extra: Record<string, RuleChain> | ConditionalGroup): this {
 		if (!this.#nestedSchema) {
-			throw new RuneError(
-				"NOT_AN_OBJECT",
+			throw new E_RUNE_NOT_AN_OBJECT(
 				"merge() needs an object() shape to merge into.",
-				{ hint: "rules.any().object({ … }).merge({ … })" },
+				"rules.any().object({ … }).merge({ … })",
 			);
 		}
 		if (isConditionalGroup(extra)) {
@@ -3037,10 +3033,9 @@ export class RuleChain<Output = unknown> {
 	): Record<string, RuleChain> {
 		const shape = this.getProperties();
 		if (!shape) {
-			throw new RuneError(
-				"NOT_AN_OBJECT",
+			throw new E_RUNE_NOT_AN_OBJECT(
 				"pick()/omit() need an object() shape to work on.",
-				{ hint: "rules.any().object({ … }).pick([…])" },
+				"rules.any().object({ … }).pick([…])",
 			);
 		}
 		return Object.fromEntries(
@@ -3058,13 +3053,7 @@ export class RuleChain<Output = unknown> {
 	 */
 	partial(keys?: readonly string[]): RuleChain<Output> {
 		if (this.#groups.length > 0 || this.#allowUnknown) {
-			throw new RuneError(
-				"PARTIAL_NOT_APPLICABLE",
-				"partial() cannot relax a shape that has groups or allowUnknownProperties().",
-				{
-					hint: "Relax the properties before grouping them, or list the keys partial() should touch.",
-				},
-			);
+			throw new E_RUNE_PARTIAL_NOT_APPLICABLE();
 		}
 		// `optional()` mutates and returns the SAME chain, so calling it on the
 		// stored properties made the source shape optional too — `base.partial()`
@@ -3086,12 +3075,9 @@ export class RuleChain<Output = unknown> {
 		transform: (shape: Record<string, RuleChain>) => Record<string, RuleChain>,
 	): RuleChain<Output> {
 		if (!this.#nestedSchema) {
-			throw new RuneError(
-				"NOT_AN_OBJECT",
+			throw new E_RUNE_NOT_AN_OBJECT(
 				"pick()/omit()/partial() need an object() shape to work on.",
-				{
-					hint: "Declare the shape first: rules.any().object({ … }).pick([…])",
-				},
+				"Declare the shape first: rules.any().object({ … }).pick([…])",
 			);
 		}
 		const next = this.#retype<Output>();
@@ -3687,11 +3673,7 @@ export class RuleChain<Output = unknown> {
 			__rune: "asyncRule",
 			async run(value: unknown, field: FieldContext): Promise<void> {
 				if (!hostResolver) {
-					throw new RuneError(
-						"NO_HOST_RESOLVER",
-						"activeUrl() needs a host resolver.",
-						{ hint: "Call bindHostResolver(resolver) once at boot." },
-					);
+					throw new E_RUNE_NO_HOST_RESOLVER();
 				}
 				let host: string;
 				try {
@@ -3809,13 +3791,7 @@ export class RuleChain<Output = unknown> {
 		const locales = options?.locale ? [options.locale].flat() : null;
 		for (const locale of locales ?? []) {
 			if (isMobileForLocale("", locale) === null) {
-				throw new RuneError(
-					"UNSUPPORTED_LOCALE",
-					`mobile(): no numbering plan for locale '${locale}'.`,
-					{
-						hint: `Supported: ${SUPPORTED_MOBILE_LOCALES.join(", ")}. Omit the locale for E.164, or use .regex().`,
-					},
-				);
+				throw new E_RUNE_UNSUPPORTED_LOCALE(locale, SUPPORTED_MOBILE_LOCALES);
 			}
 		}
 		return this.#stringRule(
@@ -3867,12 +3843,11 @@ export class RuleChain<Output = unknown> {
 		const countries = [options.countryCode].flat();
 		for (const country of countries) {
 			if (isPostalCode("", country) === null) {
-				throw new RuneError(
-					"UNSUPPORTED_COUNTRY",
-					`postalCode(): no pattern for country '${country}'.`,
-					{
-						hint: `Supported: ${SUPPORTED_POSTAL_CODES.join(", ")}. Use .regex() for others.`,
-					},
+				throw new E_RUNE_UNSUPPORTED_COUNTRY(
+					"postalCode",
+					"pattern",
+					country,
+					SUPPORTED_POSTAL_CODES,
 				);
 			}
 		}
@@ -3913,12 +3888,11 @@ export class RuleChain<Output = unknown> {
 		const countries = [options.countryCode].flat();
 		for (const country of countries) {
 			if (isVat("", country) === null) {
-				throw new RuneError(
-					"UNSUPPORTED_COUNTRY",
-					`vat(): no rule for country '${country}'.`,
-					{
-						hint: `Supported: ${SUPPORTED_VAT_COUNTRIES.join(", ")}. Use .regex() for others.`,
-					},
+				throw new E_RUNE_UNSUPPORTED_COUNTRY(
+					"vat",
+					"rule",
+					country,
+					SUPPORTED_VAT_COUNTRIES,
 				);
 			}
 		}
@@ -4068,12 +4042,11 @@ export class RuleChain<Output = unknown> {
 		const countries = [options.countryCode].flat();
 		for (const country of countries) {
 			if (isPassport("", country) === null) {
-				throw new RuneError(
-					"UNSUPPORTED_COUNTRY",
-					`passport(): no pattern for country '${country}'.`,
-					{
-						hint: `Supported: ${SUPPORTED_PASSPORTS.join(", ")}. Use .regex() for others.`,
-					},
+				throw new E_RUNE_UNSUPPORTED_COUNTRY(
+					"passport",
+					"pattern",
+					country,
+					SUPPORTED_PASSPORTS,
 				);
 			}
 		}
@@ -4418,10 +4391,9 @@ export class RuleChain<Output = unknown> {
 			return this.useAsync(rule);
 		}
 		if (rule?.__rune !== "rule" || typeof rule.run !== "function") {
-			throw new RuneError(
-				"INVALID_RULE",
+			throw new E_RUNE_INVALID_RULE(
 				"use() expects a compiled rule — call the factory first",
-				{ hint: "use(myRule()) or use(myRule(options)), not use(myRule)" },
+				"use(myRule()) or use(myRule(options)), not use(myRule)",
 			);
 		}
 		this.#pushUse(rule);
@@ -4434,10 +4406,9 @@ export class RuleChain<Output = unknown> {
 	 */
 	useAsync(rule: AsyncCompiledRule): this {
 		if (rule?.__rune !== "asyncRule" || typeof rule.run !== "function") {
-			throw new RuneError(
-				"INVALID_RULE",
+			throw new E_RUNE_INVALID_RULE(
 				"useAsync() expects a compiled async rule — call the factory first",
-				{ hint: "useAsync(myRule()) or useAsync(myRule(options))" },
+				"useAsync(myRule()) or useAsync(myRule(options))",
 			);
 		}
 		this.#pushAsync(rule);
@@ -4534,7 +4505,7 @@ export class RuleChain<Output = unknown> {
 	message(msg: string): this {
 		const target = this.#lastRule;
 		if (!target) {
-			throw new RuneError("NO_RULE", "message() must be called after a rule");
+			throw new E_RUNE_NO_RULE();
 		}
 		if (target.kind === "value") {
 			target.ref.message = msg;
@@ -4555,7 +4526,7 @@ export class RuleChain<Output = unknown> {
 		field: string,
 		value: unknown,
 		ctx: RunContext,
-		errors: ValidationError[],
+		errors: ValidationErrorNode[],
 		onMutate: (next: unknown) => void,
 	): FieldContext {
 		return {
@@ -4580,7 +4551,7 @@ export class RuleChain<Output = unknown> {
 			): void {
 				// upstream plugins pass the FIELD CONTEXT here, not a path. Accepting
 				// only a string let the object through and produced a
-				// `ValidationError.field` that was not a string at runtime.
+				// `ValidationErrorNode.field` that was not a string at runtime.
 				const target = reportedFieldPath(reportedField, field);
 				errors.push({
 					field: target,
@@ -4602,7 +4573,7 @@ export class RuleChain<Output = unknown> {
 		value: unknown,
 		ctx: RunContext,
 		pending?: PendingAsync[],
-	): ValidationError[] {
+	): ValidationErrorNode[] {
 		// An implicit ASYNC rule polices an absent value too, so it has to be
 		// queued here as well — filtering `#useRules` alone dropped it silently.
 		if (pending && this.#asyncRules.some((rule) => rule.implicit)) {
@@ -4610,7 +4581,7 @@ export class RuleChain<Output = unknown> {
 		}
 		const implicitRules = this.#useRules.filter((rule) => rule.implicit);
 		if (implicitRules.length === 0) return [];
-		const errors: ValidationError[] = [];
+		const errors: ValidationErrorNode[] = [];
 		const fieldCtx = this.#makeFieldContext(
 			field,
 			value,
@@ -4706,7 +4677,7 @@ export class RuleChain<Output = unknown> {
 		rawValue: unknown,
 		ctx: RunContext = EMPTY_RUN_CONTEXT,
 		pending?: PendingAsync[],
-	): { errors: ValidationError[]; transformed: unknown } {
+	): { errors: ValidationErrorNode[]; transformed: unknown } {
 		// 0. Pre-validation parse() transforms run on the raw value first. upstream
 		//    hands them `(value, { data, parent, meta })` — without the context a
 		//    parser cannot look at a sibling, which is half its purpose.
@@ -4953,7 +4924,7 @@ export class RuleChain<Output = unknown> {
 				if (this.#unionNoMatch) {
 					// The callback owns the reporting: whatever it pushes is the
 					// error, and pushing nothing means it handled the case itself.
-					const reported: ValidationError[] = [];
+					const reported: ValidationErrorNode[] = [];
 					this.#unionNoMatch(
 						transformed,
 						this.#makeFieldContext(field, transformed, ctx, reported, () => {}),
@@ -5019,7 +4990,7 @@ export class RuleChain<Output = unknown> {
 		field: string,
 		transformed: unknown,
 		ctx: RunContext,
-		errors: ValidationError[],
+		errors: ValidationErrorNode[],
 	): unknown {
 		// Set per iteration so `report` can substitute the `.message()` override of
 		// the rule currently running — these rules carry their text inside `run`.
@@ -5074,8 +5045,8 @@ export class RuleChain<Output = unknown> {
 		field: string,
 		transformed: unknown,
 		ctx: RunContext,
-	): Promise<ValidationError[]> {
-		const errors: ValidationError[] = [];
+	): Promise<ValidationErrorNode[]> {
+		const errors: ValidationErrorNode[] = [];
 		let override: string | undefined;
 		let current = transformed;
 		const fieldCtx = this.#makeFieldContext(
@@ -5116,7 +5087,7 @@ export class RuleChain<Output = unknown> {
 		return errors;
 	}
 
-	#requiredError(field: string, ctx: RunContext): ValidationError {
+	#requiredError(field: string, ctx: RunContext): ValidationErrorNode {
 		return {
 			field,
 			rule: "required",
@@ -5129,7 +5100,7 @@ export class RuleChain<Output = unknown> {
 		field: string,
 		value: unknown,
 		ctx: RunContext,
-	): ValidationError | null {
+	): ValidationErrorNode | null {
 		let context: FieldContext | undefined;
 		const fieldContext = (): FieldContext =>
 			(context ??= this.#makeFieldContext(field, value, ctx, [], () => {}));
@@ -5154,8 +5125,8 @@ export class RuleChain<Output = unknown> {
 		field: string,
 		transformed: unknown,
 		ctx: RunContext,
-	): ValidationError[] {
-		const errors: ValidationError[] = [];
+	): ValidationErrorNode[] {
+		const errors: ValidationErrorNode[] = [];
 		// Built once and only if a rule actually reads it: most rules take the
 		// value alone, and a context per rule per field is pure waste.
 		let context: FieldContext | undefined;
@@ -5183,7 +5154,7 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/** Internal: validate a field value against all rules. */
-	_validate(field: string, value: unknown): ValidationError[] {
+	_validate(field: string, value: unknown): ValidationErrorNode[] {
 		return this._validateWithTransform(field, value).errors;
 	}
 
@@ -5382,18 +5353,10 @@ export const rules = {
 			);
 			const name = typeRule?.name;
 			if (name === undefined) {
-				throw new RuneError(
-					"NO_TYPE_RULE",
-					"unionOfTypes() needs every branch to declare a type (string/number/…).",
-					{ hint: "Use union([...]) for predicate-based branches." },
-				);
+				throw new E_RUNE_NO_TYPE_RULE();
 			}
 			if (seen.has(name)) {
-				throw new RuneError(
-					"DUPLICATE_UNION_TYPE",
-					`unionOfTypes() got two '${name}' branches — the second can never be reached.`,
-					{ hint: "Give each branch a distinct type, or use union([...])." },
-				);
+				throw new E_RUNE_DUPLICATE_UNION_TYPE(name);
 			}
 			seen.add(name);
 		}

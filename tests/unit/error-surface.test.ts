@@ -8,11 +8,16 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { RuneValidationError } from "../../src/errors.js";
-import { RuneNativeRequiredError } from "../../src/native.js";
+import {
+	errors,
+	rules,
+	SimpleErrorReporter,
+	schema,
+	ValidationError,
+} from "../../src/index.js";
 
-describe("rune > RuneValidationError as something else reads it", () => {
-	const error = new RuneValidationError([
+describe("rune > errors.E_VALIDATION_ERROR as something else reads it", () => {
+	const error = new errors.E_VALIDATION_ERROR([
 		{
 			field: "email",
 			rule: "email",
@@ -22,7 +27,7 @@ describe("rune > RuneValidationError as something else reads it", () => {
 
 	it("stringifies with its code, so a log line identifies the failure", () => {
 		expect(error.toString()).toBe(
-			"RuneValidationError [E_VALIDATION_ERROR]: Validation failure",
+			"E_VALIDATION_ERROR [E_VALIDATION_ERROR]: Validation failure",
 		);
 	});
 
@@ -30,7 +35,7 @@ describe("rune > RuneValidationError as something else reads it", () => {
 		// Without the tag this reads "[object Error]", which loses the one thing
 		// worth knowing when the value arrives untyped.
 		expect(Object.prototype.toString.call(error)).toBe(
-			"[object RuneValidationError]",
+			"[object E_VALIDATION_ERROR]",
 		);
 	});
 
@@ -40,19 +45,74 @@ describe("rune > RuneValidationError as something else reads it", () => {
 	});
 });
 
-describe("rune > RuneNativeRequiredError", () => {
+describe("rune > errors.E_RUNE_NAPI_REQUIRED", () => {
 	it("says what is missing AND what to do about it", () => {
 		// This error only ever surfaces on a machine where the binary did not
 		// load, which is exactly the machine whose owner cannot read our source
 		// to find out why. The remedy has to be in the message.
-		const error = new RuneNativeRequiredError();
+		const error = new errors.E_RUNE_NAPI_REQUIRED(["binary not found"]);
 		expect(error.code).toBe("E_RUNE_NAPI_REQUIRED");
-		expect(error.name).toBe("RuneNativeRequiredError");
 		expect(error.message).toContain("pnpm build:napi");
 		// And a reason, not just a restatement of the failure.
-		expect(error.message.length).toBeGreaterThan(
-			"[E_RUNE_NAPI_REQUIRED] The Rust validation engine is required but not loaded"
-				.length,
-		);
+		expect(error.message).toContain("binary not found");
+	});
+});
+
+describe("rune > ValidationError, the class upstream exports", () => {
+	it("is errors.E_VALIDATION_ERROR under its class name", () => {
+		expect(ValidationError).toBe(errors.E_VALIDATION_ERROR);
+		const error = new ValidationError([]);
+		expect(error).toBeInstanceOf(errors.E_VALIDATION_ERROR);
+		expect(error.status).toBe(422);
+		expect(error.code).toBe("E_VALIDATION_ERROR");
+		expect(error.message).toBe("Validation failure");
+	});
+});
+
+describe("rune > SimpleErrorReporter", () => {
+	const s = schema({
+		email: rules.string().email(),
+		tags: rules.array(rules.string().minLength(3)),
+	});
+
+	it("collects each failure as a node and builds the validation error", async () => {
+		const reporters: SimpleErrorReporter[] = [];
+		const failure = await s
+			.validate(
+				{ email: "nope", tags: ["ok!", "x"] },
+				{
+					errorReporter: () => {
+						const reporter = new SimpleErrorReporter();
+						reporters.push(reporter);
+						return reporter;
+					},
+				},
+			)
+			.catch((error: unknown) => error);
+
+		expect(failure).toBeInstanceOf(ValidationError);
+		const reporter = reporters[0];
+		expect(reporter?.hasErrors).toBe(true);
+		expect(reporter?.errors).toEqual([
+			expect.objectContaining({ field: "email", rule: "email" }),
+			expect.objectContaining({ field: "tags.1", rule: "minLength", index: 1 }),
+		]);
+		if (failure instanceof ValidationError)
+			expect(failure.messages).toBe(reporter?.errors);
+	});
+
+	it("takes a dotted path where no field context is at hand", () => {
+		const reporter = new SimpleErrorReporter();
+		expect(reporter.hasErrors).toBe(false);
+		reporter.report("Required", "required", "user.email", { min: 1 });
+		expect(reporter.errors).toEqual([
+			{
+				message: "Required",
+				rule: "required",
+				field: "user.email",
+				meta: { min: 1 },
+			},
+		]);
+		expect(reporter.createError().messages).toBe(reporter.errors);
 	});
 });

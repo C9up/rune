@@ -49,7 +49,7 @@ export type {
 	SchemaIntrospection,
 	UnionBranch,
 	ValidateOptions,
-	ValidationError,
+	ValidationErrorNode,
 	ValidationMessageParams,
 	ValidationResult,
 	ValidationSchema,

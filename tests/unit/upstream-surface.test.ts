@@ -8,10 +8,21 @@
  * was never read, or a `requiredIfExists` that was never evaluated, is a shape
  * in the type definitions rather than a behaviour.
  */
+
 import { afterEach, describe, expect, it } from "vitest";
+/**
+ * The parts of the upstream surface rune ships but never ran: the `tryValidate`
+ * tuple, the global accessors behind `errorReporter` and friends, boolean
+ * coercion, the conditional-required family, and the date comparisons that
+ * read a sibling field.
+ *
+ * These are all reachable from a consumer's first line of code. A getter that
+ * was never read, or a `requiredIfExists` that was never evaluated, is a shape
+ * in the type definitions rather than a behaviour.
+ */
 import rune, {
+	errors,
 	type RuleChain,
-	RuneValidationError,
 	rules,
 	schema,
 } from "../../src/index.js";
@@ -42,7 +53,7 @@ describe("rune > tryValidate — the tuple form", () => {
 		const [error, data] = s.tryValidateSync({ email: "not an email" });
 
 		expect(data).toBeNull();
-		expect(error).toBeInstanceOf(RuneValidationError);
+		expect(error).toBeInstanceOf(errors.E_VALIDATION_ERROR);
 		expect(defined(error?.messages[0]).field).toBe("email");
 	});
 
@@ -52,12 +63,14 @@ describe("rune > tryValidate — the tuple form", () => {
 			{ email: "ada@acme.test" },
 		]);
 		const [error] = await s.tryValidate({ email: "nope" });
-		expect(error).toBeInstanceOf(RuneValidationError);
+		expect(error).toBeInstanceOf(errors.E_VALIDATION_ERROR);
 	});
 
 	it("never throws, which is the whole reason it exists", () => {
 		expect(() => s.tryValidateSync(null)).not.toThrow();
-		expect(s.tryValidateSync(null)[0]).toBeInstanceOf(RuneValidationError);
+		expect(s.tryValidateSync(null)[0]).toBeInstanceOf(
+			errors.E_VALIDATION_ERROR,
+		);
 	});
 });
 

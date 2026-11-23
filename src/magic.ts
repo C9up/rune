@@ -13,7 +13,7 @@
 
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { RuneError } from "./errors.js";
+import { E_RUNE_NOT_A_REGULAR_FILE } from "./errors.js";
 
 /** One magic-number signature. */
 interface Signature {
@@ -171,10 +171,7 @@ export async function readHead(
 	);
 	try {
 		if (!(await handle.stat()).isFile()) {
-			throw new RuneError(
-				"NOT_A_REGULAR_FILE",
-				`'${path}' is not a regular file, so it is not an upload.`,
-			);
+			throw new E_RUNE_NOT_A_REGULAR_FILE([path]);
 		}
 		const buffer = new Uint8Array(length);
 		const { bytesRead } = await handle.read(buffer, 0, length, 0);
