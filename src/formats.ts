@@ -417,69 +417,249 @@ export function alphaPattern(base: string, options: AlphaOptions = {}): RegExp {
 	return new RegExp(`^[${base}${extra}]+$`);
 }
 
-/** Options accepted by `url()` — the validator.js names upstream forwards. */
+/**
+ * Options accepted by `url()` — validator.js's `isURL` options, which
+ * upstream forwards as they are. Same names, same defaults.
+ */
 export interface UrlOptions {
-	/** validator.js spelling — takes precedence over the camelCase alias. */
-	require_protocol?: boolean;
-	/** validator.js spelling. */
-	require_tld?: boolean;
-	/** validator.js spelling. */
-	allow_underscores?: boolean;
-	/**
-	 * Require an explicit scheme. Defaults to `false`, like validator.js: a
-	 * scheme-less `example.com` is read as `https://example.com`.
-	 */
-	requireProtocol?: boolean;
-	/** Allowed schemes, without the colon. Defaults to http/https/ftp. */
+	/** Allowed schemes, lowercase, without the colon. Defaults to http/https/ftp. */
 	protocols?: string[];
-	/** Require a dotted host (rejects `http://localhost`). Defaults to `true`. */
+	/** Require a dotted host with a TLD (refuses `http://localhost`). Defaults to `true`. */
+	require_tld?: boolean;
+	/** Require an explicit scheme. Defaults to `false`: `example.com` is a URL. */
+	require_protocol?: boolean;
+	/** Require a host. Defaults to `true`. */
+	require_host?: boolean;
+	/** Require a port. Defaults to `false`. */
+	require_port?: boolean;
+	/**
+	 * Refuse a scheme that is not in {@link protocols}. Defaults to `true`;
+	 * `false` accepts any scheme, `javascript:` included.
+	 */
+	require_valid_protocol?: boolean;
+	/** Allow `_` in the host. Defaults to `false`. */
+	allow_underscores?: boolean;
+	/** Allow the host to end with a `.`. Defaults to `false`. */
+	allow_trailing_dot?: boolean;
+	/** Allow a protocol-relative `//host`. Defaults to `false`. */
+	allow_protocol_relative_urls?: boolean;
+	/** Allow a `#fragment`. Defaults to `true`. */
+	allow_fragments?: boolean;
+	/** Allow a `?query`. Defaults to `true`. */
+	allow_query_components?: boolean;
+	/** Refuse `user:password@host`. Defaults to `false`. */
+	disallow_auth?: boolean;
+	/** Check the length against {@link max_allowed_length}. Defaults to `true`. */
+	validate_length?: boolean;
+	/** Longest URL accepted. Defaults to 2084. */
+	max_allowed_length?: number;
+	/** When set, the host must be one of these, and nothing else is checked on it. */
+	host_whitelist?: ReadonlyArray<string | RegExp>;
+	/** Hosts refused. */
+	host_blacklist?: ReadonlyArray<string | RegExp>;
+	/** camelCase alias of {@link require_protocol}, which wins when both are set. */
+	requireProtocol?: boolean;
+	/** camelCase alias of {@link require_tld}, which wins when both are set. */
 	requireTld?: boolean;
-	/** Allow `_` in the host. */
+	/** camelCase alias of {@link allow_underscores}, which wins when both are set. */
 	allowUnderscores?: boolean;
 }
 
+/** validator.js's default scheme list. */
+const DEFAULT_URL_PROTOCOLS: readonly string[] = ["http", "https", "ftp"];
+/** validator.js's default for `max_allowed_length`. */
+const DEFAULT_URL_MAX_LENGTH = 2084;
+/** A leading `<scheme>:`, whether or not `//` follows. */
+const URL_SCHEME_RE = /^([a-z][a-z0-9+\-.]*):/i;
+/** What may stand before the `@` of plain credentials. */
+const URL_CREDENTIALS_RE = /^[a-zA-Z0-9\-_.%:]*$/;
+/** A percent-escape: credentials that carry one may hide a script. */
+const URL_PERCENT_ESCAPE_RE = /%[0-9a-fA-F]{2}/;
+/** `[ipv6]` or `[ipv6]:port`. */
+const URL_BRACKETED_IPV6_RE = /^\[([^\]]+)\](?::([0-9]+))?$/;
+
+/**
+ * Is the `<word>:` that opens a URL its scheme?
+ *
+ * `afterColon` is what follows the colon. `//` settles it. Without it, the
+ * word is a host or a user name in exactly two cases: a port follows
+ * (`host:8080`), or plain credentials do (`user:password@host`). Anything
+ * else is a scheme — `javascript:alert();'@host'` included, whose script
+ * would otherwise be read as the password of a URL to `host`.
+ */
+function opensWithScheme(afterColon: string): boolean {
+	if (afterColon.startsWith("//")) return true;
+	const slash = afterColon.indexOf("/");
+	const beforeSlash = slash === -1 ? afterColon : afterColon.slice(0, slash);
+	const at = beforeSlash.indexOf("@");
+	if (at === -1) return !/^[0-9]/.test(afterColon);
+	const credentials = beforeSlash.slice(0, at);
+	return (
+		!URL_CREDENTIALS_RE.test(credentials) ||
+		URL_PERCENT_ESCAPE_RE.test(credentials)
+	);
+}
+
+/** Is `host` one of `list` — an exact string, or a pattern that matches? */
+function hostListed(
+	host: string,
+	list: ReadonlyArray<string | RegExp>,
+): boolean {
+	return list.some((entry) =>
+		typeof entry === "string" ? entry === host : entry.test(host),
+	);
+}
+
+/**
+ * A fully qualified domain name, as validator.js's `isFQDN` reads it for a
+ * URL host: dot-separated labels, and by default a TLD of two letters or more
+ * (or a punycode `xn--…` one). A numeric last label is never a domain.
+ */
+function isFqdn(
+	host: string,
+	options: {
+		requireTld: boolean;
+		allowUnderscores: boolean;
+		allowTrailingDot: boolean;
+	},
+): boolean {
+	const name =
+		options.allowTrailingDot && host.endsWith(".") ? host.slice(0, -1) : host;
+	const labels = name.split(".");
+	const tld = labels.at(-1) ?? "";
+	if (options.requireTld && (labels.length < 2 || !TLD_RE.test(tld))) {
+		return false;
+	}
+	if (/^\d+$/.test(tld)) return false;
+	return labels.every((label) => isDnsLabel(label, options.allowUnderscores));
+}
+
+/**
+ * Validate a URL — a port of validator.js 13's `isURL`, the function upstream
+ * calls, step for step.
+ *
+ * The value is never rebuilt and never handed to the WHATWG parser: that
+ * parser reads `javascript:x;'@host'` prefixed with `https://` as a URL to
+ * `host` with credentials, which is how a script URL once passed. The scheme
+ * of the value as written decides.
+ *
+ * NAMED DEVIATION (stricter): an IPv6 host with a zone id (`[fe80::1%eth0]`)
+ * is refused; validator.js accepts it. {@link isIpAddress} is the one IP
+ * check of this package and does not read zone ids.
+ */
 export function isUrlWithOptions(
 	value: string,
 	options: UrlOptions = {},
 ): boolean {
-	// upstream forwards validator.js options verbatim, so a transcribed Adonis
-	// validator arrives in snake_case. Both spellings are honoured, snake_case
-	// first, so neither form is silently ignored.
+	if (value === "" || /[\s<>]/.test(value)) return false;
+	// A `mailto:` address would otherwise read as `user:password@host`.
+	if (value.startsWith("mailto:")) return false;
+	// Upstream forwards validator.js options verbatim, so a transcribed
+	// validator arrives in snake_case. The camelCase aliases stay; snake_case
+	// wins when both are given.
 	const requireProtocol =
 		(options.require_protocol ?? options.requireProtocol) === true;
-	// validator.js's up-front refusals: whitespace and angle brackets, a
-	// `mailto:` (which would otherwise read as `user:password@host`), a
-	// protocol-relative `//host`, and anything past 2083 characters.
+	const requireTld = (options.require_tld ?? options.requireTld) !== false;
+	const allowUnderscores =
+		(options.allow_underscores ?? options.allowUnderscores) === true;
+	const requireHost = options.require_host !== false;
+	const protocols = options.protocols ?? DEFAULT_URL_PROTOCOLS;
+
 	if (
-		/[\s<>]/.test(value) ||
-		value.startsWith("mailto:") ||
-		value.startsWith("//") ||
-		value.length >= 2083
+		options.validate_length !== false &&
+		value.length > (options.max_allowed_length ?? DEFAULT_URL_MAX_LENGTH)
 	) {
 		return false;
 	}
-	// The reference default is http/https/ftp. Narrow it per call with
-	// `{ protocols: ["https"] }` — dropping ftp here refused a valid URL.
-	const protocols = options.protocols ?? ["http", "https", "ftp"];
-	const candidate =
-		requireProtocol || /^[a-z][a-z0-9+.-]*:\/\//i.test(value)
-			? value
-			: `https://${value}`;
-	let url: URL;
-	try {
-		url = new URL(candidate);
-	} catch {
+	if (options.allow_fragments === false && value.includes("#")) return false;
+	if (
+		options.allow_query_components === false &&
+		(value.includes("?") || value.includes("&"))
+	) {
 		return false;
 	}
-	if (requireProtocol && !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
-	if (!protocols.includes(url.protocol.replace(/:$/, ""))) return false;
-	if (url.hostname.length === 0) return false;
-	const allowUnderscores =
-		options.allow_underscores ?? options.allowUnderscores ?? false;
-	if (!allowUnderscores && url.hostname.includes("_")) return false;
-	const requireTld = (options.require_tld ?? options.requireTld) !== false;
-	if (requireTld && !url.hostname.includes(".")) return false;
-	return true;
+
+	// Only the scheme and the authority are judged; path, query and fragment
+	// are free.
+	let rest = value.split("#")[0] ?? "";
+	rest = rest.split("?")[0] ?? "";
+
+	let explicitScheme = false;
+	const scheme = URL_SCHEME_RE.exec(rest);
+	if (scheme !== null && opensWithScheme(rest.slice(scheme[0].length))) {
+		explicitScheme = true;
+		const protocol = (scheme[1] ?? "").toLowerCase();
+		if (
+			options.require_valid_protocol !== false &&
+			!protocols.includes(protocol)
+		) {
+			return false;
+		}
+		rest = rest.slice(scheme[0].length);
+	} else if (requireProtocol) {
+		return false;
+	}
+
+	// After a scheme `//` is the separator; without one it makes the value
+	// protocol-relative.
+	if (rest.startsWith("//")) {
+		if (!explicitScheme && options.allow_protocol_relative_urls !== true) {
+			return false;
+		}
+		rest = rest.slice(2);
+	}
+	if (rest === "") return false;
+
+	const authority = rest.split("/")[0] ?? "";
+	if (authority === "" && !requireHost) return true;
+
+	const atParts = authority.split("@");
+	if (atParts.length > 1) {
+		if (options.disallow_auth === true) return false;
+		const credentials = atParts.shift() ?? "";
+		if (credentials === "") return false;
+		const [user, password, ...extra] = credentials.split(":");
+		if (extra.length > 0) return false;
+		if (user === "" && password === "") return false;
+	}
+	const hostAndPort = atParts.join("@");
+
+	let host: string;
+	let ipv6: string | null = null;
+	let port: string | null = null;
+	const bracketed = URL_BRACKETED_IPV6_RE.exec(hostAndPort);
+	if (bracketed !== null) {
+		host = "";
+		ipv6 = bracketed[1] ?? null;
+		port = bracketed[2] ?? null;
+	} else {
+		const [name = "", ...portParts] = hostAndPort.split(":");
+		host = name;
+		if (portParts.length > 0) port = portParts.join(":");
+	}
+
+	if (port !== null && port.length > 0) {
+		const number = Number.parseInt(port, 10);
+		if (!/^[0-9]+$/.test(port) || number <= 0 || number > 65535) return false;
+	} else if (options.require_port === true) {
+		return false;
+	}
+
+	if (options.host_whitelist) return hostListed(host, options.host_whitelist);
+	if (host === "" && !requireHost) return true;
+	const validHost =
+		isIpAddress(host) ||
+		isFqdn(host, {
+			requireTld,
+			allowUnderscores,
+			allowTrailingDot: options.allow_trailing_dot === true,
+		}) ||
+		(ipv6 !== null && isIpAddress(ipv6, 6));
+	if (!validHost) return false;
+	return !(
+		options.host_blacklist &&
+		hostListed(host || (ipv6 ?? ""), options.host_blacklist)
+	);
 }
 
 /** Locales `mobile()` can check a numbering plan for. */
@@ -597,13 +777,15 @@ function closingQuoteIndex(input: string): number {
 /**
  * A single domain label as validator.js's `isFQDN` takes it: letters (an
  * internationalised domain's included), digits and inner hyphens, 1..63
- * characters, no full-width forms, no underscore.
+ * characters, no full-width forms, and no underscore unless a URL host
+ * allows it.
  */
-function isDnsLabel(label: string): boolean {
+function isDnsLabel(label: string, allowUnderscores = false): boolean {
 	if (label.length === 0 || label.length > 63) return false;
 	if (label.startsWith("-") || label.endsWith("-")) return false;
 	if (/[\uff01-\uff5e]/.test(label)) return false;
-	return /^[a-z\u00a1-\uffff0-9-]+$/i.test(label);
+	if (!allowUnderscores && label.includes("_")) return false;
+	return /^[a-z_\u00a1-\uffff0-9-]+$/i.test(label);
 }
 
 /** UTF-8 byte length — the unit RFC 5321's 64/254 caps are written in. */
@@ -678,7 +860,7 @@ export function isEmail(value: string, options: EmailOptions = {}): boolean {
 		if (labels.length < 2) return false;
 		if (!TLD_RE.test(labels.at(-1) ?? "")) return false;
 	}
-	if (!labels.every(isDnsLabel)) return false;
+	if (!labels.every((label) => isDnsLabel(label))) return false;
 
 	if (
 		options.domain_specific_validation &&

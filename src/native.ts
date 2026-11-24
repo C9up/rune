@@ -1,9 +1,16 @@
 /**
- * Native validation loader — loads the Rust NAPI binary.
+ * Native validation loader.
+ *
+ * Loads the local build (`index.<suffix>.node` at the package root, written by
+ * `scripts/copy-napi.mjs`) when there is one, else the platform package
+ * `@c9up/rune-<suffix>` the package manager installed as an optional
+ * dependency. A refusal says what to do in its message; the load error is its
+ * `cause`.
  *
  * @implements FR40
  */
 
+import { arch, platform } from "node:process";
 import {
 	E_RUNE_NAPI_INVALID_RESPONSE,
 	E_RUNE_NAPI_NOT_FOUND,
@@ -13,8 +20,15 @@ import {
 import {
 	hasFunctions,
 	loadNativeBinary,
-	unavailableReason as vendorUnavailableReason,
+	muslHint,
+	supportedTargets,
 } from "./vendor/nativeBinary.js";
+
+/**
+ * The npm name the platform packages derive from: `@c9up/rune-<suffix>`,
+ * one per target, each an optional dependency pinned to this version.
+ */
+const PACKAGE_NAME = "@c9up/rune";
 
 /**
  * What this package calls on the engine, typed as the Rust declares it.
@@ -35,9 +49,38 @@ function isNativeRune(value: unknown): value is NativeRune {
 	return hasFunctions(value, NATIVE_CALLS);
 }
 
-const attempt = loadNativeBinary(isNativeRune, NATIVE_CALLS);
-const native = attempt.loaded ? attempt.binary : undefined;
-const loadError = attempt.loaded ? undefined : attempt.cause;
+const attempt = loadNativeBinary(isNativeRune, NATIVE_CALLS, {
+	packageName: PACKAGE_NAME,
+});
+
+/**
+ * What to do about a missing engine, phrased for whoever has to fix it.
+ *
+ * An application installs the platform package; a checkout of rune builds
+ * the local binary. The load error itself is not in here: it names paths on
+ * the host, so it travels as the refusal's `cause` instead of its message.
+ */
+function remedy(
+	suffix: string | undefined,
+	platformPackage: string | undefined,
+): string {
+	if (suffix === undefined) {
+		return `no prebuilt binary for ${platform}-${arch}; rune ships one for ${supportedTargets().join(", ")}.`;
+	}
+	if (platformPackage === undefined) {
+		return `index.${suffix}.node failed to load. Rebuild it: cd packages/rune && pnpm build:napi`;
+	}
+	return (
+		`install ${platformPackage} at the exact version of ${PACKAGE_NAME}: it is the optional dependency that carries the ${suffix} binary, ` +
+		"and an install that omits optional dependencies skips it. " +
+		`In a checkout of rune, build it instead: pnpm build:napi.${muslHint()}`
+	);
+}
+
+/** The options of a refusal: the load error as its cause, when there is one. */
+function causeOf(cause: unknown): { cause: unknown } | undefined {
+	return cause === undefined ? undefined : { cause };
+}
 
 /** One failure as the engine reports it. */
 export interface NativeError {
@@ -56,14 +99,15 @@ export function validateNative(requestJson: string): {
 	errors: NativeError[];
 	data?: Record<string, unknown>;
 } {
-	if (!native) {
-		throw new E_RUNE_NAPI_NOT_FOUND([String(loadError ?? "binary not found")], {
-			cause: loadError,
-		});
+	if (!attempt.loaded) {
+		throw new E_RUNE_NAPI_NOT_FOUND(
+			[remedy(attempt.suffix, attempt.platformPackage)],
+			causeOf(attempt.cause),
+		);
 	}
 	let response: string;
 	try {
-		response = native.validate(requestJson);
+		response = attempt.binary.validate(requestJson);
 	} catch (cause) {
 		throw new E_RUNE_NAPI_REQUEST_REFUSED(cause);
 	}
@@ -75,15 +119,7 @@ export function validateNative(requestJson: string): {
 }
 
 export function isNativeAvailable(): boolean {
-	return native !== undefined;
-}
-
-/** Why the engine could not be loaded, phrased for whoever has to fix it. */
-function unavailableReason(): string {
-	if (loadError !== undefined) {
-		return `failed to load (${loadError instanceof Error ? loadError.message : String(loadError)})`;
-	}
-	return vendorUnavailableReason();
+	return attempt.loaded;
 }
 
 /**
@@ -101,6 +137,9 @@ function unavailableReason(): string {
  * implementation, not a second one.
  */
 export function assertNativeAvailable(): void {
-	if (native === undefined)
-		throw new E_RUNE_NAPI_REQUIRED([unavailableReason()]);
+	if (!attempt.loaded)
+		throw new E_RUNE_NAPI_REQUIRED(
+			[remedy(attempt.suffix, attempt.platformPackage)],
+			causeOf(attempt.cause),
+		);
 }

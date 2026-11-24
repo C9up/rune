@@ -23,6 +23,7 @@ import {
 	E_RUNE_INVALID_ERROR_REPORTER,
 	E_RUNE_INVALID_RULE,
 	E_RUNE_INVALID_SIZE,
+	E_RUNE_NAPI_REQUEST_REFUSED,
 	E_RUNE_NO_DATABASE_RESOLVER,
 	E_RUNE_NO_HOST_RESOLVER,
 	E_RUNE_NO_OUTPUT_SCHEMA,
@@ -713,6 +714,36 @@ interface PendingAsync {
 }
 
 /**
+ * Where a chain's output sits in its parent. A `transform()` runs once the
+ * whole payload is valid, so it reads the validated value from there and
+ * writes its result back.
+ */
+interface OutputSlot {
+	read(): unknown;
+	write(value: unknown): void;
+}
+
+/** What one validation run collects besides its errors. */
+interface Walk {
+	/** Async rules to await; absent on a synchronous run. */
+	pending?: PendingAsync[];
+	/**
+	 * The `transform()` callbacks of the chains that passed, children before
+	 * parents. The run applies them last, and only to a valid payload.
+	 */
+	outputs: Array<() => void>;
+}
+
+/**
+ * Append `source` to `target` one item at a time. `target.push(...source)`
+ * passes every item as an argument, and past the engine's argument limit
+ * (about 125 000) that throws a `RangeError` instead of reporting the errors.
+ */
+function appendAll<T>(target: T[], source: readonly T[]): void {
+	for (const item of source) target.push(item);
+}
+
+/**
  * Global output mapper for `rules.date()` — upstream's date-transform seam.
  *
  * rune has zero runtime dependencies, so a validated date is a plain `Date`. A
@@ -1101,8 +1132,9 @@ export type ParseContext = Pick<FieldContext, "data" | "parent" | "meta">;
 
 /**
  * A conditional set of properties merged into an object (upstream `group`).
- * The first branch whose predicate matches contributes its shape; `otherwise`
- * is the unconditional fallback.
+ * The first branch whose predicate matches contributes its shape, else the
+ * `group.else` branch. When no branch applies, the object is refused with
+ * `unionGroup`, unless `otherwise()` set a callback that decides instead.
  */
 export interface ConditionalGroup {
 	readonly __rune: "group";
@@ -1110,11 +1142,19 @@ export interface ConditionalGroup {
 		predicate: ((data: Record<string, unknown>) => boolean) | null;
 		shape: Record<string, RuleChain>;
 	}>;
+	/** The callback `otherwise()` set, or `null` for the `unionGroup` error. */
+	noMatch: UnionNoMatchCallback | null;
+	/**
+	 * What to do when no branch applies (upstream `group().otherwise()`). The
+	 * callback receives the object and its field, and reports what it wants.
+	 */
+	otherwise(callback: UnionNoMatchCallback): ConditionalGroup;
 }
 
 /**
- * Called when no union branch matched (upstream `UnionNoMatchCallback`). Report
- * through the field context; reporting nothing suppresses the generic error.
+ * Called when no union or group branch applies (upstream
+ * `UnionNoMatchCallback`). Report through the field context; reporting
+ * nothing suppresses the generic error.
  */
 export type UnionNoMatchCallback = (
 	value: unknown,
@@ -1389,12 +1429,26 @@ function isConditionalGroup(
 
 /** Build a conditional group (upstream `group([...])`). */
 export function group(
-	branches: ReadonlyArray<{
-		predicate: ((data: Record<string, unknown>) => boolean) | null;
-		shape: Record<string, RuleChain>;
-	}>,
+	branches: ConditionalGroup["branches"],
 ): ConditionalGroup {
-	return { __rune: "group", branches };
+	return buildGroup(branches, null);
+}
+
+/** A group with its no-match callback already decided. */
+function buildGroup(
+	branches: ConditionalGroup["branches"],
+	noMatch: UnionNoMatchCallback | null,
+): ConditionalGroup {
+	const built: ConditionalGroup = {
+		__rune: "group",
+		branches,
+		noMatch,
+		otherwise(callback) {
+			built.noMatch = callback;
+			return built;
+		},
+	};
+	return built;
 }
 
 /** A predicate-guarded group branch (`group.if`). */
@@ -1832,7 +1886,8 @@ function detectHasCustomRules(fields: Record<string, RuleChain>): boolean {
 		if (chain.asyncRules.length > 0) return true; // async rule — TS-only, needs validateResultAsync
 		if (chain.hasConditionalRequired) return true; // requiredWhen — TS-only
 		if (chain.preTransforms.length > 0) return true; // .parse() — TS-only
-		if (chain.transforms.length > 0) return true; // .transform() — Rust gets only the NAME, can't run a JS fn
+		if (chain.transforms.length > 0) return true; // trim() and the other mutators — Rust gets only the NAME, can't run a JS fn
+		if (chain.outputTransforms.length > 0) return true; // .transform() — a JS callback
 		if (chain.isNullable) return true; // .nullable() — the flag is not sent to the Rust engine
 		return chain.rules.some((r) => {
 			if (!NATIVE_RULES.has(r.name)) return true; // Rust cannot run it identically
@@ -1921,11 +1976,21 @@ export function schema(
 	// hands its own chain, and walking only its properties dropped everything
 	// set on the object itself — `denyUnknownProperties()`, `merge(group)`,
 	// `toCamelCase()` — exactly as a nested object would not have.
-	const root = rootChain ?? new RuleChain().object(fields);
+	const declared = rootChain ?? new RuleChain().object(fields);
+	// The validator is fixed HERE, as upstream fixes it by compiling at
+	// construction: `root` is a deep copy of the chain and of every chain
+	// under it. Chains are shared between validators (one `email` chain in a
+	// "register" and in an "update" schema) and their rule methods mutate, so
+	// reading the caller's chains at each run let a later
+	// `allowUnknownProperties()` or a rule added to a shared chain reach a
+	// validator already built. It also let the two engines disagree, since
+	// what picks the engine was computed once and the chains were read live.
+	const root = declared.snapshot();
+	const compiledFields = root.getProperties() ?? {};
 	// Computed once at construction time, not per validate() call. The engine
 	// validates a field map, so a root carrying anything of its own stays off it.
 	const hasCustomRules =
-		!root.isBareObjectShape || detectHasCustomRules(fields);
+		!root.isBareObjectShape || detectHasCustomRules(compiledFields);
 	// Any chain carrying async rules (`unique`/`exists`/`useAsync`) forces callers
 	// onto the async path — the sync path throws rather than silently skipping them.
 	const hasAsyncRules = root.hasAsyncRulesDeep;
@@ -1995,12 +2060,45 @@ export function schema(
 			undefined;
 		const native = runNative(data, provider, options);
 		if (native) return native;
-		const { errors, transformed } = root._validateWithTransform(
-			"",
-			data,
-			rootContext(data, provider, options),
-		);
-		return concludeRun(verdict(errors, transformed), data, options);
+		const run = traverse(data, rootContext(data, provider, options));
+		return concludeRun(run.verdict(run.errors), data, options);
+	}
+
+	/**
+	 * Walk the payload through the root chain. The `transform()` callbacks
+	 * wait in `verdict`: they run last, and only once no rule — synchronous
+	 * or awaited — refused anything.
+	 *
+	 * NAMED DEVIATION (stricter): upstream calls a field's transformer as soon
+	 * as that field is valid, even when another field already failed, and
+	 * throws the result away. Here a callback never runs for a payload that
+	 * is refused.
+	 */
+	function traverse(
+		data: unknown,
+		ctx: RunContext,
+		pending?: PendingAsync[],
+	): {
+		errors: ValidationErrorNode[];
+		verdict(errors: ValidationErrorNode[]): ValidationResult<unknown>;
+	} {
+		const walk: Walk = { pending, outputs: [] };
+		let output: unknown;
+		const result = root._validateWithTransform("", data, ctx, walk, {
+			read: () => output,
+			write: (value) => {
+				output = value;
+			},
+		});
+		output = result.transformed;
+		return {
+			errors: result.errors,
+			verdict(errors) {
+				if (errors.length > 0) return { valid: false, errors };
+				for (const applyTransform of walk.outputs) applyTransform();
+				return { valid: true, errors, data: output };
+			},
+		};
 	}
 
 	/**
@@ -2018,7 +2116,7 @@ export function schema(
 			validationTranslator ||
 			provider ||
 			!isPlainObject(data) ||
-			!fitsNativeParser(fields, data)
+			!fitsNativeParser(compiledFields, data)
 		) {
 			return null;
 		}
@@ -2026,19 +2124,20 @@ export function schema(
 		// what must run it. Falling back to the TypeScript validator here made
 		// the verdict depend on whether a binary loaded.
 		assertNativeAvailable();
-		const rust = validateWithRust(fields, data);
+		let rust: ValidationResult<Record<string, unknown>>;
+		try {
+			rust = validateWithRust(compiledFields, data);
+		} catch (error) {
+			// The engine is loaded and could not read THIS request. Its rules
+			// are implemented identically in TypeScript, so the payload gets
+			// its verdict there instead of a thrown error: what a client sends
+			// must never turn a 422 into a 500. A missing engine still throws.
+			if (error instanceof E_RUNE_NAPI_REQUEST_REFUSED) return null;
+			throw error;
+		}
 		// Reported here too: the native path returns before the TS traversal,
 		// and the reporter must not go silent on the fast path.
 		return concludeRun(rust, data, options);
-	}
-
-	/** Shape a root run's errors and output into a result. */
-	function verdict(
-		errors: ValidationErrorNode[],
-		transformed: unknown,
-	): ValidationResult<unknown> {
-		if (errors.length > 0) return { valid: false, errors };
-		return { valid: true, errors, data: transformed };
 	}
 
 	function validateResult(
@@ -2098,17 +2197,18 @@ export function schema(
 		if (native) return native;
 		const rootCtx = rootContext(data, provider, options);
 		const pending: PendingAsync[] = [];
-		const result = root._validateWithTransform("", data, rootCtx, pending);
-		const errors = [...result.errors];
+		const run = traverse(data, rootCtx, pending);
+		const errors = [...run.errors];
 		// The collector already applied the gate at every depth: a chain records
 		// itself only when its own subtree passed and its value is present —
 		// mirrors Lucid skipping a DB rule on an already-invalid or absent field.
 		for (const task of pending) {
-			errors.push(
-				...(await task.chain._runAsyncRules(task.field, task.value, task.ctx)),
+			appendAll(
+				errors,
+				await task.chain._runAsyncRules(task.field, task.value, task.ctx),
 			);
 		}
-		return concludeRun(verdict(errors, result.transformed), data, options);
+		return concludeRun(run.verdict(errors), data, options);
 	}
 
 	async function validateResultAsync(
@@ -2170,8 +2270,8 @@ export function schema(
 		// upstream shape: `{ schema, refs }`. The flat `{ field: { rules } }` map was
 		// rune's own invention, so a consumer written against upstream read undefined.
 		return {
-			schema: introspect(fields),
-			refs: Object.keys(fields),
+			schema: introspect(compiledFields),
+			refs: Object.keys(compiledFields),
 		};
 	}
 
@@ -2189,7 +2289,7 @@ export function schema(
 				? node.data
 				: {};
 		}
-		return chainToJSONSchema(fields, root.allowsUnknown);
+		return chainToJSONSchema(compiledFields, root.allowsUnknown);
 	}
 
 	/**
@@ -2264,8 +2364,10 @@ export function schema(
 		},
 		// ALWAYS a chain, even when the validator was built from a bare field map:
 		// upstream documents `createUserValidator.schema.partial()`, and returning
-		// the map left that broken on the most common Adonis path.
-		schema: root,
+		// the map left that broken on the most common Adonis path. It is the
+		// chain the validator was built FROM, as upstream: changing it later
+		// does not change this validator.
+		schema: declared,
 		"~standard": standard,
 		toJSON,
 		toJSONSchema,
@@ -2402,10 +2504,22 @@ export class RuleChain<Output = unknown> {
 	 * array for the same schema. `.bail(false)` restores the exhaustive mode.
 	 */
 	#bail = true;
+	/**
+	 * The built-in mutators (`trim`, `escape`, `normalizeEmail`, the date
+	 * parse…). They run after the type rule and BEFORE the value rules, which
+	 * judge the mutated value.
+	 */
 	#transforms: Array<{
 		name: string;
 		fn: (value: unknown, field: FieldContext) => unknown;
 	}> = [];
+	/**
+	 * The `transform()` callbacks. They run LAST, on the validated value of a
+	 * payload that passed every rule (upstream order): no rule ever judges
+	 * their result, and they never receive a value a rule refused.
+	 */
+	#outputTransforms: Array<(value: unknown, field: FieldContext) => unknown> =
+		[];
 	#preTransforms: Array<(value: unknown, ctx: ParseContext) => unknown> = [];
 	/**
 	 * Type coercions (upstream accepts `"32"` for a number). Kept OUT of
@@ -2465,6 +2579,12 @@ export class RuleChain<Output = unknown> {
 		fn: (value: unknown, field: FieldContext) => unknown;
 	}> {
 		return this.#transforms;
+	}
+	/** Public read access to the `transform()` callbacks (kept off the native path). */
+	get outputTransforms(): ReadonlyArray<
+		(value: unknown, field: FieldContext) => unknown
+	> {
+		return this.#outputTransforms;
 	}
 	/** Public read access to `.use()` rules (used to keep such schemas off the native path). */
 	get useRules(): readonly CompiledRule[] {
@@ -2536,6 +2656,7 @@ export class RuleChain<Output = unknown> {
 			this.#useRules.length === 0 &&
 			this.#asyncRules.length === 0 &&
 			this.#transforms.length === 0 &&
+			this.#outputTransforms.length === 0 &&
 			this.#preTransforms.length === 0 &&
 			this.#coercions.length === 0 &&
 			!this.#isOptional &&
@@ -2590,6 +2711,7 @@ export class RuleChain<Output = unknown> {
 		next.#isNullable = this.#isNullable;
 		next.#bail = this.#bail;
 		next.#transforms = [...this.#transforms];
+		next.#outputTransforms = [...this.#outputTransforms];
 		next.#dateFormats = this.#dateFormats;
 		next.#coercions = [...this.#coercions];
 		next.#allowUnknown = this.#allowUnknown;
@@ -2642,23 +2764,80 @@ export class RuleChain<Output = unknown> {
 		return copy === undefined ? last : { kind: "value", ref: copy };
 	}
 
-	/** Mark field as optional (absent / `undefined` allowed). */
+	/**
+	 * A deep copy: this chain and every chain under it (object properties,
+	 * array items, record values, tuple positions, union and group branches).
+	 * A validator keeps one, so nothing done later to the chains it was built
+	 * from reaches it. `seen` maps each chain to its copy, so a chain used in
+	 * several places is copied once.
+	 * @internal
+	 */
+	snapshot(seen: Map<RuleChain, RuleChain> = new Map()): RuleChain {
+		const known = seen.get(this);
+		if (known !== undefined) return known;
+		const next = this.#retype<unknown>();
+		seen.set(this, next);
+		const copy = (chain: RuleChain): RuleChain => chain.snapshot(seen);
+		const copyShape = (
+			shape: Record<string, RuleChain>,
+		): Record<string, RuleChain> =>
+			Object.fromEntries(
+				Object.entries(shape).map(([key, chain]) => [key, copy(chain)]),
+			);
+		if (this.#nestedSchema) next.#nestedSchema = copyShape(this.#nestedSchema);
+		if (this.#arrayItemChain) {
+			next.#arrayItemChain = copy(this.#arrayItemChain);
+		}
+		if (this.#recordValueChain) {
+			next.#recordValueChain = copy(this.#recordValueChain);
+		}
+		if (this.#tupleChains) next.#tupleChains = this.#tupleChains.map(copy);
+		if (this.#unionChains) {
+			next.#unionChains = this.#unionChains.map((branch) => ({
+				predicate: branch.predicate,
+				chain: copy(branch.chain),
+			}));
+		}
+		next.#groups = this.#groups.map((grp) =>
+			buildGroup(
+				grp.branches.map((branch) => ({
+					predicate: branch.predicate,
+					shape: copyShape(branch.shape),
+				})),
+				grp.noMatch,
+			),
+		);
+		return next;
+	}
+
+	/**
+	 * A copy of this chain that also accepts an absent value (`undefined`).
+	 *
+	 * The three presence modifiers return a NEW chain and leave this one as it
+	 * was, as upstream's do: `email.optional()` in an "update" schema must not
+	 * make `email` optional in the "register" schema that shares the chain.
+	 * The rule methods (`email()`, `minLength()`…) still add to the chain they
+	 * are called on and return it, as upstream's do.
+	 */
 	optional(): RuleChain<Output | undefined> {
-		this.#isOptional = true;
-		return this;
+		const next = this.#retype<Output | undefined>();
+		next.#isOptional = true;
+		return next;
 	}
 
-	/** Mark field as nullable (`null` allowed, kept in the output). */
+	/** A copy of this chain that also accepts `null`, kept in the output. */
 	nullable(): RuleChain<Output | null> {
-		this.#isNullable = true;
-		return this;
+		const next = this.#retype<Output | null>();
+		next.#isNullable = true;
+		return next;
 	}
 
-	/** Mark field as both optional and nullable. */
+	/** A copy of this chain that is both optional and nullable. */
 	nullish(): RuleChain<Output | null | undefined> {
-		this.#isOptional = true;
-		this.#isNullable = true;
-		return this;
+		const next = this.#retype<Output | null | undefined>();
+		next.#isOptional = true;
+		next.#isNullable = true;
+		return next;
 	}
 
 	/** Stop at the first failing rule for this field (upstream bail). */
@@ -3055,16 +3234,13 @@ export class RuleChain<Output = unknown> {
 		if (this.#groups.length > 0 || this.#allowUnknown) {
 			throw new E_RUNE_PARTIAL_NOT_APPLICABLE();
 		}
-		// `optional()` mutates and returns the SAME chain, so calling it on the
-		// stored properties made the source shape optional too — `base.partial()`
-		// silently relaxed `base`. Clone each property first, like upstream does.
+		// `optional()` returns a copy, so the source shape keeps its presence
+		// rules: `base.partial()` does not relax `base`.
 		return this.#reshape((shape) =>
 			Object.fromEntries(
 				Object.entries(shape).map(([key, chain]) => [
 					key,
-					keys === undefined || keys.includes(key)
-						? chain.clone().optional()
-						: chain,
+					keys === undefined || keys.includes(key) ? chain.optional() : chain,
 				]),
 			),
 		);
@@ -3645,9 +3821,10 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Must be a valid URL (TS-only — uses the WHATWG URL parser). With or
-	 * without options it is the same check, with validator.js's defaults:
-	 * http/https/ftp, a dotted host, no `_` in it, the scheme optional.
+	 * Must be a valid URL (TS-only) — validator.js's `isURL`, with its options
+	 * and its defaults: http/https/ftp, a host with a TLD, no `_` in it, the
+	 * scheme optional. The scheme is read from the value as written, so a
+	 * `javascript:` URL is refused whatever follows it.
 	 */
 	url(options?: UrlOptions): this {
 		this.#pushRule({
@@ -3904,14 +4081,18 @@ export class RuleChain<Output = unknown> {
 		);
 	}
 
-	/** Must differ from a sibling field (upstream `notSameAs`). */
+	/**
+	 * Must differ from a sibling field (upstream `notSameAs`). On a `number()`
+	 * or `boolean()` chain the sibling is coerced like the field before the
+	 * two are compared.
+	 */
 	notSameAs(otherField: string): this {
 		const formats = this.#dateFormats;
 		const ruleName = this.#namespaced("notSameAs", DATE_OWNER);
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
-				const other = readSibling(field, otherField);
+				const other = this.#coerced(readSibling(field, otherField));
 				if (formats !== null && value instanceof Date) {
 					const parsed = parseDateValue(other, formats);
 					if (parsed !== null && parsed.getTime() === value.getTime()) {
@@ -3937,7 +4118,12 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Array items must be unique — optionally compared on `fields` (upstream `distinct`). */
+	/**
+	 * Array items must be unique — optionally compared on `fields` (upstream
+	 * `distinct`). Items are compared as the item chain will read them: under
+	 * `array(number())`, `"7"` and `7` are one value. Compared on `fields`, a
+	 * number or a boolean and its text spelling are one value, as upstream.
+	 */
 	distinct(field?: string | string[]): this {
 		this.#pushRule({
 			name: "distinct",
@@ -3948,6 +4134,7 @@ export class RuleChain<Output = unknown> {
 			validate: (v) => {
 				if (!Array.isArray(v)) return false;
 				const fieldList = field === undefined ? null : [field].flat();
+				const items = this.#arrayItemChain;
 				const keys: string[] = [];
 				for (const item of v) {
 					// upstream ignores null/undefined items entirely: `[1, null, 2, null]`
@@ -3955,7 +4142,9 @@ export class RuleChain<Output = unknown> {
 					// duplicate of the first.
 					if (item === null || item === undefined) continue;
 					if (fieldList === null) {
-						keys.push(JSON.stringify(item));
+						// The raw items are judged here, before the item chain coerces
+						// them: without this, `["7", 7]` was distinct and came out `[7, 7]`.
+						keys.push(JSON.stringify(items ? items.#coerced(item) : item));
 						continue;
 					}
 					if (!isPlainObject(item)) continue;
@@ -3966,7 +4155,7 @@ export class RuleChain<Output = unknown> {
 					) {
 						continue;
 					}
-					keys.push(JSON.stringify(fieldList.map((k) => item[k])));
+					keys.push(JSON.stringify(fieldList.map((k) => distinctKey(item[k]))));
 				}
 				return new Set(keys).size === keys.length;
 			},
@@ -4246,7 +4435,13 @@ export class RuleChain<Output = unknown> {
 			args: { digits },
 			validate: (v) => {
 				if (typeof v !== "number" || !Number.isFinite(v)) return false;
-				const places = String(v).split(".")[1]?.length ?? 0;
+				// Only plain decimal notation is counted, as upstream's `isDecimal`
+				// reads it. JavaScript prints a number below 1e-6 (or from 1e21 up)
+				// with an exponent, and `1e-7` has no "." to count digits after:
+				// it passed `decimal(2)` with seven decimal places.
+				const plain = /^-?\d+(?:\.(\d+))?$/.exec(String(v));
+				if (plain === null) return false;
+				const places = plain[1]?.length ?? 0;
 				return places >= min && places <= max;
 			},
 			message: Array.isArray(digits)
@@ -4256,14 +4451,18 @@ export class RuleChain<Output = unknown> {
 		return this;
 	}
 
-	/** Must equal a sibling field (upstream `sameAs`). Cross-field → TS-only. */
+	/**
+	 * Must equal a sibling field (upstream `sameAs`). Cross-field → TS-only. On
+	 * a `number()` or `boolean()` chain the sibling is coerced like the field
+	 * before the two are compared.
+	 */
 	sameAs(otherField: string): this {
 		const formats = this.#dateFormats;
 		const ruleName = this.#namespaced("sameAs", DATE_OWNER);
 		this.#pushUse({
 			__rune: "rule",
 			run: (value, field) => {
-				const other = readSibling(field, otherField);
+				const other = this.#coerced(readSibling(field, otherField));
 				// On a date chain the value is a parsed `Date` and the sibling is
 				// still raw, so `!==` would compare a Date to a string and always
 				// fail. Compare instants instead.
@@ -4296,7 +4495,7 @@ export class RuleChain<Output = unknown> {
 				// deprecated alias, kept so existing callers keep working.
 				const other =
 					options?.as ?? options?.confirmationField ?? `${leaf}_confirmation`;
-				if (value !== readSibling(field, other)) {
+				if (value !== this.#coerced(readSibling(field, other))) {
 					// upstream reports on the CONFIRMATION field: that is the input the
 					// user has to fix, and where a form renders the message.
 					const prefix = field.field.slice(0, -leaf.length);
@@ -4310,6 +4509,21 @@ export class RuleChain<Output = unknown> {
 			},
 		});
 		return this;
+	}
+
+	/**
+	 * A sibling's raw value, coerced the way this chain coerces its own.
+	 *
+	 * The cross-field rules compare the field AFTER coercion with a sibling
+	 * read off the raw parent. On a `number()` chain that set `7` against
+	 * `"7"`: `notSameAs` passed for two equal fields as soon as one arrived as
+	 * a string, which is how a form sends both. A sibling the coercion cannot
+	 * read is left as it is, and so compares as different.
+	 */
+	#coerced(sibling: unknown): unknown {
+		let value = sibling;
+		for (const coerce of this.#coercions) value = coerce(value);
+		return value;
 	}
 
 	/** Required only when `otherField` is present (non-null) — else optional. */
@@ -4349,17 +4563,34 @@ export class RuleChain<Output = unknown> {
 	}
 
 	/**
-	 * Post-validation transform changing the output type (upstream `transform`).
+	 * Change the validated value into the output (upstream `transform`).
+	 *
+	 * The callback runs LAST: after the type rule, the mutators, every value
+	 * rule, the `use()` rules, the async rules and the children of a
+	 * container, and only when the whole payload is valid. So a rule never
+	 * judges what the callback returns — `number().max(100).transform((n) =>
+	 * n / 100)` refuses 5000 — and the callback never receives a value a rule
+	 * refused. A rule added after `transform()` still judges the value before
+	 * it. To change a value BEFORE it is validated, use {@link parse}.
+	 *
 	 * `value` is `unknown` — narrow it in the callback (the no-cast rule forbids
 	 * lying about a dynamically-produced value's static type).
+	 *
+	 * NAMED DEVIATION — the callback is not called for `null` on a
+	 * `nullable()` chain: the output is `null`. Upstream calls it with `null`
+	 * there, which a callback written for the declared type does not expect.
 	 */
 	transform<U>(fn: (value: unknown, field: FieldContext) => U): RuleChain<U> {
 		const next = this.#retype<U>();
-		next.#transforms.push({ name: "transform", fn: (v, f) => fn(v, f) });
+		next.#outputTransforms.push((value, field) => fn(value, field));
 		return next;
 	}
 
-	/** Pre-validation transform of the raw input (upstream `parse`). */
+	/**
+	 * Change the raw input before anything is checked (upstream `parse`): the
+	 * callback runs first, before the presence check and the type rule, so it
+	 * must test what it receives. Every rule then judges what it returns.
+	 */
 	parse(fn: (value: unknown, ctx: ParseContext) => unknown): this {
 		this.#preTransforms.push(fn);
 		return this;
@@ -4667,17 +4898,26 @@ export class RuleChain<Output = unknown> {
 	/**
 	 * Internal: validate a field value and return errors + transformed value.
 	 *
-	 * `pending` is the async-rule collector. The traversal itself stays sync (it
-	 * is shared with `validate()`); when a collector is supplied, every chain in
-	 * the tree that carries async rules and passed its sync rules records itself
-	 * for the async path to await. Without it, nested async rules never ran.
+	 * The order is upstream's: `parse()` → presence (`optional`/`nullable`) →
+	 * coercion and type rule → mutators → value rules and `use()` rules (bail)
+	 * → children, only when the container itself is valid → async rules →
+	 * `transform()` at output.
+	 *
+	 * `walk.pending` is the async-rule collector. The traversal itself stays
+	 * sync (it is shared with `validateResult()`); when a collector is
+	 * supplied, every chain in the tree that carries async rules and passed its
+	 * sync rules records itself for the async path to await. `walk.outputs`
+	 * collects the `transform()` callbacks the same way, and `slot` is where
+	 * this chain's output sits in its parent, for its callback to replace.
 	 */
 	_validateWithTransform(
 		field: string,
 		rawValue: unknown,
 		ctx: RunContext = EMPTY_RUN_CONTEXT,
-		pending?: PendingAsync[],
+		walk: Walk = { outputs: [] },
+		slot?: OutputSlot,
 	): { errors: ValidationErrorNode[]; transformed: unknown } {
+		const pending = walk.pending;
 		// 0. Pre-validation parse() transforms run on the raw value first. upstream
 		//    hands them `(value, { data, parent, meta })` — without the context a
 		//    parser cannot look at a sibling, which is half its purpose.
@@ -4732,7 +4972,8 @@ export class RuleChain<Output = unknown> {
 		const typeError = this.#runTypeRules(field, value, ctx);
 		if (typeError) return { errors: [typeError], transformed: value };
 
-		// 2. Apply transforms (trim, etc.), then run value rules on the result.
+		// 2. Apply the mutators (trim, etc.), then run value rules on the result.
+		//    `transform()` callbacks are NOT among them: they run at output.
 		let transformed = this.#applyTransformsTo(value, field, ctx);
 		const errors = this.#runValueRules(field, transformed, ctx);
 
@@ -4754,7 +4995,85 @@ export class RuleChain<Output = unknown> {
 			transformed = dateOutputTransform(transformed);
 		}
 
-		// 4. Nested object validation (only if type check passed — not arrays)
+		// 3c. A record's key check is a rule of the record itself (upstream
+		//     `validateKeys`), so it runs before the values are looked at.
+		if (
+			this.#recordKeysCheck &&
+			isPlainObject(transformed) &&
+			!(this.#bail && errors.length > 0)
+		) {
+			this.#recordKeysCheck(
+				Object.keys(transformed),
+				this.#makeFieldContext(field, transformed, ctx, errors, () => {}),
+			);
+		}
+
+		// 4. Children — properties, record values, tuple positions, union
+		//    branches, array items — are walked only under a container that
+		//    passed its own rules, as upstream's compiled code does
+		//    (`if (field.isValid) { … }` around the children, in bail mode). An
+		//    array over its `maxLength` is already refused: validating each of
+		//    its items, and queueing one database lookup per item, would let
+		//    the client decide how much work a refused request costs.
+		//    `bail(false)` walks them anyway, as upstream.
+		if (!(this.#bail && errors.length > 0)) {
+			transformed = this.#walkChildren(
+				field,
+				transformed,
+				ctx,
+				walk,
+				errors,
+				slot,
+			);
+		}
+
+		// 5. Record this chain's async rules for the async path to await. Mirrors
+		//    Lucid skipping a DB rule on an already-invalid or absent field: only a
+		//    clean, present value is worth a round-trip.
+		if (
+			pending &&
+			this.#asyncRules.length > 0 &&
+			errors.length === 0 &&
+			transformed !== undefined &&
+			transformed !== null
+		) {
+			pending.push({ chain: this, field, value: transformed, ctx });
+		}
+
+		// 6. `transform()` — at output. Queued after this chain's children, so
+		//    a container's callback sees its children's final values, and run
+		//    by the caller once the sync AND async rules of the payload passed.
+		if (
+			slot &&
+			this.#outputTransforms.length > 0 &&
+			errors.length === 0 &&
+			transformed !== undefined &&
+			transformed !== null
+		) {
+			walk.outputs.push(() => {
+				slot.write(this.#applyOutputTransforms(slot.read(), field, ctx));
+			});
+		}
+
+		return { errors, transformed };
+	}
+
+	/**
+	 * Validate what a container holds and build its output. Returns the
+	 * output; the children's errors are added to `errors`. `slot` is this
+	 * chain's own: a union branch validates the same field and writes there.
+	 */
+	#walkChildren(
+		field: string,
+		value: unknown,
+		ctx: RunContext,
+		walk: Walk,
+		errors: ValidationErrorNode[],
+		slot: OutputSlot | undefined,
+	): unknown {
+		let transformed = value;
+
+		// Nested object validation (only if type check passed — not arrays)
 		if (this.#nestedSchema && isPlainObject(transformed)) {
 			// Start from the DECLARED keys only. Spreading the input kept every
 			// undeclared key, so the mass-assignment guarantee that holds at the
@@ -4767,12 +5086,16 @@ export class RuleChain<Output = unknown> {
 			// A conditional group contributes its branch's properties for THIS
 			// payload, so the shape is resolved per validation, not at build time.
 			let shape = this.#nestedSchema;
+			// A group none of whose branches applies REFUSES the object
+			// (upstream `unionGroup`). Adding nothing and reporting nothing let
+			// a payload through without any of the fields every branch requires.
+			const unmatched: ConditionalGroup[] = [];
 			for (const grp of this.#groups) {
 				const branch =
-					grp.branches.find(
-						(candidate) => candidate.predicate?.(source) === true,
-					) ?? grp.branches.find((candidate) => candidate.predicate === null);
+					grp.branches.find((candidate) => candidate.predicate?.(source)) ??
+					grp.branches.find((candidate) => candidate.predicate === null);
 				if (branch) shape = { ...shape, ...branch.shape };
+				else unmatched.push(grp);
 			}
 			if (this.#denyUnknown) {
 				const declared = new Set(Object.keys(shape));
@@ -4793,17 +5116,36 @@ export class RuleChain<Output = unknown> {
 				}
 			}
 			for (const [nestedField, chain] of Object.entries(shape)) {
+				const outputKey = this.#camelCaseKeys
+					? toCamelCaseKey(nestedField)
+					: nestedField;
 				const nestedResult = chain._validateWithTransform(
 					childPath(field, nestedField),
 					source[nestedField],
 					{ ...ctx, parent: source },
-					pending,
+					walk,
+					{
+						read: () => obj[outputKey],
+						write: (output) => {
+							obj[outputKey] = output;
+						},
+					},
 				);
-				errors.push(...nestedResult.errors);
+				appendAll(errors, nestedResult.errors);
 				if (nestedResult.transformed !== undefined) {
-					obj[this.#camelCaseKeys ? toCamelCaseKey(nestedField) : nestedField] =
-						nestedResult.transformed;
+					obj[outputKey] = nestedResult.transformed;
 				}
+			}
+			// After the properties, as upstream orders its errors.
+			for (const grp of unmatched) {
+				this.#reportNoMatch(
+					grp.noMatch,
+					"unionGroup",
+					field,
+					source,
+					ctx,
+					errors,
+				);
 			}
 			if (this.#allowUnknown) {
 				// Only the UNDECLARED keys move, as they are (upstream's
@@ -4831,15 +5173,7 @@ export class RuleChain<Output = unknown> {
 			}
 		}
 
-		// 4b. Record values — same shape as the nested-object walk, arbitrary keys.
-		if (this.#recordKeysCheck && isPlainObject(transformed)) {
-			// Keys first: a key-level rule that rejects the shape makes the
-			// per-value errors that would follow noise.
-			this.#recordKeysCheck(
-				Object.keys(transformed),
-				this.#makeFieldContext(field, transformed, ctx, errors, () => {}),
-			);
-		}
+		// Record values — same shape as the nested-object walk, arbitrary keys.
 		if (this.#recordValueChain && isPlainObject(transformed)) {
 			const obj: Record<string, unknown> = copyWithoutProtoKey(transformed);
 			transformed = obj;
@@ -4848,14 +5182,20 @@ export class RuleChain<Output = unknown> {
 					childPath(field, key),
 					obj[key],
 					{ ...ctx, parent: obj },
-					pending,
+					walk,
+					{
+						read: () => obj[key],
+						write: (output) => {
+							obj[key] = output;
+						},
+					},
 				);
-				errors.push(...res.errors);
+				appendAll(errors, res.errors);
 				if (res.transformed !== undefined) obj[key] = res.transformed;
 			}
 		}
 
-		// 4c. Tuple positions — length was already enforced by the `tuple` rule.
+		// Tuple positions — length was already enforced by the `tuple` rule.
 		if (this.#tupleChains && Array.isArray(transformed)) {
 			const arr: unknown[] = [...transformed];
 			transformed = arr;
@@ -4864,91 +5204,34 @@ export class RuleChain<Output = unknown> {
 					childPath(field, i),
 					arr[i],
 					{ ...ctx, parent: arr },
-					pending,
+					walk,
+					{
+						read: () => arr[i],
+						write: (output) => {
+							arr[i] = output;
+						},
+					},
 				);
 				for (const e of res.errors) if (e.index === undefined) e.index = i;
-				errors.push(...res.errors);
+				appendAll(errors, res.errors);
 				if (res.transformed !== undefined) arr[i] = res.transformed;
 			});
 		}
 
-		// 4d. Union — first branch that validates wins; its transform is kept.
+		// Union — the branch's output is this chain's output.
 		if (this.#unionChains) {
-			let matched = false;
-			// A guarded branch (union.if) is SELECTED by its predicate, and its own
-			// errors are reported — that is the diagnosable half of upstream's union.
-			const guarded = this.#unionChains.filter((b) => b.predicate !== null);
-			if (guarded.length > 0) {
-				const probe = this.#makeFieldContext(
-					field,
-					transformed,
-					ctx,
-					[],
-					() => {},
-				);
-				const chosen =
-					guarded.find((b) => b.predicate?.(transformed, probe)) ??
-					this.#unionChains.find((b) => b.predicate === null);
-				if (chosen) {
-					const res = chosen.chain._validateWithTransform(
-						field,
-						transformed,
-						ctx,
-						pending,
-					);
-					transformed = res.transformed;
-					errors.push(...res.errors);
-					matched = true;
-				}
-			}
-			for (const branch of matched ? [] : this.#unionChains) {
-				// Each branch collects into its OWN buffer: a losing branch must not
-				// leave async work queued, and the winning one must not lose it —
-				// without this, a `unique()` inside the matching branch was never
-				// awaited, which reads exactly like a check that passed.
-				const branchPending: PendingAsync[] = [];
-				const res = branch.chain._validateWithTransform(
-					field,
-					transformed,
-					ctx,
-					pending ? branchPending : undefined,
-				);
-				if (res.errors.length === 0) {
-					transformed = res.transformed;
-					matched = true;
-					if (pending) pending.push(...branchPending);
-					break;
-				}
-			}
-			if (!matched) {
-				if (this.#unionNoMatch) {
-					// The callback owns the reporting: whatever it pushes is the
-					// error, and pushing nothing means it handled the case itself.
-					const reported: ValidationErrorNode[] = [];
-					this.#unionNoMatch(
-						transformed,
-						this.#makeFieldContext(field, transformed, ctx, reported, () => {}),
-					);
-					errors.push(...reported);
-				} else {
-					errors.push({
-						field,
-						rule: "union",
-						message: resolveRuleMessage(
-							field,
-							{
-								name: "union",
-								validate: () => false,
-								message: "Does not match any allowed shape",
-							},
-							ctx,
-						),
-					});
-				}
-			}
+			transformed = this.#walkUnion(
+				this.#unionChains,
+				field,
+				transformed,
+				ctx,
+				walk,
+				errors,
+				slot,
+			);
 		}
 
-		// 5. Array item validation
+		// Array item validation
 		if (this.#arrayItemChain && Array.isArray(transformed)) {
 			const arr: unknown[] = [...transformed];
 			transformed = arr;
@@ -4957,32 +5240,143 @@ export class RuleChain<Output = unknown> {
 					childPath(field, i),
 					arr[i],
 					{ ...ctx, parent: arr },
-					pending,
+					walk,
+					{
+						read: () => arr[i],
+						write: (output) => {
+							arr[i] = output;
+						},
+					},
 				);
 				for (const e of itemResult.errors) {
 					if (e.index === undefined) e.index = i;
 				}
-				errors.push(...itemResult.errors);
+				appendAll(errors, itemResult.errors);
 				if (itemResult.transformed !== undefined) {
 					arr[i] = itemResult.transformed;
 				}
 			}
 		}
 
-		// 6. Record this chain's async rules for the async path to await. Mirrors
-		//    Lucid skipping a DB rule on an already-invalid or absent field: only a
-		//    clean, present value is worth a round-trip.
-		if (
-			pending &&
-			this.#asyncRules.length > 0 &&
-			errors.length === 0 &&
-			transformed !== undefined &&
-			transformed !== null
-		) {
-			pending.push({ chain: this, field, value: transformed, ctx });
-		}
+		return transformed;
+	}
 
-		return { errors, transformed };
+	/**
+	 * Validate a value against a union and return its output.
+	 *
+	 * A union with at least one guarded branch (`union.if`) is DECIDED by its
+	 * predicates, as upstream compiles it (`if / else if / else`): the first
+	 * branch whose predicate answers true validates the value, else the
+	 * `union.else` branch, else the value is refused. A branch whose predicate
+	 * answered false is never run — the predicate is what keeps that shape
+	 * away from this caller. A union made only of bare chains has no
+	 * predicate to obey: the first chain that validates wins.
+	 *
+	 * The branch validates the same field as the union, so it is handed the
+	 * union's own `slot`: its `transform()` replaces the union's output.
+	 */
+	#walkUnion(
+		branches: readonly ConditionalBranch[],
+		field: string,
+		value: unknown,
+		ctx: RunContext,
+		walk: Walk,
+		errors: ValidationErrorNode[],
+		slot: OutputSlot | undefined,
+	): unknown {
+		const guarded = branches.some((branch) => branch.predicate !== null);
+		if (guarded) {
+			const probe = this.#makeFieldContext(field, value, ctx, [], () => {});
+			const chosen =
+				branches.find((branch) => branch.predicate?.(value, probe)) ??
+				branches.find((branch) => branch.predicate === null);
+			if (chosen === undefined) {
+				this.#reportNoMatch(
+					this.#unionNoMatch,
+					"union",
+					field,
+					value,
+					ctx,
+					errors,
+				);
+				return value;
+			}
+			// The chosen branch's own errors are reported — that is the
+			// diagnosable half of upstream's union.
+			const res = chosen.chain._validateWithTransform(
+				field,
+				value,
+				ctx,
+				walk,
+				slot,
+			);
+			appendAll(errors, res.errors);
+			return res.transformed;
+		}
+		for (const branch of branches) {
+			// Each branch collects into its OWN buffers: a losing branch must not
+			// leave async work or a transform queued, and the winning one must not
+			// lose them — without this, a `unique()` inside the matching branch
+			// was never awaited, which reads exactly like a check that passed.
+			const attempt: Walk = {
+				pending: walk.pending ? [] : undefined,
+				outputs: [],
+			};
+			const res = branch.chain._validateWithTransform(
+				field,
+				value,
+				ctx,
+				attempt,
+				slot,
+			);
+			if (res.errors.length === 0) {
+				if (walk.pending && attempt.pending) {
+					appendAll(walk.pending, attempt.pending);
+				}
+				appendAll(walk.outputs, attempt.outputs);
+				return res.transformed;
+			}
+		}
+		this.#reportNoMatch(this.#unionNoMatch, "union", field, value, ctx, errors);
+		return value;
+	}
+
+	/**
+	 * Report that no branch of a union or of a group applies: through the
+	 * `otherwise()` callback when there is one, else with the generic error.
+	 */
+	#reportNoMatch(
+		callback: UnionNoMatchCallback | null,
+		rule: "union" | "unionGroup",
+		field: string,
+		value: unknown,
+		ctx: RunContext,
+		errors: ValidationErrorNode[],
+	): void {
+		if (callback) {
+			// The callback owns the reporting: whatever it pushes is the
+			// error, and pushing nothing means it handled the case itself.
+			const reported: ValidationErrorNode[] = [];
+			callback(
+				value,
+				this.#makeFieldContext(field, value, ctx, reported, () => {}),
+			);
+			appendAll(errors, reported);
+			return;
+		}
+		errors.push({
+			field,
+			rule,
+			message: resolveRuleMessage(
+				field,
+				{
+					name: rule,
+					validate: () => false,
+					message: "Does not match any allowed shape",
+				},
+				ctx,
+			),
+		});
 	}
 
 	/** Run `.use()` rules on the transformed value with a fresh FieldContext. */
@@ -5158,9 +5552,25 @@ export class RuleChain<Output = unknown> {
 		return this._validateWithTransform(field, value).errors;
 	}
 
-	/** Internal: apply transforms. */
+	/** Internal: apply the mutators (not the `transform()` callbacks). */
 	_transform(value: unknown): unknown {
 		return this.#applyTransformsTo(value, "", EMPTY_RUN_CONTEXT);
+	}
+
+	/** Run the `transform()` callbacks, in the order they were declared. */
+	#applyOutputTransforms(
+		value: unknown,
+		field: string,
+		ctx: RunContext,
+	): unknown {
+		let result = value;
+		for (const transform of this.#outputTransforms) {
+			result = transform(
+				result,
+				this.#makeFieldContext(field, result, ctx, [], () => {}),
+			);
+		}
+		return result;
 	}
 
 	#applyTransformsTo(value: unknown, field: string, ctx: RunContext): unknown {
@@ -5208,6 +5618,19 @@ function sizedLength(value: unknown): number {
 	return -1;
 }
 
+/**
+ * What `distinct` compares a property on. Upstream joins the values as text,
+ * so a number or a boolean and its text spelling (`7` and `"7"`) are one
+ * value: an item sent twice under two wire types is still a duplicate.
+ */
+function distinctKey(value: unknown): unknown {
+	return typeof value === "number" ||
+		typeof value === "boolean" ||
+		typeof value === "bigint"
+		? String(value)
+		: value;
+}
+
 /** Read a sibling field's value from the immediate parent (object only). */
 function readSibling(field: FieldContext, name: string): unknown {
 	const parent = field.parent;
@@ -5234,27 +5657,54 @@ function evalRequiredCondition(
 		case "!=":
 			return other !== cond.value;
 		case ">":
-			return typeof other === "number" && typeof cond.value === "number"
-				? other > cond.value
-				: false;
+			return relational(other, cond.value, (a, b) => a > b);
 		case "<":
-			return typeof other === "number" && typeof cond.value === "number"
-				? other < cond.value
-				: false;
+			return relational(other, cond.value, (a, b) => a < b);
 		case ">=":
-			return typeof other === "number" && typeof cond.value === "number"
-				? other >= cond.value
-				: false;
+			return relational(other, cond.value, (a, b) => a >= b);
 		case "<=":
-			return typeof other === "number" && typeof cond.value === "number"
-				? other <= cond.value
-				: false;
+			return relational(other, cond.value, (a, b) => a <= b);
 		case "in":
 			return Array.isArray(cond.value) && cond.value.includes(other);
 		case "notIn":
 			return Array.isArray(cond.value) && !cond.value.includes(other);
 		default:
 			return false;
+	}
+}
+
+/**
+ * JavaScript's ordering of two values of any type — what upstream's
+ * `requiredWhen` gets from the bare operator (`value < expectedValue`).
+ *
+ * Two strings compare as strings; anything else compares as numbers, so the
+ * `"17"` a form, a multipart body or a query string carries is below `18`.
+ * Requiring both sides to be numbers answered "not required" for every such
+ * body. A side with no numeric reading is `NaN`, for which every ordering is
+ * false, as in JavaScript.
+ */
+function relational(
+	left: unknown,
+	right: unknown,
+	compare: (a: number | string, b: number | string) => boolean,
+): boolean {
+	if (typeof left === "string" && typeof right === "string") {
+		return compare(left, right);
+	}
+	return compare(numericValue(left), numericValue(right));
+}
+
+/**
+ * `Number(value)`, for any value. An object that has no primitive form (one
+ * with no prototype) is `NaN` here; `Number()` throws on it.
+ */
+function numericValue(value: unknown): number {
+	if (typeof value === "number") return value;
+	if (typeof value === "symbol") return Number.NaN;
+	try {
+		return Number(value);
+	} catch {
+		return Number.NaN;
 	}
 }
 
@@ -5407,9 +5857,18 @@ function enumChain(
 const NATIVE_MAX_DEPTH = 64;
 
 /**
+ * A lone UTF-16 surrogate. With the `u` flag a paired surrogate is read as
+ * one code point and does not match, so this only finds unpaired ones.
+ */
+const LONE_SURROGATE_RE = /\p{Surrogate}/u;
+
+/**
  * Can the engine's parser take every declared value of this payload?
  *
- * A deeper value is validated on the TypeScript path instead — the rules a
+ * Two things it cannot: a value nested deeper than its limit, and a string or
+ * an object key holding a lone surrogate (`"\ud800"` is valid JSON, and
+ * `JSON.stringify` writes it back as an escape the engine's parser refuses).
+ * Such a payload is validated on the TypeScript path instead — the rules a
  * native-eligible schema carries are implemented identically there, so the
  * verdict is the same, and the caller gets a verdict rather than a parse
  * error from inside the engine. Iterative, so the check itself cannot
@@ -5424,13 +5883,20 @@ function fitsNativeParser(
 		.map((field) => ({ value: data[field], depth: 1 }));
 	for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
 		const { value, depth } = next;
+		if (typeof value === "string") {
+			if (LONE_SURROGATE_RE.test(value)) return false;
+			continue;
+		}
 		if (typeof value !== "object" || value === null) continue;
 		if (depth > NATIVE_MAX_DEPTH) return false;
-		const children: unknown[] = Array.isArray(value)
-			? value
-			: Object.values(value);
-		for (const child of children)
+		if (Array.isArray(value)) {
+			for (const child of value) stack.push({ value: child, depth: depth + 1 });
+			continue;
+		}
+		for (const [key, child] of Object.entries(value)) {
+			if (LONE_SURROGATE_RE.test(key)) return false;
 			stack.push({ value: child, depth: depth + 1 });
+		}
 	}
 	return true;
 }

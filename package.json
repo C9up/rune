@@ -9,9 +9,9 @@
   "files": [
     "LICENSE",
     "LICENSE-THIRD-PARTY.md",
+    "THIRD-PARTY-NOTICES.md",
     "README.md",
     "dist",
-    "index.*.node",
     "src"
   ],
   "scripts": {
@@ -20,6 +20,8 @@
     "build:rust": "cargo build --release -p rune-engine-napi",
     "build:napi": "pnpm build:rust && pnpm build:napi-types && node scripts/copy-napi.mjs",
     "build:napi-types": "node scripts/build-napi-types.mjs",
+    "platforms:sync": "node scripts/platform-packages.mjs",
+    "platforms:check": "node scripts/platform-packages.mjs --check",
     "test": "vitest run",
     "test:rust": "cargo test -p rune-engine",
     "lint": "biome check src/ tests/",
@@ -30,6 +32,13 @@
   },
   "dependencies": {
     "@c9up/flare": "^0.1.0"
+  },
+  "optionalDependencies": {
+    "@c9up/rune-linux-x64-gnu": "0.2.5",
+    "@c9up/rune-linux-arm64-gnu": "0.2.5",
+    "@c9up/rune-darwin-x64": "0.2.5",
+    "@c9up/rune-darwin-arm64": "0.2.5",
+    "@c9up/rune-win32-x64-msvc": "0.2.5"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",

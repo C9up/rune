@@ -208,9 +208,12 @@ export const E_RUNE_NOT_A_REGULAR_FILE = createError<[string]>(
 	"E_RUNE_NOT_A_REGULAR_FILE",
 );
 
-/** The Rust validation engine could not be loaded. */
+/**
+ * The Rust validation engine could not be loaded. The value is what to do
+ * about it; the load error is the `cause`.
+ */
 export const E_RUNE_NAPI_NOT_FOUND = createError<[string]>(
-	"Rust validation engine not available: %s",
+	"Rust validation engine not available.\n  Fix: %s",
 	"E_RUNE_NAPI_NOT_FOUND",
 );
 
@@ -238,10 +241,12 @@ export const E_RUNE_NAPI_INVALID_RESPONSE = createError(
 	"E_RUNE_NAPI_INVALID_RESPONSE",
 );
 
-/** A schema needs the Rust engine and it is not there; the value says why. */
+/**
+ * A schema needs the Rust engine and it is not there. The value is what to do
+ * about it; the load error is the `cause`.
+ */
 export const E_RUNE_NAPI_REQUIRED = createError<[string]>(
-	"The Rust validation engine is required but not loaded — %s.\n" +
-		"Install the prebuilt binary for this platform, or build it with `pnpm build:napi`.",
+	"The Rust validation engine is required but not loaded.\n  Fix: %s",
 	"E_RUNE_NAPI_REQUIRED",
 );
 

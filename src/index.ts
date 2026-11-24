@@ -212,10 +212,7 @@ const rune = {
 		/** Make every property of a shape optional (upstream `helpers.optional`). */
 		optional: (props: Record<string, RuleChain>): Record<string, RuleChain> =>
 			Object.fromEntries(
-				Object.entries(props).map(([key, chain]) => [
-					key,
-					chain.clone().optional(),
-				]),
+				Object.entries(props).map(([key, chain]) => [key, chain.optional()]),
 			),
 	},
 	/** One-shot validation, upstream `validate({ schema, data })`. */

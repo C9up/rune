@@ -5,6 +5,9 @@ target/
 target
 dist/
 *.node
+# The publish job copies the licences into each platform package it publishes.
+npm/*/LICENSE
+npm/*/LICENSE-THIRD-PARTY.md
 .env
 .env.local
 .idea/

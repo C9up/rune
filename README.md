@@ -2,6 +2,35 @@
 
 Validation engine for Node.js. Fluent rules, schema validation, transforms.
 
+## Installation
+
+```bash
+pnpm add @c9up/rune
+```
+
+A schema the Rust engine can run is run by it or not at all. Each platform's engine is its own npm package, which `@c9up/rune` lists as an optional dependency at its exact version:
+
+| Platform | Package |
+|---|---|
+| Linux x64 (glibc) | `@c9up/rune-linux-x64-gnu` |
+| Linux arm64 (glibc) | `@c9up/rune-linux-arm64-gnu` |
+| macOS x64 | `@c9up/rune-darwin-x64` |
+| macOS arm64 | `@c9up/rune-darwin-arm64` |
+| Windows x64 | `@c9up/rune-win32-x64-msvc` |
+
+Your package manager installs only the one that matches the machine (`os`, `cpu` and `libc` fields), so an install downloads one binary and needs no Rust toolchain. An install run with optional dependencies omitted (`--no-optional`, `--omit=optional`) skips it. Each platform package carries `LICENSE` and `LICENSE-THIRD-PARTY.md`, like this one.
+
+If the engine is missing, validating a schema throws `E_RUNE_NAPI_REQUIRED`, naming the package to install:
+
+```text
+The Rust validation engine is required but not loaded.
+  Fix: install @c9up/rune-linux-x64-gnu at the exact version of @c9up/rune: ...
+```
+
+The load error itself is the exception's `cause`.
+
+In a checkout of this repository, `pnpm build:napi` builds `index.<platform>.node` at the package root, and rune loads that file before looking for the platform package. `node scripts/platform-packages.mjs` rewrites the platform packages' manifests (`npm/<platform>/package.json`) and the optional dependencies after a version bump; CI fails when they are stale.
+
 ## Usage
 
 ```typescript
@@ -27,7 +56,8 @@ const order = await CreateOrder.validate({ total: 42, email: 'a@b.com', name: ' 
 - `.min()`, `.max()`, `.email()`, `.positive()`, `.trim()`, `.optional()`
 - `.custom(name, fn, message)` for custom rules
 - `.message()` to override error messages
-- Transforms applied before validation
+- `.trim()` and the other built-in mutators run before the rules; `.transform()`
+  runs after them, on a valid payload; `.parse()` runs first, on the raw input
 - String lengths (`minLength`, `maxLength`, `fixedLength`, `min`, `max`) count
   characters as Unicode code points: `"😀"` is one character, not two UTF-16
   units — the unit a database column and a JSON Schema `maxLength` count in

@@ -50,11 +50,14 @@ describe("rune > errors.E_RUNE_NAPI_REQUIRED", () => {
 		// This error only ever surfaces on a machine where the binary did not
 		// load, which is exactly the machine whose owner cannot read our source
 		// to find out why. The remedy has to be in the message.
-		const error = new errors.E_RUNE_NAPI_REQUIRED(["binary not found"]);
+		const error = new errors.E_RUNE_NAPI_REQUIRED([
+			"install @c9up/rune-linux-x64-gnu at the exact version of @c9up/rune",
+		]);
 		expect(error.code).toBe("E_RUNE_NAPI_REQUIRED");
-		expect(error.message).toContain("pnpm build:napi");
-		// And a reason, not just a restatement of the failure.
-		expect(error.message).toContain("binary not found");
+		expect(error.message).toBe(
+			"The Rust validation engine is required but not loaded.\n" +
+				"  Fix: install @c9up/rune-linux-x64-gnu at the exact version of @c9up/rune",
+		);
 	});
 });
 
